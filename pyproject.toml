@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "biosnn-py"
-version = "0.1.0"
+version = "0.1.1"
 description = "BioSNN - Py (library-first scaffold for a biologically inspired spiking brain toolkit)"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 license = { file = "LICENSE" }
 authors = [{ name = "Tim Lund" }]
 keywords = ["snn", "spiking", "neuroscience", "neuromorphic", "plasticity", "cuda"]
@@ -39,7 +39,7 @@ packages = ["src/biosnn"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py313"
 src = ["src", "tests"]
 
 [tool.ruff.lint]

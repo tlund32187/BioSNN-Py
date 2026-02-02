@@ -2,19 +2,44 @@
 
 **Policy:** Only symbols re-exported from `biosnn.api` are considered public and semver-stable.
 
-This document is a living log of the intended public façade. For now it’s a scaffold with placeholders.
+This log is the canonical list of the current stable façade.
 
-## Stable façade modules (planned)
-- `biosnn.api.version` — package version and compatibility markers
-- `biosnn.api.deprecations` — standardized deprecation helpers (central policy)
+## Current exports
 
-## Planned “first-class” public concepts (to be refined before coding)
-- Simulation engine entrypoints (build/run/step)
-- Contract types (interfaces/protocols) for neurons/synapses/learning/modulators/monitors
-- Network construction (builders) and configuration DTOs
-- Monitoring and export APIs (CSV/graph/trace)
+### Version
+- `__version__`
 
-## Stability levels
-- **Stable:** can only change with semver MAJOR
-- **Provisional:** may change with semver MINOR (explicitly labeled)
-- **Experimental:** may change any time (not exported from `biosnn.api`)
+### Common
+- `StepContext`
+
+### Neurons
+- `Compartment`
+- `NeuronInputs`
+- `NeuronStepResult`
+- `INeuronModel`
+
+### Synapses
+- `SynapseTopology`
+- `SynapseInputs`
+- `SynapseStepResult`
+- `ISynapseModel`
+
+### Learning
+- `LearningBatch`
+- `LearningStepResult`
+- `ILearningRule`
+
+### Neuromodulators
+- `ModulatorKind`
+- `ModulatorRelease`
+- `IModulatorField`
+
+### Monitoring
+- `StepEvent`
+- `IMonitor`
+
+## Notes
+
+- Neuron-model specific DTOs like `GLIFParams` and `AdEx2CompParams` exist under
+  `biosnn.contracts.neurons` but are **not yet** exported from `biosnn.api` until
+  sign conventions and units are finalized.
