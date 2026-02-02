@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Unit test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type checking
+.mypy_cache/
+
+# Ruff
+.ruff_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# Data / artifacts (keep repo clean)
+artifacts/
+outputs/
+logs/
+data/
+models/

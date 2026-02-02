@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "BioSNN: run (placeholder runner)",
+      "type": "python",
+      "request": "launch",
+      "module": "biosnn.runners.cli",
+      "justMyCode": true
+    },
+    {
+      "name": "Pytest",
+      "type": "python",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "-q"
+      ],
+      "justMyCode": true
+    }
+  ]
+}

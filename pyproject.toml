@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "biosnn-py"
+version = "0.1.0"
+description = "BioSNN - Py (library-first scaffold for a biologically inspired spiking brain toolkit)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Tim Lund" }]
+keywords = ["snn", "spiking", "neuroscience", "neuromorphic", "plasticity", "cuda"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: MIT License",
+]
+
+dependencies = [
+  # Intentionally empty for now (scaffold only).
+  # We'll likely add torch as an optional extra once implementation begins.
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.6.0",
+  "mypy>=1.10.0",
+  "types-setuptools",
+  "pre-commit>=3.7.0",
+]
+# Placeholder for later:
+# torch = ["torch>=2.3.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/biosnn"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]  # allow long docs/strings; formatting handled separately
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+no_implicit_optional = true
+check_untyped_defs = true
+strict_equality = true
+namespace_packages = false
+exclude = ["^build/", "^dist/"]

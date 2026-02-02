@@ -1,0 +1,1 @@
+"""Contracts (interfaces/protocols) placeholder."""
