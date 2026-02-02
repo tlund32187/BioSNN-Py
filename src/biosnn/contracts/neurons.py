@@ -9,10 +9,10 @@ Design goals:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from collections.abc import Mapping
-from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from biosnn.contracts.modulators import ModulatorKind
 

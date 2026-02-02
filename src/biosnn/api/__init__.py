@@ -5,20 +5,6 @@ Internal modules may change without notice.
 """
 
 from biosnn.api.version import __version__
-
-from biosnn.contracts.neurons import (
-    Compartment,
-    INeuronModel,
-    NeuronInputs,
-    NeuronStepResult,
-    StepContext,
-)
-from biosnn.contracts.synapses import (
-    ISynapseModel,
-    SynapseInputs,
-    SynapseStepResult,
-    SynapseTopology,
-)
 from biosnn.contracts.learning import (
     ILearningRule,
     LearningBatch,
@@ -32,6 +18,19 @@ from biosnn.contracts.modulators import (
 from biosnn.contracts.monitors import (
     IMonitor,
     StepEvent,
+)
+from biosnn.contracts.neurons import (
+    Compartment,
+    INeuronModel,
+    NeuronInputs,
+    NeuronStepResult,
+    StepContext,
+)
+from biosnn.contracts.synapses import (
+    ISynapseModel,
+    SynapseInputs,
+    SynapseStepResult,
+    SynapseTopology,
 )
 
 __all__ = [

@@ -6,10 +6,10 @@ providing sampled modulator values at neuron/synapse locations.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from collections.abc import Mapping, Sequence
-from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # pragma: no cover
     import torch

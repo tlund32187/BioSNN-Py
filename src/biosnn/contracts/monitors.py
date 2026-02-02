@@ -6,9 +6,9 @@ compute metrics, or collect debugging artifacts.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections.abc import Mapping
-from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # pragma: no cover
     import torch

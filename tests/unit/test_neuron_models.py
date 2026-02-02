@@ -1,12 +1,13 @@
 import pytest
 
+from biosnn.biophysics.models.adex_2c import AdEx2CompModel
+from biosnn.biophysics.models.glif import GLIFModel
+from biosnn.contracts.neurons import Compartment, NeuronInputs, StepContext
+
+torch = pytest.importorskip("torch")
+
 
 def test_glif_step_shapes():
-    torch = pytest.importorskip("torch")
-
-    from biosnn.biophysics.models.glif import GLIFModel
-    from biosnn.contracts.neurons import Compartment, NeuronInputs, StepContext
-
     model = GLIFModel()
     n = 4
     ctx = StepContext(device="cpu", dtype="float32")
@@ -27,11 +28,6 @@ def test_glif_step_shapes():
 
 
 def test_glif_reset_subset():
-    torch = pytest.importorskip("torch")
-
-    from biosnn.biophysics.models.glif import GLIFModel
-    from biosnn.contracts.neurons import StepContext
-
     model = GLIFModel()
     ctx = StepContext(device="cpu", dtype="float32")
     state = model.init_state(3, ctx=ctx)
@@ -46,11 +42,6 @@ def test_glif_reset_subset():
 
 
 def test_adex2c_step_shapes():
-    torch = pytest.importorskip("torch")
-
-    from biosnn.biophysics.models.adex_2c import AdEx2CompModel
-    from biosnn.contracts.neurons import Compartment, NeuronInputs, StepContext
-
     model = AdEx2CompModel()
     n = 5
     ctx = StepContext(device="cpu", dtype="float32")
@@ -74,11 +65,6 @@ def test_adex2c_step_shapes():
 
 
 def test_adex2c_reset_subset():
-    torch = pytest.importorskip("torch")
-
-    from biosnn.biophysics.models.adex_2c import AdEx2CompModel
-    from biosnn.contracts.neurons import StepContext
-
     model = AdEx2CompModel()
     ctx = StepContext(device="cpu", dtype="float32")
     state = model.init_state(4, ctx=ctx)

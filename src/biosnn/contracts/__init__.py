@@ -4,19 +4,6 @@ This package is *not* the public API surface. Only symbols re-exported from
 :mod:`biosnn.api` are considered semver-stable.
 """
 
-from biosnn.contracts.neurons import (
-    Compartment,
-    INeuronModel,
-    NeuronInputs,
-    NeuronStepResult,
-    StepContext,
-)
-from biosnn.contracts.synapses import (
-    ISynapseModel,
-    SynapseInputs,
-    SynapseStepResult,
-    SynapseTopology,
-)
 from biosnn.contracts.learning import (
     ILearningRule,
     LearningBatch,
@@ -30,6 +17,19 @@ from biosnn.contracts.modulators import (
 from biosnn.contracts.monitors import (
     IMonitor,
     StepEvent,
+)
+from biosnn.contracts.neurons import (
+    Compartment,
+    INeuronModel,
+    NeuronInputs,
+    NeuronStepResult,
+    StepContext,
+)
+from biosnn.contracts.synapses import (
+    ISynapseModel,
+    SynapseInputs,
+    SynapseStepResult,
+    SynapseTopology,
 )
 
 __all__ = [
