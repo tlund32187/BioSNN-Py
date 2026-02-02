@@ -9,13 +9,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
-if TYPE_CHECKING:  # pragma: no cover
-    import torch
-    Tensor = torch.Tensor
-else:  # runtime fallback (avoids importing torch during library import)
-    Tensor = Any
+from biosnn.contracts.tensor import Tensor
 
 
 class ModulatorKind(str, Enum):

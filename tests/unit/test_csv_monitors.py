@@ -1,10 +1,11 @@
 import csv
-import uuid
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from biosnn.contracts.monitors import StepEvent
+from biosnn.contracts.tensor import Tensor
 from biosnn.monitors.csv import AdEx2CompCSVMonitor, GLIFCSVMonitor, NeuronCSVMonitor
 
 
@@ -13,23 +14,19 @@ def _read_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def _artifact_dir() -> Path:
-    base = Path.cwd() / ".pytest_artifacts" / "csv_monitors"
-    base.mkdir(parents=True, exist_ok=True)
-    run_dir = base / uuid.uuid4().hex
-    run_dir.mkdir()
-    return run_dir
+def _as_tensor(values: list[int] | list[float]) -> Tensor:
+    return cast(Tensor, values)
 
 
-def test_neuron_csv_monitor_writes_stats() -> None:
-    path = _artifact_dir() / "neurons.csv"
+def test_neuron_csv_monitor_writes_stats(artifact_dir: Path) -> None:
+    path = artifact_dir / "neurons.csv"
     monitor = NeuronCSVMonitor(path)
 
     event = StepEvent(
         t=0.1,
         dt=0.01,
-        spikes=[0, 1, 1],
-        tensors={"v": [1.0, 2.0, 3.0], "w": [0.0, 0.5, 1.0]},
+        spikes=_as_tensor([0, 1, 1]),
+        tensors={"v": _as_tensor([1.0, 2.0, 3.0]), "w": _as_tensor([0.0, 0.5, 1.0])},
         scalars={"loss": 1.25},
     )
     monitor.on_step(event)
@@ -50,19 +47,19 @@ def test_neuron_csv_monitor_writes_stats() -> None:
     assert float(row["v_max"]) == pytest.approx(3.0)
 
 
-def test_glif_csv_monitor_preset() -> None:
-    path = _artifact_dir() / "glif.csv"
+def test_glif_csv_monitor_preset(artifact_dir: Path) -> None:
+    path = artifact_dir / "glif.csv"
     monitor = GLIFCSVMonitor(path, sample_indices=[1], stats=("mean",))
 
     event = StepEvent(
         t=0.0,
         dt=0.001,
-        spikes=[0, 1, 0],
+        spikes=_as_tensor([0, 1, 0]),
         tensors={
-            "v_soma": [-0.07, -0.05, -0.06],
-            "refrac_left": [0.0, 0.0, 0.002],
-            "spike_hold_left": [0.0, 0.001, 0.0],
-            "theta": [0.0, 0.003, 0.0],
+            "v_soma": _as_tensor([-0.07, -0.05, -0.06]),
+            "refrac_left": _as_tensor([0.0, 0.0, 0.002]),
+            "spike_hold_left": _as_tensor([0.0, 0.001, 0.0]),
+            "theta": _as_tensor([0.0, 0.003, 0.0]),
         },
     )
     monitor.on_step(event)
@@ -74,20 +71,20 @@ def test_glif_csv_monitor_preset() -> None:
     assert float(row["theta_i1"]) == pytest.approx(0.003)
 
 
-def test_adex_csv_monitor_preset() -> None:
-    path = _artifact_dir() / "adex.csv"
+def test_adex_csv_monitor_preset(artifact_dir: Path) -> None:
+    path = artifact_dir / "adex.csv"
     monitor = AdEx2CompCSVMonitor(path, stats=("mean",))
 
     event = StepEvent(
         t=0.2,
         dt=0.001,
-        spikes=[1, 0],
+        spikes=_as_tensor([1, 0]),
         tensors={
-            "v_soma": [-0.06, -0.07],
-            "v_dend": [-0.05, -0.06],
-            "w": [0.0, 0.1],
-            "refrac_left": [0.0, 0.0],
-            "spike_hold_left": [0.001, 0.0],
+            "v_soma": _as_tensor([-0.06, -0.07]),
+            "v_dend": _as_tensor([-0.05, -0.06]),
+            "w": _as_tensor([0.0, 0.1]),
+            "refrac_left": _as_tensor([0.0, 0.0]),
+            "spike_hold_left": _as_tensor([0.001, 0.0]),
         },
     )
     monitor.on_step(event)

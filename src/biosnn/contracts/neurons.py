@@ -12,15 +12,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from biosnn.contracts.modulators import ModulatorKind
-
-if TYPE_CHECKING:  # pragma: no cover
-    import torch
-    Tensor = torch.Tensor
-else:  # runtime fallback (avoids importing torch during import)
-    Tensor = Any
+from biosnn.contracts.tensor import Tensor
 
 
 class Compartment(str, Enum):

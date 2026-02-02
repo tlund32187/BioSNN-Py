@@ -13,6 +13,12 @@
   "ruff.enable": true,
   "ruff.organizeImports": true,
   "python.analysis.typeCheckingMode": "basic",
+  "files.exclude": {
+    "**/.pytest_cache": true,
+    "**/.pytest_tmp": true,
+    "**/.pytest_artifacts": true,
+    "**/pytest-cache-files-*": true
+  },
   "files.trimTrailingWhitespace": true,
   "files.insertFinalNewline": true
 }

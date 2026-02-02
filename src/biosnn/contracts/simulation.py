@@ -4,15 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from biosnn.contracts.monitors import IMonitor
-
-if TYPE_CHECKING:  # pragma: no cover
-    import torch
-    Tensor = torch.Tensor
-else:
-    Tensor = Any
 
 
 @dataclass(frozen=True, slots=True)

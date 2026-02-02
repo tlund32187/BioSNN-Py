@@ -4,22 +4,109 @@
     {
       "label": "Checks: ruff",
       "type": "shell",
-      "command": "ruff check .",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "-m",
+        "ruff",
+        "check",
+        "."
+      ],
       "group": "test",
       "problemMatcher": []
     },
     {
       "label": "Checks: mypy",
       "type": "shell",
-      "command": "mypy .",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "-m",
+        "mypy",
+        "."
+      ],
+      "options": {
+        "env": {
+          "PYTHONPATH": "src"
+        }
+      },
       "group": "test",
       "problemMatcher": []
     },
     {
       "label": "Tests: pytest",
       "type": "shell",
-      "command": "pytest",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "-m",
+        "pytest"
+      ],
+      "options": {
+        "env": {
+          "PYTHONPATH": "src",
+          "PYTEST_BASEDIR": "${env:LOCALAPPDATA}\\biosnn_pytest"
+        }
+      },
       "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Setup: install torch CUDA (2.9.1+cu130)",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "-m",
+        "pip",
+        "install",
+        "--index-url",
+        "https://download.pytorch.org/whl/cu130",
+        "torch==2.9.1+cu130"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Setup: install dev tools",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "-m",
+        "pip",
+        "install",
+        "-e",
+        ".[dev]"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Setup: verify torch CUDA",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "-c",
+        "import sys, torch; print('python:', sys.executable); print('torch:', torch.__version__); print('cuda:', torch.version.cuda); print('cuda available:', torch.cuda.is_available())"
+      ],
+      "options": {
+        "shell": {
+          "executable": "cmd.exe",
+          "args": [
+            "/d",
+            "/c"
+          ]
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build: verify all",
+      "type": "shell",
+      "dependsOn": [
+        "Checks: ruff",
+        "Checks: mypy",
+        "Tests: pytest"
+      ],
+      "dependsOrder": "sequence",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
       "problemMatcher": []
     }
   ]

@@ -47,7 +47,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501"]  # allow long docs/strings; formatting handled separately
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
@@ -59,10 +59,4 @@ namespace_packages = false
 exclude = ["^build/", "^dist/"]
 
 [tool.pytest.ini_options]
-cache_dir = ".pytest_tmp/cache"
-norecursedirs = [
-  ".pytest_cache",
-  ".pytest_tmp",
-  ".ruff_cache",
-  "pytest-cache-files-*",
-]
+addopts = "-p no:cacheprovider"
