@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol, TYPE_CHECKING, runtime_checkable
+from collections.abc import Mapping
+from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
 from biosnn.contracts.modulators import ModulatorKind
 
