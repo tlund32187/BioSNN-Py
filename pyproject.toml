@@ -57,3 +57,12 @@ check_untyped_defs = true
 strict_equality = true
 namespace_packages = false
 exclude = ["^build/", "^dist/"]
+
+[tool.pytest.ini_options]
+cache_dir = ".pytest_tmp/cache"
+norecursedirs = [
+  ".pytest_cache",
+  ".pytest_tmp",
+  ".ruff_cache",
+  "pytest-cache-files-*",
+]
