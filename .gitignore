@@ -9,9 +9,9 @@ venv/
 ENV/
 
 # Packaging
-build/
-dist/
-*.egg-info/
+/build/
+/dist/
+/*.egg-info/
 
 # Unit test / coverage
 .pytest_cache/
@@ -43,8 +43,6 @@ Desktop.ini
 !.vscode/tasks.json
 
 # Data / artifacts (keep repo clean)
-artifacts/
-outputs/
-logs/
-data/
-models/
+/artifacts/
+/outputs/
+/logs/
