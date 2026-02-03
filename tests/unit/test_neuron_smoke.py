@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import pytest
 
 from biosnn.biophysics.models.adex_2c import AdEx2CompModel
@@ -9,6 +13,9 @@ from biosnn.contracts.neurons import (
     NeuronInputs,
     StepContext,
 )
+
+if TYPE_CHECKING:
+    import torch
 
 torch = pytest.importorskip("torch")
 

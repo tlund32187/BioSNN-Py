@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
+from typing import Any, cast
 
 from biosnn.biophysics.models._torch_utils import require_torch, resolve_device_dtype
 from biosnn.contracts.neurons import Compartment, StepContext, Tensor
@@ -104,14 +105,15 @@ class DelayedCurrentSynapse(ISynapseModel):
             post_idx = _as_index(topology.post_idx, device, name="post_idx")
             edge_spikes = pre_spikes.index_select(0, pre_idx)
 
-            delay_steps = topology.delay_steps
-            if delay_steps is not None:
-                delay_steps = _as_index(delay_steps, device, name="delay_steps")
+            delay_steps_opt = topology.delay_steps
+            if delay_steps_opt is not None:
+                delay_steps = _as_index(delay_steps_opt, device, name="delay_steps")
                 max_delay = int(delay_steps.max().item()) if delay_steps.numel() else 0
             else:
+                delay_steps = None
                 max_delay = 0
 
-            if max_delay > 0:
+            if max_delay > 0 and delay_steps is not None:
                 depth = max_delay + 1
                 if state.delay_buffer is None or state.delay_buffer.shape != (depth, pre_idx.numel()):
                     state.delay_buffer = torch.zeros(
@@ -122,11 +124,11 @@ class DelayedCurrentSynapse(ISynapseModel):
                 edge_idx = torch.arange(pre_idx.numel(), device=device)
                 delayed = state.delay_buffer[cursor].clone()
                 state.delay_buffer[cursor].zero_()
-                immediate_mask = delay_steps == 0
+                immediate_mask = cast(Tensor, delay_steps == 0)
                 if immediate_mask.any():
                     delayed = delayed + edge_spikes * immediate_mask.to(edge_spikes.dtype)
                 if (~immediate_mask).any():
-                    target_rows = (cursor + delay_steps) % depth
+                    target_rows = torch.remainder(delay_steps + cursor, depth)
                     state.delay_buffer[target_rows[~immediate_mask], edge_idx[~immediate_mask]] = (
                         edge_spikes[~immediate_mask]
                     )
@@ -168,7 +170,7 @@ class DelayedCurrentSynapse(ISynapseModel):
         torch = require_torch()
         scale_map = self.params.receptor_scale or {}
         values = [scale_map.get(kind, 1.0) for kind in kinds]
-        table = torch.tensor(values, device=like.device, dtype=like.dtype)
+        table = cast(Tensor, torch.tensor(values, device=like.device, dtype=like.dtype))
         self._scale_cache[key] = table
         return table
 
@@ -193,8 +195,8 @@ def _accumulate_post_drive(
     edge_current: Tensor,
     post_idx: Tensor,
     topology: SynapseTopology,
-    device: object,
-    dtype: object,
+    device: Any,
+    dtype: Any,
 ) -> Mapping[Compartment, Tensor]:
     torch = require_torch()
     n_post = _infer_n_post(topology)
@@ -237,7 +239,7 @@ def _as_like(
     return tensor
 
 
-def _as_index(tensor: Tensor, device: object, *, name: str) -> Tensor:
+def _as_index(tensor: Tensor, device: Any, *, name: str) -> Tensor:
     torch = require_torch()
     if tensor.device != device or tensor.dtype != torch.long:
         tensor = tensor.to(device=device, dtype=torch.long)

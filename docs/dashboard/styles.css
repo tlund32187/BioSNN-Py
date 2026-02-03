@@ -137,6 +137,62 @@ h1 {
   margin-bottom: 12px;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.view-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--muted);
+}
+
+.view-toggle select {
+  background: var(--panel-strong);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.control-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+}
+
+.control-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.control-row input,
+.control-row select {
+  background: var(--panel-strong);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px 8px;
+  font-size: 11px;
+  width: 70px;
+}
+
+.control-row select {
+  width: 140px;
+}
+
 .card h2 {
   font-size: 14px;
   margin: 0;
@@ -162,6 +218,10 @@ h1 {
   width: 100%;
   height: calc(100% - 32px);
   display: block;
+}
+
+.card-accuracy canvas {
+  height: calc(100% - 56px);
 }
 
 .card-network {
@@ -205,6 +265,28 @@ h1 {
   padding-top: 6px;
 }
 
+.network-tooltip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 8px 10px;
+  background: rgba(15, 23, 42, 0.95);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate3d(0, 0, 0);
+  transition: opacity 0.12s ease;
+  z-index: 4;
+}
+
+.network-tooltip.visible {
+  opacity: 1;
+}
+
 .dot {
   display: inline-block;
   width: 8px;
@@ -233,6 +315,18 @@ h1 {
   background: #fb7185;
 }
 
+.dot-glif {
+  background: #60a5fa;
+}
+
+.dot-adex {
+  background: #f59e0b;
+}
+
+.dot-unknown {
+  background: #94a3b8;
+}
+
 .empty-state {
   display: flex;
   flex-direction: column;
@@ -240,6 +334,19 @@ h1 {
   height: calc(100% - 32px);
   color: var(--muted);
   font-size: 13px;
+}
+
+.accuracy-footer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+  padding-top: 8px;
+}
+
+.accuracy-footer strong {
+  color: var(--text);
+  font-family: var(--mono);
 }
 
 .progress-pill {

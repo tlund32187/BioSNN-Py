@@ -11,6 +11,7 @@ from biosnn.contracts.monitors import StepEvent
 from biosnn.contracts.neurons import INeuronModel, NeuronStepResult
 from biosnn.contracts.synapses import SynapseTopology
 from biosnn.contracts.tensor import Tensor
+from biosnn.io.graph.population_topology_json import build_population_topology_payload
 from biosnn.io.graph.topology_json import build_topology_payload
 from biosnn.monitors.csv import NeuronCSVMonitor, SynapseCSVMonitor
 
@@ -33,6 +34,31 @@ def export_topology_json(
         weights=weights,
         pre_layer=pre_layer,
         post_layer=post_layer,
+    )
+
+    if path is not None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    return payload
+
+
+
+
+def export_population_topology_json(
+    populations: Sequence[Any],
+    projections: Sequence[Any],
+    *,
+    path: str | Path | None = None,
+    weights_by_projection: Mapping[str, Tensor] | None = None,
+) -> dict[str, Any]:
+    """Export a population-level topology JSON payload for the dashboard."""
+
+    payload = build_population_topology_payload(
+        populations,
+        projections,
+        weights_by_projection=weights_by_projection,
     )
 
     if path is not None:
@@ -119,6 +145,32 @@ def export_neuron_snapshot(
     )
 
 
+
+
+def export_dashboard_bundle(
+    *,
+    out_dir: Path,
+    topology_payload: dict | None = None,
+    neuron_csv_src: Path | None = None,
+    synapse_csv_src: Path | None = None,
+    spikes_csv_src: Path | None = None,
+    metrics_csv_src: Path | None = None,
+    weights_csv_src: Path | None = None,
+) -> None:
+    """Bundle dashboard artifacts into a single folder."""
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if topology_payload is not None:
+        (out_dir / "topology.json").write_text(json.dumps(topology_payload, indent=2), encoding="utf-8")
+
+    _copy_if_present(neuron_csv_src, out_dir / "neuron.csv")
+    _copy_if_present(synapse_csv_src, out_dir / "synapse.csv")
+    _copy_if_present(spikes_csv_src, out_dir / "spikes.csv")
+    _copy_if_present(metrics_csv_src, out_dir / "metrics.csv")
+    _copy_if_present(weights_csv_src, out_dir / "weights.csv")
+
+
 def export_dashboard_snapshot(
     topology: SynapseTopology,
     weights: Tensor,
@@ -169,6 +221,14 @@ def export_dashboard_snapshot(
         paths["neuron"] = neuron_path
 
     return paths
+
+
+def _copy_if_present(src: Path | None, dest: Path) -> None:
+    if src is None:
+        return
+    if not src.exists():
+        return
+    dest.write_bytes(src.read_bytes())
 
 
 def _clamp_indices(values: Tensor | None, indices: Sequence[int] | None) -> list[int] | None:

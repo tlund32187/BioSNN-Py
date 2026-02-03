@@ -1,0 +1,113 @@
+"""Spike events CSV monitor."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from biosnn.biophysics.models._torch_utils import require_torch
+from biosnn.contracts.monitors import IMonitor, StepEvent
+from biosnn.contracts.tensor import Tensor
+from biosnn.io.sinks.csv_sink import CsvSink
+
+
+class SpikeEventsCSVMonitor(IMonitor):
+    """Write sparse spike events to CSV.
+
+    Columns: step, t, pop, neuron
+    """
+
+    name = "spike_events_csv"
+
+    def __init__(
+        self,
+        path: str,
+        *,
+        stride: int = 1,
+        max_spikes_per_step: int | None = None,
+        neuron_sample: int | None = None,
+        append: bool = False,
+        flush_every: int = 1,
+    ) -> None:
+        self._sink = CsvSink(
+            path,
+            fieldnames=["step", "t", "pop", "neuron"],
+            append=append,
+            flush_every=flush_every,
+        )
+        self._stride = max(1, stride)
+        self._max_spikes = max_spikes_per_step
+        self._neuron_sample = neuron_sample
+        self._sample_indices: dict[str, Tensor] = {}
+        self._sample_mask: dict[str, Tensor] = {}
+
+    def on_step(self, event: StepEvent) -> None:
+        if event.spikes is None:
+            return
+        step = int(event.scalars.get("step", 0)) if event.scalars else 0
+        if step % self._stride != 0:
+            return
+
+        spikes = event.spikes
+        population_slices = _population_slices(event.meta)
+
+        if population_slices:
+            for pop, (start, end) in population_slices.items():
+                pop_spikes = spikes[start:end]
+                indices = (pop_spikes > 0.5).nonzero(as_tuple=False).flatten()
+                indices = self._filter_indices(pop, indices, end - start)
+                indices = _cap_indices(indices, self._max_spikes)
+                for idx in indices.tolist():
+                    self._sink.write_row(
+                        {"step": step, "t": event.t, "pop": pop, "neuron": int(idx)}
+                    )
+            return
+
+        indices = (spikes > 0.5).nonzero(as_tuple=False).flatten()
+        indices = self._filter_indices("pop0", indices, int(spikes.shape[0]))
+        indices = _cap_indices(indices, self._max_spikes)
+        for idx in indices.tolist():
+            self._sink.write_row({"step": step, "t": event.t, "pop": "pop0", "neuron": int(idx)})
+
+    def _filter_indices(self, pop: str, indices: Tensor, n: int) -> Tensor:
+        if self._neuron_sample is None:
+            return indices
+        torch = require_torch()
+        if pop not in self._sample_indices:
+            sample_n = min(self._neuron_sample, n)
+            perm = torch.randperm(n, device=indices.device)
+            sample_idx = perm[:sample_n]
+            self._sample_indices[pop] = sample_idx
+            mask = torch.zeros((n,), device=indices.device, dtype=torch.bool)
+            mask[sample_idx] = True
+            self._sample_mask[pop] = mask
+        mask = self._sample_mask[pop]
+        return indices[mask[indices]]
+
+    def flush(self) -> None:
+        self._sink.flush()
+
+    def close(self) -> None:
+        self._sink.close()
+
+
+def _population_slices(meta: Mapping[str, Any] | None) -> dict[str, tuple[int, int]]:
+    if not meta:
+        return {}
+    raw = meta.get("population_slices")
+    if isinstance(raw, Mapping):
+        return {str(k): (int(v[0]), int(v[1])) for k, v in raw.items()}
+    return {}
+
+
+def _cap_indices(indices: Tensor, cap: int | None) -> Tensor:
+    if cap is None:
+        return indices
+    if indices.numel() <= cap:
+        return indices
+    torch = require_torch()
+    perm = torch.randperm(indices.numel(), device=indices.device)
+    return indices[perm[:cap]]
+
+
+__all__ = ["SpikeEventsCSVMonitor"]

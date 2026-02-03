@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import uuid
 from pathlib import Path
 
 import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 
 def _pytest_base_dir() -> Path:
@@ -23,11 +29,11 @@ def _ensure_writable_base(base: Path) -> Path:
         probe.mkdir(parents=True, exist_ok=True)
         probe.rmdir()
         return base
-    except OSError:
+    except OSError as exc:
         raise RuntimeError(
             f"Pytest base directory '{base}' is not writable. "
             "Set PYTEST_BASEDIR to a writable path."
-        )
+        ) from exc
 
 
 def pytest_configure(config) -> None:

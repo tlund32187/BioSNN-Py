@@ -18,11 +18,14 @@ http://localhost:8000/docs/dashboard/
 By default the dashboard looks for:
 - `docs/dashboard/data/neuron.csv`
 - `docs/dashboard/data/synapse.csv`
+- `docs/dashboard/data/spikes.csv`
+- `docs/dashboard/data/metrics.csv`
+- `docs/dashboard/data/weights.csv`
 - `docs/dashboard/data/topology.json` (optional)
 
 You can override with query parameters:
 ```
-http://localhost:8000/docs/dashboard/?neuron=PATH&synapse=PATH&topology=PATH
+http://localhost:8000/docs/dashboard/?neuron=PATH&synapse=PATH&spikes=PATH&metrics=PATH&weights=PATH&topology=PATH
 ```
 
 ## How to generate CSVs
@@ -100,3 +103,12 @@ Provide a topology file to render your true graph layout.
 Notes:
 - `x`/`y` are normalized (0..1). `layer` is 0=input, 1=hidden, 2=output.
 - `weight` is used for edge color intensity (positive = excitatory, negative = inhibitory).
+
+Population view:
+- If topology.json contains {"mode": "population"}, the dashboard defaults to the population view.
+- Use the View toggle to switch between neurons and populations.
+
+## New dashboard artifacts
+- Spike raster: `spikes.csv` via `SpikeEventsCSVMonitor`
+- Metrics time-series: `metrics.csv` via `MetricsCSVMonitor`
+- Projection weights: `weights.csv` via `ProjectionWeightsCSVMonitor`

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from biosnn.contracts.tensor import Tensor
 
@@ -59,7 +59,7 @@ def compute_delay_steps(
     post = post_pos.index_select(0, post_idx.to(device=post_pos.device, dtype=torch.long))
     dist = torch.linalg.norm(post - pre, dim=1)
 
-    velocity = p.base_velocity
+    velocity = dist.new_tensor(p.base_velocity)
     if myelin is not None:
         if myelin.shape != dist.shape:
             raise ValueError("myelin must have shape [E]")
@@ -73,4 +73,4 @@ def compute_delay_steps(
 
     steps = delay_sec / dt
     steps = torch.ceil(steps) if p.use_ceil else torch.round(steps)
-    return steps.to(dtype=torch.int32)
+    return cast(Tensor, steps.to(dtype=torch.int32))

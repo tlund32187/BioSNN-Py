@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 import warnings
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 _MODULE = None
 
@@ -34,12 +34,15 @@ def export_topology_json(
     post_layer: int = 2,
 ) -> dict[str, Any]:
     _warn()
-    return _module().export_topology_json(
-        topology,
-        path=path,
-        weights=weights,
-        pre_layer=pre_layer,
-        post_layer=post_layer,
+    return cast(
+        dict[str, Any],
+        _module().export_topology_json(
+            topology,
+            path=path,
+            weights=weights,
+            pre_layer=pre_layer,
+            post_layer=post_layer,
+        ),
     )
 
 
@@ -52,12 +55,15 @@ def export_synapse_csv(
     scalars: Mapping[str, float] | None = None,
 ):
     _warn()
-    return _module().export_synapse_csv(
-        weights,
-        path=path,
-        stats=stats,
-        sample_indices=sample_indices,
-        scalars=scalars,
+    return cast(
+        Any,
+        _module().export_synapse_csv(
+            weights,
+            path=path,
+            stats=stats,
+            sample_indices=sample_indices,
+            scalars=scalars,
+        ),
     )
 
 
@@ -73,15 +79,18 @@ def export_neuron_csv(
     dt: float = 0.0,
 ):
     _warn()
-    return _module().export_neuron_csv(
-        tensors,
-        path=path,
-        spikes=spikes,
-        stats=stats,
-        sample_indices=sample_indices,
-        scalars=scalars,
-        t=t,
-        dt=dt,
+    return cast(
+        Any,
+        _module().export_neuron_csv(
+            tensors,
+            path=path,
+            spikes=spikes,
+            stats=stats,
+            sample_indices=sample_indices,
+            scalars=scalars,
+            t=t,
+            dt=dt,
+        ),
     )
 
 
@@ -98,16 +107,19 @@ def export_neuron_snapshot(
     dt: float = 0.0,
 ):
     _warn()
-    return _module().export_neuron_snapshot(
-        model,
-        state,
-        result,
-        path=path,
-        stats=stats,
-        sample_indices=sample_indices,
-        scalars=scalars,
-        t=t,
-        dt=dt,
+    return cast(
+        Any,
+        _module().export_neuron_snapshot(
+            model,
+            state,
+            result,
+            path=path,
+            stats=stats,
+            sample_indices=sample_indices,
+            scalars=scalars,
+            t=t,
+            dt=dt,
+        ),
     )
 
 
@@ -129,21 +141,24 @@ def export_dashboard_snapshot(
     neuron_scalars: Mapping[str, float] | None = None,
 ):
     _warn()
-    return _module().export_dashboard_snapshot(
-        topology,
-        weights,
-        out_dir=out_dir,
-        topology_name=topology_name,
-        synapse_name=synapse_name,
-        neuron_name=neuron_name,
-        neuron_tensors=neuron_tensors,
-        neuron_spikes=neuron_spikes,
-        neuron_stats=neuron_stats,
-        neuron_samples=neuron_samples,
-        synapse_stats=synapse_stats,
-        synapse_samples=synapse_samples,
-        scalars=scalars,
-        neuron_scalars=neuron_scalars,
+    return cast(
+        Any,
+        _module().export_dashboard_snapshot(
+            topology,
+            weights,
+            out_dir=out_dir,
+            topology_name=topology_name,
+            synapse_name=synapse_name,
+            neuron_name=neuron_name,
+            neuron_tensors=neuron_tensors,
+            neuron_spikes=neuron_spikes,
+            neuron_stats=neuron_stats,
+            neuron_samples=neuron_samples,
+            synapse_stats=synapse_stats,
+            synapse_samples=synapse_samples,
+            scalars=scalars,
+            neuron_scalars=neuron_scalars,
+        ),
     )
 
 

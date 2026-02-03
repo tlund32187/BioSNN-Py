@@ -72,7 +72,7 @@ def _build_edges(
 
     edges: list[dict[str, Any]] = []
     for i, (pre, post) in enumerate(zip(pre_idx, post_idx, strict=True)):
-        edge = {
+        edge: dict[str, Any] = {
             "from": pre + pre_offset,
             "to": post + post_offset,
             "weight": weight_list[i] if i < len(weight_list) else 0.0,
@@ -127,7 +127,7 @@ def _infer_n(tensor: Tensor) -> int:
 def _to_list(tensor: Tensor | None) -> list[list[float]] | None:
     if tensor is None:
         return None
-    data = tensor
+    data: Any = tensor
     if hasattr(data, "detach"):
         data = data.detach()
     if hasattr(data, "cpu"):
@@ -140,7 +140,7 @@ def _to_list(tensor: Tensor | None) -> list[list[float]] | None:
 def _to_int_list(tensor: Tensor | None) -> list[int]:
     if tensor is None:
         return []
-    data = tensor
+    data: Any = tensor
     if hasattr(data, "detach"):
         data = data.detach()
     if hasattr(data, "cpu"):
@@ -153,7 +153,7 @@ def _to_int_list(tensor: Tensor | None) -> list[int]:
 def _to_float_list(tensor: Tensor | None) -> list[float] | None:
     if tensor is None:
         return None
-    data = tensor
+    data: Any = tensor
     if hasattr(data, "detach"):
         data = data.detach()
     if hasattr(data, "cpu"):

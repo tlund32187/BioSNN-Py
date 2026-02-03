@@ -1,6 +1,6 @@
-"""Learning package."""
+"""Learning rules."""
 
-from biosnn.learning.rules import (
+from biosnn.learning.rules.three_factor_hebbian import (
     ThreeFactorHebbianParams,
     ThreeFactorHebbianRule,
     ThreeFactorHebbianState,

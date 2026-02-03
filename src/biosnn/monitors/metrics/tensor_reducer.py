@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import Any, cast
 
 from biosnn.contracts.tensor import Tensor
 
@@ -97,9 +97,13 @@ def sample_tensor(values: Any, indices: Sequence[int] | Tensor) -> list[tuple[in
 def _index_values(values: Any, indices: Sequence[int] | Tensor) -> Any:
     if hasattr(indices, "device") or hasattr(indices, "dtype"):
         idx_tensor = indices
-        if hasattr(values, "device") and hasattr(idx_tensor, "device"):
-            if idx_tensor.device != values.device and hasattr(idx_tensor, "to"):
-                idx_tensor = idx_tensor.to(device=values.device)
+        if (
+            hasattr(values, "device")
+            and hasattr(idx_tensor, "device")
+            and idx_tensor.device != values.device
+            and hasattr(idx_tensor, "to")
+        ):
+            idx_tensor = idx_tensor.to(device=values.device)
         if hasattr(idx_tensor, "long"):
             idx_tensor = idx_tensor.long()
         if hasattr(values, "index_select"):
@@ -128,7 +132,7 @@ def _flatten(values: Any) -> Iterable[float]:
 
 def _to_list(values: Any) -> list[Any]:
     if hasattr(values, "tolist"):
-        return values.tolist()
+        return cast(list[Any], values.tolist())
     if isinstance(values, Iterable) and not isinstance(values, (str, bytes)):
         return list(values)
     return [values]
