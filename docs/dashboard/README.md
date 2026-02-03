@@ -53,7 +53,7 @@ synapse_monitor = SynapseCSVMonitor(
 Use the helper to export the topology JSON and a synapse CSV snapshot together.
 
 ```python
-from biosnn.synapses import export_dashboard_snapshot
+from biosnn.io.dashboard_export import export_dashboard_snapshot
 
 export_dashboard_snapshot(
     topology,
@@ -71,7 +71,7 @@ export_dashboard_snapshot(
 If you already have the model + state + step result, you can snapshot a neuron CSV in one call.
 
 ```python
-from biosnn.synapses import export_neuron_snapshot
+from biosnn.io.dashboard_export import export_neuron_snapshot
 
 export_neuron_snapshot(
     model,

@@ -1,7 +1,7 @@
 import pytest
 
 from biosnn.contracts.synapses import ReceptorKind, SynapseTopology
-from biosnn.synapses import export_topology_json
+from biosnn.io.dashboard_export import export_topology_json
 
 torch = pytest.importorskip("torch")
 

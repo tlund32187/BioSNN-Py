@@ -58,6 +58,7 @@ check_untyped_defs = true
 strict_equality = true
 namespace_packages = false
 exclude = ["^build/", "^dist/"]
+cache_dir = "C:/Users/tlund/AppData/Local/Temp/biosnn_mypy_cache"
 
 [tool.pytest.ini_options]
-addopts = "-p no:cacheprovider"
+addopts = "-p no:cacheprovider -p no:tmpdir"

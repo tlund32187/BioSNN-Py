@@ -3,7 +3,7 @@ import pytest
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.contracts.neurons import Compartment, NeuronInputs, StepContext
 from biosnn.contracts.synapses import SynapseTopology
-from biosnn.synapses import export_dashboard_snapshot, export_neuron_snapshot
+from biosnn.io.dashboard_export import export_dashboard_snapshot, export_neuron_snapshot
 
 torch = pytest.importorskip("torch")
 

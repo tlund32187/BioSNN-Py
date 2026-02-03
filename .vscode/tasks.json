@@ -13,6 +13,11 @@
         "${env:TEMP}\\ruff_cache",
         "."
       ],
+      "options": {
+        "env": {
+          "PYTHONDONTWRITEBYTECODE": "1"
+        }
+      },
       "group": "test",
       "problemMatcher": []
     },
@@ -27,7 +32,9 @@
       ],
       "options": {
         "env": {
-          "PYTHONPATH": "src"
+          "PYTHONDONTWRITEBYTECODE": "1",
+          "PYTHONPATH": "src",
+          "MYPY_CACHE_DIR": "${env:TEMP}\\biosnn_mypy_cache"
         }
       },
       "group": "test",
@@ -43,8 +50,9 @@
       ],
       "options": {
         "env": {
+          "PYTHONDONTWRITEBYTECODE": "1",
           "PYTHONPATH": "src",
-          "PYTEST_BASEDIR": "${env:LOCALAPPDATA}\\biosnn_pytest"
+          "PYTEST_BASEDIR": "${env:TEMP}\\biosnn_pytest"
         }
       },
       "group": "test",
@@ -62,6 +70,11 @@
         "https://download.pytorch.org/whl/cu130",
         "torch==2.9.1+cu130"
       ],
+      "options": {
+        "env": {
+          "PYTHONDONTWRITEBYTECODE": "1"
+        }
+      },
       "problemMatcher": []
     },
     {
@@ -75,6 +88,11 @@
         "-e",
         ".[dev]"
       ],
+      "options": {
+        "env": {
+          "PYTHONDONTWRITEBYTECODE": "1"
+        }
+      },
       "problemMatcher": []
     },
     {
@@ -86,6 +104,9 @@
         "import sys, torch; print('python:', sys.executable); print('torch:', torch.__version__); print('cuda:', torch.version.cuda); print('cuda available:', torch.cuda.is_available())"
       ],
       "options": {
+        "env": {
+          "PYTHONDONTWRITEBYTECODE": "1"
+        },
         "shell": {
           "executable": "cmd.exe",
           "args": [
