@@ -90,6 +90,84 @@ def build_erdos_renyi_topology(
     )
 
 
+def build_bipartite_erdos_renyi_topology(
+    n_pre: int,
+    n_post: int,
+    p: float,
+    *,
+    device: str | None = None,
+    dtype: str | None = None,
+    dt: float | None = None,
+    pre_pos: Tensor | None = None,
+    post_pos: Tensor | None = None,
+    myelin: Tensor | None = None,
+    weight_init: float | None = None,
+    delay_steps: Tensor | None = None,
+    receptor: Tensor | None = None,
+    target_compartments: Tensor | None = None,
+) -> SynapseTopology:
+    """Build a directed bipartite Erdos-Renyi topology (pre -> post)."""
+
+    if n_pre <= 0 or n_post <= 0:
+        raise ValueError("n_pre and n_post must be positive")
+    if p < 0 or p > 1:
+        raise ValueError("p must be within [0,1]")
+
+    torch = require_torch()
+    device_obj = torch.device(device) if device else None
+    dtype_obj = _resolve_dtype(torch, dtype) if dtype else torch.get_default_dtype()
+
+    mask = torch.rand((n_pre, n_post), device=device_obj) < p
+    idx = mask.nonzero(as_tuple=False)
+    pre_idx = idx[:, 0].to(dtype=torch.long)
+    post_idx = idx[:, 1].to(dtype=torch.long)
+
+    if device_obj is not None:
+        pre_idx = pre_idx.to(device=device_obj)
+        post_idx = post_idx.to(device=device_obj)
+
+    weights = None
+    if weight_init is not None:
+        weights = torch.full((pre_idx.numel(),), weight_init, device=device_obj, dtype=dtype_obj)
+
+    pre_pos_t = _to_device(pre_pos, device_obj, dtype_obj) if pre_pos is not None else None
+    post_pos_t = _to_device(post_pos, device_obj, dtype_obj) if post_pos is not None else None
+    myelin_t = _to_device(myelin, device_obj, dtype_obj) if myelin is not None else None
+
+    delay_steps_t = None
+    if delay_steps is not None:
+        if hasattr(delay_steps, "to"):
+            delay_steps_t = delay_steps.to(device=device_obj, dtype=torch.long)
+        else:
+            delay_steps_t = delay_steps
+    elif pre_pos_t is not None and post_pos_t is not None and dt is not None:
+        delay_steps_t = compute_delay_steps(
+            pre_pos=pre_pos_t,
+            post_pos=post_pos_t,
+            pre_idx=pre_idx,
+            post_idx=post_idx,
+            dt=dt,
+            myelin=myelin_t,
+        )
+
+    receptor = _to_device(receptor, device_obj, None) if receptor is not None else None
+    target_compartments = (
+        _to_device(target_compartments, device_obj, None) if target_compartments is not None else None
+    )
+
+    return SynapseTopology(
+        pre_idx=pre_idx,
+        post_idx=post_idx,
+        delay_steps=delay_steps_t,
+        target_compartments=target_compartments,
+        receptor=receptor,
+        weights=weights,
+        pre_pos=pre_pos_t,
+        post_pos=post_pos_t,
+        myelin=myelin_t,
+    )
+
+
 def _resolve_dtype(torch: Any, dtype: str | None) -> Any:
     if dtype is None:
         return torch.get_default_dtype()
@@ -112,4 +190,4 @@ def _to_device(tensor: Tensor | None, device: Any, dtype: Any | None) -> Tensor 
     return tensor
 
 
-__all__ = ["build_erdos_renyi_topology"]
+__all__ = ["build_erdos_renyi_topology", "build_bipartite_erdos_renyi_topology"]

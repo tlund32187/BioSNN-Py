@@ -3,6 +3,15 @@
 This dashboard reads CSV monitor outputs (neurons + synapses) and renders a live
 view of connections and spiking activity.
 
+
+## CLI demo run
+```powershell
+python -m biosnn.runners.cli --steps 500 --dt 0.001
+```
+Optional flags:
+- `--no-open`
+- `--no-server`
+
 ## Quick start
 1) Start a static file server from the repo root:
 ```powershell
@@ -112,3 +121,7 @@ Population view:
 - Spike raster: `spikes.csv` via `SpikeEventsCSVMonitor`
 - Metrics time-series: `metrics.csv` via `MetricsCSVMonitor`
 - Projection weights: `weights.csv` via `ProjectionWeightsCSVMonitor`
+
+Runner flags:
+- `--no-open`: do not open the browser
+- `--no-server`: run simulation and write artifacts only (no HTTP server)
