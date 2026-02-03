@@ -27,6 +27,7 @@ from biosnn.contracts.neurons import (
 )
 from biosnn.contracts.synapses import (
     ISynapseModel,
+    ReceptorKind,
     SynapseInputs,
     SynapseStepResult,
     SynapseTopology,
@@ -45,6 +46,7 @@ __all__ = [
     "SynapseInputs",
     "SynapseStepResult",
     "ISynapseModel",
+    "ReceptorKind",
     # learning
     "LearningBatch",
     "LearningStepResult",

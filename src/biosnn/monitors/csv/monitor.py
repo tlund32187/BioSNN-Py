@@ -1,4 +1,4 @@
-"""CSV monitors for neuron model outputs."""
+"""CSV monitors for neuron and synapse outputs."""
 
 from __future__ import annotations
 
@@ -121,6 +121,33 @@ class AdEx2CompCSVMonitor(NeuronCSVMonitor):
         )
 
 
+class SynapseCSVMonitor(NeuronCSVMonitor):
+    """CSV monitor preset for synapse tensors."""
+
+    name = "csv_synapse"
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        tensor_keys: Sequence[str] | None = None,
+        stats: Sequence[str] | None = None,
+        include_spikes: bool = False,
+        include_scalars: bool = True,
+        sample_indices: Sequence[int] | None = None,
+        flush_every: int = 1,
+    ) -> None:
+        super().__init__(
+            path,
+            tensor_keys=tensor_keys or ("weights",),
+            stats=stats,
+            include_spikes=include_spikes,
+            include_scalars=include_scalars,
+            sample_indices=sample_indices,
+            flush_every=flush_every,
+        )
+
+
 def _reduce(values: Any, stat: str) -> float:
     if values is None:
         return 0.0
@@ -131,6 +158,16 @@ def _reduce(values: Any, stat: str) -> float:
         candidate = candidate.cpu()
     if hasattr(candidate, "flatten"):
         candidate = candidate.flatten()
+    dtype = getattr(candidate, "dtype", None)
+    if dtype is not None:
+        dtype_str = str(dtype).lower()
+        if "bool" in dtype_str or (
+            stat == "mean" and "float" not in dtype_str and "complex" not in dtype_str
+        ):
+            if hasattr(candidate, "float"):
+                candidate = candidate.float()
+            elif hasattr(candidate, "astype"):
+                candidate = candidate.astype(float)
     reducer = getattr(candidate, stat, None)
     if callable(reducer):
         return _to_scalar(reducer())

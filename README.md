@@ -45,3 +45,34 @@ pytest
 - Everything else may change freely.
 
 See: `docs/public_api.md` and `docs/architecture/decisions/0001-library-first.md`
+
+## Model docs
+- `docs/models/adex_2c.md`
+- `docs/models/glif.md`
+
+## Guides
+- `docs/guides/synapses.md`
+
+## Dashboard (local)
+The synapse dashboard is a static page under `docs/dashboard/`.
+
+1) Start a simple web server from the repo root:
+```powershell
+python -m http.server 8000
+```
+
+2) Open the dashboard:
+```
+http://localhost:8000/docs/dashboard/
+```
+
+### Live data
+By default the dashboard reads:
+- `docs/dashboard/data/neuron.csv`
+- `docs/dashboard/data/synapse.csv`
+- `docs/dashboard/data/topology.json` (optional)
+
+You can override with query params:
+```
+http://localhost:8000/docs/dashboard/?neuron=PATH&synapse=PATH&topology=PATH
+```

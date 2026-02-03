@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
 from biosnn.contracts.neurons import Compartment
 from biosnn.contracts.tensor import Tensor
+
+
+class ReceptorKind(str, Enum):
+    AMPA = "ampa"
+    NMDA = "nmda"
+    GABA = "gaba"
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,12 +23,20 @@ class SynapseTopology:
 
     pre_idx/post_idx are edge-indexed arrays mapping edges to neuron indices.
     delay_steps is optional and can be used by the simulation engine's delay buffer.
+    target_compartments/receptor are optional per-edge annotations (int-coded).
     """
 
     pre_idx: Tensor      # shape [E] (int64)
     post_idx: Tensor     # shape [E] (int64)
     delay_steps: Tensor | None = None  # shape [E] (int32)
     target_compartment: Compartment = Compartment.DENDRITE
+    target_compartments: Tensor | None = None  # shape [E] (int64; encoded Compartment ids)
+    receptor: Tensor | None = None  # shape [E] (int64; receptor id per edge)
+    receptor_kinds: tuple[ReceptorKind, ...] | None = None
+    weights: Tensor | None = None  # shape [E] (float)
+    pre_pos: Tensor | None = None  # shape [Npre, 3]
+    post_pos: Tensor | None = None  # shape [Npost, 3]
+    myelin: Tensor | None = None  # shape [E] (float; [0,1] typical)
     meta: Mapping[str, Any] | None = None
 
 

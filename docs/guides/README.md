@@ -1,0 +1,3 @@
+# Guides
+
+- Synapses: `synapses.md`

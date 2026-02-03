@@ -41,6 +41,7 @@ packages = ["src/biosnn"]
 line-length = 100
 target-version = "py313"
 src = ["src", "tests"]
+cache-dir = "C:/Users/tlund/AppData/Local/Temp/ruff_cache"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

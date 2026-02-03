@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BioSNN | Synapse Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow">BioSNN ? Synapse Dashboard</p>
+          <h1>Spiking Neural Network ? Connection Monitor</h1>
+          <p class="subhead">
+            Visualizing edges, delays, and spike flow. No learning yet ? just raw
+            network dynamics.
+          </p>
+          <div class="status">
+            <span class="status-dot" id="dataStatusDot"></span>
+            <span id="dataStatus">Demo data</span>
+          </div>
+        </div>
+        <div class="header-metrics">
+          <div class="metric">
+            <span class="label">FPS</span>
+            <span class="value" id="fps">--</span>
+          </div>
+          <div class="metric">
+            <span class="label">Active Edges</span>
+            <span class="value" id="activeEdges">--</span>
+          </div>
+          <div class="metric">
+            <span class="label">Spike Rate</span>
+            <span class="value" id="spikeRate">--</span>
+          </div>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="card card-network">
+          <div class="card-header">
+            <h2>Neural Network</h2>
+            <span class="chip">Topology + weights</span>
+          </div>
+          <canvas id="networkCanvas"></canvas>
+          <div class="legend">
+            <span><i class="dot dot-input"></i> Input</span>
+            <span><i class="dot dot-hidden"></i> Hidden</span>
+            <span><i class="dot dot-output"></i> Output</span>
+            <span><i class="dot dot-excite"></i> Excit.</span>
+            <span><i class="dot dot-inhib"></i> Inhib.</span>
+          </div>
+        </section>
+
+        <section class="card card-raster">
+          <div class="card-header">
+            <h2>Spike Raster Plot</h2>
+            <span class="chip">Last 2 seconds</span>
+          </div>
+          <canvas id="rasterCanvas"></canvas>
+        </section>
+
+        <section class="card card-accuracy">
+          <div class="card-header">
+            <h2>Training Accuracy</h2>
+            <span class="chip muted">Learning disabled</span>
+          </div>
+          <div class="empty-state">
+            <p>Accuracy tracking will appear once learning rules are enabled.</p>
+            <div class="progress-pill">
+              <span>0.0%</span>
+              <div class="pill-track"><div class="pill-fill" style="width: 0%"></div></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card card-heatmap" data-title="Input ? Hidden">
+          <div class="card-header">
+            <h2>Input ? Hidden</h2>
+            <span class="chip">Weights</span>
+          </div>
+          <canvas id="heatmapInput"></canvas>
+        </section>
+
+        <section class="card card-heatmap" data-title="Hidden ? Output">
+          <div class="card-header">
+            <h2>Hidden ? Output</h2>
+            <span class="chip">Weights</span>
+          </div>
+          <canvas id="heatmapOutput"></canvas>
+        </section>
+
+        <section class="card card-bars">
+          <div class="card-header">
+            <h2>Spike Rates (Hidden)</h2>
+            <span class="chip">Target 40 Hz</span>
+          </div>
+          <canvas id="rateCanvas"></canvas>
+        </section>
+
+        <section class="card card-bars">
+          <div class="card-header">
+            <h2>Weight Dist.</h2>
+            <span class="chip">Synapse edges</span>
+          </div>
+          <canvas id="weightCanvas"></canvas>
+        </section>
+
+        <section class="card card-state">
+          <div class="card-header">
+            <h2>State Space (PCA)</h2>
+            <span class="chip">Projection</span>
+          </div>
+          <canvas id="stateCanvas"></canvas>
+        </section>
+
+        <section class="card card-metrics">
+          <div class="card-header">
+            <h2>Learning Metrics</h2>
+            <span class="chip muted">Read-only</span>
+          </div>
+          <ul class="metric-list" id="metricList"></ul>
+        </section>
+
+        <section class="card card-task">
+          <div class="card-header">
+            <h2>2 + 4 = ?</h2>
+            <span class="chip">Demo task</span>
+          </div>
+          <div class="task-body">
+            <p class="task-input">Input: <strong>12</strong></p>
+            <p class="task-output">Answer: <strong>6</strong></p>
+            <p class="task-foot">No learning; classifier head disabled.</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -6,7 +6,12 @@ import pytest
 
 from biosnn.contracts.monitors import StepEvent
 from biosnn.contracts.tensor import Tensor
-from biosnn.monitors.csv import AdEx2CompCSVMonitor, GLIFCSVMonitor, NeuronCSVMonitor
+from biosnn.monitors.csv import (
+    AdEx2CompCSVMonitor,
+    GLIFCSVMonitor,
+    NeuronCSVMonitor,
+    SynapseCSVMonitor,
+)
 
 
 def _read_rows(path: Path) -> list[dict[str, str]]:
@@ -94,3 +99,21 @@ def test_adex_csv_monitor_preset(artifact_dir: Path) -> None:
     assert float(row["v_soma_mean"]) == pytest.approx(-0.065)
     assert float(row["v_dend_mean"]) == pytest.approx(-0.055)
     assert float(row["w_mean"]) == pytest.approx(0.05)
+
+
+def test_synapse_csv_monitor_preset(artifact_dir: Path) -> None:
+    path = artifact_dir / "synapses.csv"
+    monitor = SynapseCSVMonitor(path, stats=("mean",))
+
+    event = StepEvent(
+        t=0.3,
+        dt=0.001,
+        tensors={"weights": _as_tensor([0.5, 1.5, 2.0])},
+        scalars={"edge_count": 3.0},
+    )
+    monitor.on_step(event)
+    monitor.close()
+
+    row = _read_rows(path)[0]
+    assert float(row["weights_mean"]) == pytest.approx(1.3333333333)
+    assert float(row["edge_count"]) == pytest.approx(3.0)

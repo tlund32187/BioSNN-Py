@@ -81,3 +81,46 @@ def test_adex2c_reset_subset():
     assert state.v_soma[3].item() == pytest.approx(model.params.e_l_s)
     assert state.v_dend[1].item() == pytest.approx(model.params.e_l_d)
     assert state.w[1].item() == pytest.approx(0.0)
+
+
+def test_adex2c_regression_snapshot():
+    model = AdEx2CompModel()
+    ctx = StepContext(device="cpu", dtype="float32")
+    state = model.init_state(2, ctx=ctx)
+
+    state.v_soma.copy_(
+        torch.tensor([-0.07, -0.06], device=state.v_soma.device, dtype=state.v_soma.dtype)
+    )
+    state.v_dend.copy_(
+        torch.tensor([-0.07, -0.05], device=state.v_dend.device, dtype=state.v_dend.dtype)
+    )
+    state.w.zero_()
+    state.refrac_left.zero_()
+    state.spike_hold_left.zero_()
+
+    drive_s = torch.tensor([1.0e-9, 2.0e-9], device=state.v_soma.device, dtype=state.v_soma.dtype)
+    drive_d = torch.tensor([0.5e-9, 0.0], device=state.v_dend.device, dtype=state.v_dend.dtype)
+    inputs = NeuronInputs(drive={Compartment.SOMA: drive_s, Compartment.DENDRITE: drive_d})
+
+    next_state, result = model.step(state, inputs, dt=1.0e-3, t=0.0, ctx=ctx)
+
+    expected_v_soma = torch.tensor(
+        [-0.06499999761581421, -0.05024932324886322],
+        device=state.v_soma.device,
+        dtype=state.v_soma.dtype,
+    )
+    expected_v_dend = torch.tensor(
+        [-0.06750000268220901, -0.051249999552965164],
+        device=state.v_dend.device,
+        dtype=state.v_dend.dtype,
+    )
+    expected_w = torch.tensor(
+        [5.0000026227637814e-14, 1.9750676517448634e-13],
+        device=state.w.device,
+        dtype=state.w.dtype,
+    )
+
+    torch.testing.assert_close(next_state.v_soma, expected_v_soma, rtol=1e-5, atol=1e-10)
+    torch.testing.assert_close(next_state.v_dend, expected_v_dend, rtol=1e-5, atol=1e-10)
+    torch.testing.assert_close(next_state.w, expected_w, rtol=1e-5, atol=1e-10)
+    assert result.spikes.tolist() == [False, False]

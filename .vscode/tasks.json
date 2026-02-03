@@ -9,6 +9,8 @@
         "-m",
         "ruff",
         "check",
+        "--cache-dir",
+        "${env:TEMP}\\ruff_cache",
         "."
       ],
       "group": "test",
