@@ -6,15 +6,15 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, SupportsInt, cast
 
-from biosnn.biophysics.models._torch_utils import require_torch, resolve_device_dtype
 from biosnn.connectivity.topology_compile import compile_topology
 from biosnn.contracts.learning import LearningBatch
 from biosnn.contracts.modulators import ModulatorKind, ModulatorRelease
-from biosnn.contracts.monitors import IMonitor, StepEvent
+from biosnn.contracts.monitors import IMonitor, Scalar, StepEvent
 from biosnn.contracts.neurons import Compartment, INeuronModel, NeuronInputs, StepContext
 from biosnn.contracts.simulation import ISimulationEngine, SimulationConfig
 from biosnn.contracts.synapses import SynapseInputs, SynapseTopology
 from biosnn.contracts.tensor import Tensor
+from biosnn.core.torch_utils import require_torch, resolve_device_dtype
 from biosnn.simulation.network.specs import ModulatorSpec, PopulationSpec, ProjectionSpec
 
 ExternalDriveFn = Callable[[float, int, str, StepContext], Mapping[Compartment, Tensor]]
@@ -82,6 +82,7 @@ class TorchNetworkEngine(ISimulationEngine):
         self._compiled_pop_tensor_keys: dict[str, tuple[str, ...]] = {}
         self._compiled_mod_by_pop: dict[str, dict[ModulatorKind, Tensor]] = {}
         self._compiled_edge_mods_by_proj: dict[str, dict[ModulatorKind, Tensor]] = {}
+        self._last_event: StepEvent | None = None
 
         self.last_projection_drive: dict[str, Mapping[Compartment, Tensor]] = {}
         self.last_d_weights: dict[str, Tensor] = {}
@@ -115,7 +116,7 @@ class TorchNetworkEngine(ISimulationEngine):
         self._pop_states.clear()
         for spec in self._pop_specs:
             state = spec.model.init_state(spec.n, ctx=self._ctx)
-            spikes = torch.zeros((spec.n,), device=self._device, dtype=self._dtype)
+            spikes = torch.zeros((spec.n,), device=self._device, dtype=torch.bool)
             self._pop_states[spec.name] = _PopulationState(state=state, spikes=spikes)
 
         self._proj_states.clear()
@@ -135,7 +136,14 @@ class TorchNetworkEngine(ISimulationEngine):
                 n_pre=pop_map[proj.pre].n,
                 n_post=pop_map[proj.post].n,
             )
-            compile_topology(proj.topology, device=self._device, dtype=self._dtype)
+            build_edges, build_adj = _compile_flags_for_projection(proj)
+            compile_topology(
+                proj.topology,
+                device=self._device,
+                dtype=self._dtype,
+                build_edges_by_delay=build_edges,
+                build_pre_adjacency=build_adj,
+            )
 
         self._mod_states.clear()
         for mod in self._mod_specs:
@@ -177,6 +185,7 @@ class TorchNetworkEngine(ISimulationEngine):
         if self._compiled_mode:
             return self._step_compiled()
 
+        no_monitors = not _monitors_active(self._monitors)
         mod_by_pop, edge_mods_by_proj = _step_modulators(
             self._mod_specs,
             self._mod_states,
@@ -204,19 +213,31 @@ class TorchNetworkEngine(ISimulationEngine):
         for proj in self._proj_specs:
             proj_state = self._proj_states[proj.name]
             pre_spikes = self._pop_states[proj.pre].spikes
-            proj_state.state, syn_result = proj.synapse.step(
-                proj_state.state,
-                proj.topology,
-                SynapseInputs(pre_spikes=pre_spikes),
-                dt=self._dt,
-                t=self._t,
-                ctx=self._ctx,
-            )
-            self.last_projection_drive[proj.name] = syn_result.post_drive
-            _accumulate_drive(
-                drive_acc[proj.post],
-                syn_result.post_drive,
-            )
+            if hasattr(proj.synapse, "step_into"):
+                proj.synapse.step_into(
+                    proj_state.state,
+                    pre_spikes,
+                    drive_acc[proj.post],
+                    t=self._t,
+                    topology=proj.topology,
+                    dt=self._dt,
+                    ctx=self._ctx,
+                )
+                self.last_projection_drive[proj.name] = drive_acc[proj.post]
+            else:
+                proj_state.state, syn_result = proj.synapse.step(
+                    proj_state.state,
+                    proj.topology,
+                    SynapseInputs(pre_spikes=pre_spikes),
+                    dt=self._dt,
+                    t=self._t,
+                    ctx=self._ctx,
+                )
+                self.last_projection_drive[proj.name] = syn_result.post_drive
+                _accumulate_drive(
+                    drive_acc[proj.post],
+                    syn_result.post_drive,
+                )
 
         if self._external_drive_fn is not None:
             for spec in self._pop_specs:
@@ -242,21 +263,22 @@ class TorchNetworkEngine(ISimulationEngine):
                 t=self._t,
                 ctx=self._ctx,
             )
-            spikes = (result.spikes > 0).to(device=pop_state.spikes.device, dtype=pop_state.spikes.dtype)
+            spikes = result.spikes if result.spikes.dtype == torch.bool else (result.spikes > 0)
             if pop_state.spikes.shape == spikes.shape:
-                pop_state.spikes.copy_(spikes)
+                pop_state.spikes.copy_(spikes.to(device=pop_state.spikes.device))
                 spikes = pop_state.spikes
             else:
-                pop_state.spikes = spikes
+                pop_state.spikes = spikes.to(device=pop_state.spikes.device)
             self._pop_states[spec.name] = pop_state
 
-            start = offset
-            end = offset + spec.n
-            pop_slices[spec.name] = (start, end)
-            offset = end
-
-            spikes_concat.append(spikes)
-            neuron_tensors_by_pop[spec.name] = spec.model.state_tensors(pop_state.state)
+            if not no_monitors:
+                start = offset
+                end = offset + spec.n
+                pop_slices[spec.name] = (start, end)
+                offset = end
+                if not self._fast_mode:
+                    spikes_concat.append(spikes)
+                neuron_tensors_by_pop[spec.name] = spec.model.state_tensors(pop_state.state)
 
         self.last_d_weights = {}
         for proj in self._proj_specs:
@@ -294,6 +316,15 @@ class TorchNetworkEngine(ISimulationEngine):
             _apply_weight_clamp(weights, proj)
             self.last_d_weights[proj.name] = res.d_weights
 
+        if no_monitors:
+            event = StepEvent(t=self._t, dt=self._dt)
+            self._last_event = event
+            t_now = self._t
+            step_now = self._step
+            self._t += self._dt
+            self._step += 1
+            return {"step": float(step_now), "t": float(t_now)}
+
         if self._fast_mode:
             spikes_global = None
             spike_count, spike_fraction = _summarize_spikes(self._pop_specs, self._pop_states)
@@ -304,11 +335,13 @@ class TorchNetworkEngine(ISimulationEngine):
             )
         else:
             spikes_global = (
-                torch.cat(spikes_concat) if spikes_concat else torch.zeros((0,), device=self._device)
+                torch.cat(spikes_concat)
+                if spikes_concat
+                else torch.zeros((0,), device=self._device, dtype=torch.bool)
             )
             if spikes_global.numel():
                 spike_count = spikes_global.sum()
-                spike_fraction = spikes_global.mean()
+                spike_fraction = spike_count / float(spikes_global.numel())
             else:
                 spike_count = spikes_global.new_zeros(())
                 spike_fraction = spikes_global.new_zeros(())
@@ -321,7 +354,7 @@ class TorchNetworkEngine(ISimulationEngine):
         event_tensors.update(_learning_tensors(self._proj_specs, self._proj_states))
         event_tensors.update(_modulator_tensors(self._mod_specs, self._mod_states))
 
-        scalars = {
+        scalars: dict[str, Scalar] = {
             "step": float(self._step),
             "t": float(self._t),
             "spike_count_total": spike_count,
@@ -335,9 +368,10 @@ class TorchNetworkEngine(ISimulationEngine):
             dt=self._dt,
             spikes=spikes_global,
             tensors=event_tensors,
-            scalars=cast(Mapping[str, float], scalars),
+            scalars=cast(Mapping[str, Scalar], scalars),
             meta={"population_slices": pop_slices},
         )
+        self._last_event = event
 
         for monitor in self._monitors:
             monitor.on_step(event)
@@ -351,6 +385,8 @@ class TorchNetworkEngine(ISimulationEngine):
         if self._spikes_global is None:
             raise RuntimeError("Engine must be reset before stepping.")
 
+        torch = require_torch()
+        no_monitors = not _monitors_active(self._monitors)
         if self._mod_specs:
             mod_by_pop, edge_mods_by_proj = _step_modulators_compiled(
                 self._mod_specs,
@@ -385,16 +421,28 @@ class TorchNetworkEngine(ISimulationEngine):
         for proj in self._proj_specs:
             proj_state = self._proj_states[proj.name]
             pre_spikes = self._pop_states[proj.pre].spikes
-            proj_state.state, syn_result = proj.synapse.step(
-                proj_state.state,
-                proj.topology,
-                SynapseInputs(pre_spikes=pre_spikes),
-                dt=self._dt,
-                t=self._t,
-                ctx=self._ctx,
-            )
-            self.last_projection_drive[proj.name] = syn_result.post_drive
-            _accumulate_drive(self._drive_buffers[proj.post], syn_result.post_drive)
+            if hasattr(proj.synapse, "step_into"):
+                proj.synapse.step_into(
+                    proj_state.state,
+                    pre_spikes,
+                    self._drive_buffers[proj.post],
+                    t=self._t,
+                    topology=proj.topology,
+                    dt=self._dt,
+                    ctx=self._ctx,
+                )
+                self.last_projection_drive[proj.name] = self._drive_buffers[proj.post]
+            else:
+                proj_state.state, syn_result = proj.synapse.step(
+                    proj_state.state,
+                    proj.topology,
+                    SynapseInputs(pre_spikes=pre_spikes),
+                    dt=self._dt,
+                    t=self._t,
+                    ctx=self._ctx,
+                )
+                self.last_projection_drive[proj.name] = syn_result.post_drive
+                _accumulate_drive(self._drive_buffers[proj.post], syn_result.post_drive)
 
         if self._external_drive_fn is not None:
             for spec in self._pop_specs:
@@ -416,33 +464,33 @@ class TorchNetworkEngine(ISimulationEngine):
                 ctx=self._ctx,
             )
             spikes_view = pop_state.spikes
-            spikes_view.copy_(
-                (result.spikes > 0).to(device=spikes_view.device, dtype=spikes_view.dtype)
-            )
+            spikes = result.spikes if result.spikes.dtype == torch.bool else (result.spikes > 0)
+            spikes_view.copy_(spikes.to(device=spikes_view.device))
             self._pop_states[spec.name] = pop_state
 
-            if self._fast_mode:
-                if self._compiled_event_tensors is not None:
-                    self._compiled_event_tensors[f"pop/{spec.name}/spikes"] = spikes_view
-                    tensors = spec.model.state_tensors(pop_state.state)
-                    for key in self._compiled_pop_tensor_keys.get(spec.name, ()):
-                        if key == "spikes":
-                            continue
-                        value = tensors.get(key)
-                        if value is None:
-                            continue
-                        self._compiled_event_tensors[f"pop/{spec.name}/{key}"] = value
-            else:
-                views = self._compiled_pop_tensor_views.get(spec.name)
-                if views:
-                    tensors = spec.model.state_tensors(pop_state.state)
-                    for key, view in views.items():
-                        value = tensors.get(key)
-                        if value is None:
-                            continue
-                        if value.device != view.device or value.dtype != view.dtype:
-                            value = value.to(device=view.device, dtype=view.dtype)
-                        view.copy_(value)
+            if not no_monitors:
+                if self._fast_mode:
+                    if self._compiled_event_tensors is not None:
+                        self._compiled_event_tensors[f"pop/{spec.name}/spikes"] = spikes_view
+                        tensors = spec.model.state_tensors(pop_state.state)
+                        for key in self._compiled_pop_tensor_keys.get(spec.name, ()):
+                            if key == "spikes":
+                                continue
+                            value = tensors.get(key)
+                            if value is None:
+                                continue
+                            self._compiled_event_tensors[f"pop/{spec.name}/{key}"] = value
+                else:
+                    views = self._compiled_pop_tensor_views.get(spec.name)
+                    if views:
+                        tensors = spec.model.state_tensors(pop_state.state)
+                        for key, view in views.items():
+                            value = tensors.get(key)
+                            if value is None:
+                                continue
+                            if value.device != view.device or value.dtype != view.dtype:
+                                value = value.to(device=view.device, dtype=view.dtype)
+                            view.copy_(value)
 
         self.last_d_weights = {}
         for proj in self._proj_specs:
@@ -456,18 +504,45 @@ class TorchNetworkEngine(ISimulationEngine):
                 continue
 
             weights = _require_weights(proj_state.state, proj.name)
-            edge_pre = self._pop_states[proj.pre].spikes[proj.topology.pre_idx]
-            edge_post = self._pop_states[proj.post].spikes[proj.topology.post_idx]
-            batch = LearningBatch(
-                pre_spikes=edge_pre,
-                post_spikes=edge_post,
-                weights=weights,
-                modulators=edge_mods_by_proj.get(proj.name),
-                extras={
-                    "pre_idx": proj.topology.pre_idx,
-                    "post_idx": proj.topology.post_idx,
-                },
-            )
+            supports_sparse = bool(getattr(proj.learning, "supports_sparse", False))
+            use_sparse = bool(proj.sparse_learning and supports_sparse)
+            if use_sparse:
+                active_edges = _active_edges_from_spikes(
+                    self._pop_states[proj.pre].spikes,
+                    proj.topology,
+                    device=self._device,
+                    max_edges=_sparse_edge_cap(proj),
+                )
+                edge_pre_idx = proj.topology.pre_idx.index_select(0, active_edges)
+                edge_post_idx = proj.topology.post_idx.index_select(0, active_edges)
+                edge_pre = self._pop_states[proj.pre].spikes.index_select(0, edge_pre_idx)
+                edge_post = self._pop_states[proj.post].spikes.index_select(0, edge_post_idx)
+                edge_weights = weights.index_select(0, active_edges)
+                mods = _subset_edge_mods(edge_mods_by_proj.get(proj.name), active_edges)
+                batch = LearningBatch(
+                    pre_spikes=edge_pre,
+                    post_spikes=edge_post,
+                    weights=edge_weights,
+                    modulators=mods,
+                    extras={
+                        "pre_idx": edge_pre_idx,
+                        "post_idx": edge_post_idx,
+                        "active_edges": active_edges,
+                    },
+                )
+            else:
+                edge_pre = self._pop_states[proj.pre].spikes[proj.topology.pre_idx]
+                edge_post = self._pop_states[proj.post].spikes[proj.topology.post_idx]
+                batch = LearningBatch(
+                    pre_spikes=edge_pre,
+                    post_spikes=edge_post,
+                    weights=weights,
+                    modulators=edge_mods_by_proj.get(proj.name),
+                    extras={
+                        "pre_idx": proj.topology.pre_idx,
+                        "post_idx": proj.topology.post_idx,
+                    },
+                )
             new_state, res = proj.learning.step(
                 learn_state,
                 batch,
@@ -476,9 +551,28 @@ class TorchNetworkEngine(ISimulationEngine):
                 ctx=self._ctx,
             )
             proj_state.learning_state = new_state
-            weights.add_(res.d_weights)
+            if use_sparse:
+                if res.d_weights.numel() == active_edges.numel():
+                    weights.index_add_(0, active_edges, res.d_weights)
+                elif res.d_weights.numel() == weights.numel():
+                    weights.add_(res.d_weights)
+                else:
+                    raise ValueError(
+                        f"Sparse learning for {proj.name} returned d_weights with unexpected shape."
+                    )
+            else:
+                weights.add_(res.d_weights)
             _apply_weight_clamp(weights, proj)
             self.last_d_weights[proj.name] = res.d_weights
+
+        if no_monitors:
+            event = StepEvent(t=self._t, dt=self._dt)
+            self._last_event = event
+            t_now = self._t
+            step_now = self._step
+            self._t += self._dt
+            self._step += 1
+            return {"step": float(step_now), "t": float(t_now)}
 
         spikes_global = self._spikes_global
         spike_count = spikes_global.sum() if spikes_global.numel() else spikes_global.new_zeros(())
@@ -499,9 +593,10 @@ class TorchNetworkEngine(ISimulationEngine):
             dt=self._dt,
             spikes=spikes_global if not self._fast_mode else None,
             tensors=self._compiled_event_tensors or {},
-            scalars=cast(Mapping[str, float], scalars),
+            scalars=cast(Mapping[str, Scalar], scalars),
             meta=self._compiled_meta,
         )
+        self._last_event = event
 
         for monitor in self._monitors:
             monitor.on_step(event)
@@ -542,7 +637,7 @@ class TorchNetworkEngine(ISimulationEngine):
             self._pop_slice_tuples[spec.name] = (start, end)
             total = end
 
-        self._spikes_global = torch.zeros((total,), device=self._device, dtype=self._dtype)
+        self._spikes_global = torch.zeros((total,), device=self._device, dtype=torch.bool)
         self._pop_spike_views = {
             name: self._spikes_global[self._pop_slices[name]] for name in self._pop_order
         }
@@ -670,6 +765,33 @@ def _collect_modulator_kinds(mod_specs: Sequence[ModulatorSpec]) -> tuple[Modula
     return tuple(kinds)
 
 
+def _monitors_active(monitors: Sequence[IMonitor]) -> bool:
+    if not monitors:
+        return False
+    return any(getattr(monitor, "enabled", True) for monitor in monitors)
+
+
+def _compile_flags_for_projection(proj: ProjectionSpec) -> tuple[bool, bool]:
+    build_edges_by_delay = False
+    build_pre_adjacency = False
+    try:
+        from biosnn.synapses.dynamics.delayed_current import DelayedCurrentSynapse
+    except Exception:
+        return build_edges_by_delay, build_pre_adjacency
+
+    if isinstance(proj.synapse, DelayedCurrentSynapse):
+        params = proj.synapse.params
+        adaptive = bool(getattr(params, "adaptive_event_driven", False))
+        build_pre_adjacency = bool(params.event_driven or adaptive)
+        build_edges_by_delay = bool(
+            (not params.use_edge_buffer) and (adaptive or not params.event_driven)
+        )
+    supports_sparse = bool(getattr(proj.learning, "supports_sparse", False))
+    if proj.sparse_learning and supports_sparse:
+        build_pre_adjacency = True
+    return build_edges_by_delay, build_pre_adjacency
+
+
 def _apply_initial_spikes(
     pop_states: Mapping[str, _PopulationState],
     pop_order: Sequence[str],
@@ -697,15 +819,15 @@ def _apply_indices(spikes: Tensor, indices: Any) -> None:
             spikes.copy_(indices.to(device=spikes.device, dtype=spikes.dtype))
             return
         idx_tensor = indices.to(device=spikes.device, dtype=require_torch().long)
-        spikes[idx_tensor] = 1.0
+        spikes[idx_tensor] = True
         return
 
     if isinstance(indices, (list, tuple)):
         for idx in indices:
-            spikes[int(idx)] = 1.0
+            spikes[int(idx)] = True
         return
 
-    spikes[int(indices)] = 1.0
+    spikes[int(indices)] = True
 
 
 def _copy_topology_weights(state: Any, weights: Tensor | None) -> None:
@@ -1051,6 +1173,77 @@ def _modulator_tensors(
         for key, value in spec.field.state_tensors(state).items():
             tensors[f"mod/{spec.name}/{key}"] = value
     return tensors
+
+
+def _sparse_edge_cap(proj: ProjectionSpec) -> int | None:
+    if proj.meta and "sparse_max_edges" in proj.meta:
+        try:
+            cap = int(proj.meta["sparse_max_edges"])
+        except (TypeError, ValueError):
+            return None
+        return cap if cap > 0 else None
+    return None
+
+
+def _subset_edge_mods(
+    edge_mods: Mapping[ModulatorKind, Tensor] | None,
+    edges: Tensor,
+) -> Mapping[ModulatorKind, Tensor] | None:
+    if edge_mods is None:
+        return None
+    return {kind: value.index_select(0, edges) for kind, value in edge_mods.items()}
+
+
+def _require_pre_adjacency(topology: SynapseTopology, device: Any) -> tuple[Tensor, Tensor]:
+    if not topology.meta:
+        raise ValueError(
+            "Topology meta missing pre adjacency; compile_topology(..., build_pre_adjacency=True) "
+            "must be called."
+        )
+    pre_ptr = topology.meta.get("pre_ptr")
+    edge_idx = topology.meta.get("edge_idx")
+    if pre_ptr is None or edge_idx is None:
+        raise ValueError(
+            "Topology meta missing pre adjacency; compile_topology(..., build_pre_adjacency=True) "
+            "must be called."
+        )
+    if pre_ptr.device != device or edge_idx.device != device:
+        raise ValueError("Adjacency tensors must be on the projection device")
+    return cast(Tensor, pre_ptr), cast(Tensor, edge_idx)
+
+
+def _gather_active_edges(active_pre: Tensor, pre_ptr: Tensor, edge_idx: Tensor) -> Tensor:
+    torch = require_torch()
+    starts = pre_ptr.index_select(0, active_pre)
+    ends = pre_ptr.index_select(0, active_pre + 1)
+    counts = ends - starts
+    if counts.numel() == 0:
+        return cast(Tensor, torch.empty((0,), device=edge_idx.device, dtype=torch.long))
+    total = counts.sum()
+    base = torch.repeat_interleave(starts, counts)
+    prefix = torch.cumsum(counts, 0)
+    group_start = torch.repeat_interleave(prefix - counts, counts)
+    intra = torch.arange(total, device=edge_idx.device) - group_start
+    edge_pos = base + intra
+    return cast(Tensor, edge_idx.index_select(0, edge_pos))
+
+
+def _active_edges_from_spikes(
+    pre_spikes: Tensor,
+    topology: SynapseTopology,
+    *,
+    device: Any,
+    max_edges: int | None = None,
+) -> Tensor:
+    torch = require_torch()
+    pre_ptr, edge_idx = _require_pre_adjacency(topology, device)
+    active_pre = pre_spikes.nonzero(as_tuple=False).flatten()
+    if active_pre.numel() == 0:
+        return cast(Tensor, torch.empty((0,), device=edge_idx.device, dtype=torch.long))
+    edges = _gather_active_edges(active_pre, pre_ptr, edge_idx)
+    if max_edges is not None and edges.numel() > max_edges:
+        return edges[:max_edges]
+    return edges
 
 
 def _ensure_topology_meta(

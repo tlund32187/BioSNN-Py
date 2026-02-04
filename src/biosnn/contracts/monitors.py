@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 from biosnn.contracts.tensor import Tensor
+
+Scalar: TypeAlias = float | int | Tensor  # noqa: UP040
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +23,7 @@ class StepEvent:
     dt: float
     spikes: Tensor | None = None
     tensors: Mapping[str, Tensor] | None = None
-    scalars: Mapping[str, float] | None = None
+    scalars: Mapping[str, Scalar] | None = None
     meta: Mapping[str, Any] | None = None
 
 

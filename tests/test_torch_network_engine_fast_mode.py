@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 import pytest
 
-from biosnn.biophysics.models._torch_utils import resolve_device_dtype
 from biosnn.contracts.neurons import (
     Compartment,
     INeuronModel,
@@ -14,6 +13,7 @@ from biosnn.contracts.neurons import (
 )
 from biosnn.contracts.simulation import SimulationConfig
 from biosnn.contracts.tensor import Tensor
+from biosnn.core.torch_utils import resolve_device_dtype
 from biosnn.simulation.engine import TorchNetworkEngine
 from biosnn.simulation.network import PopulationSpec
 
@@ -96,6 +96,7 @@ def test_fast_mode_skips_merge(monkeypatch):
     assert monitor.event is not None
     assert monitor.event.spikes is None
     assert "pop/A/spikes" in monitor.event.tensors
+    assert monitor.event.tensors["pop/A/spikes"].dtype == torch.bool
     assert "pop/A/dummy" in monitor.event.tensors
 
 

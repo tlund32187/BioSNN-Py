@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
@@ -81,4 +81,21 @@ class ISynapseModel(Protocol):
         ...
 
     def state_tensors(self, state: Any) -> Mapping[str, Tensor]:
+        ...
+
+
+@runtime_checkable
+class ISynapseModelInplace(Protocol):
+    """Optional in-place synapse stepping API."""
+
+    name: str
+
+    def step_into(
+        self,
+        state: Any,
+        pre_spikes: Tensor,
+        out_drive: MutableMapping[Compartment, Tensor],
+        t: int,
+        **kwargs: Any,
+    ) -> None:
         ...

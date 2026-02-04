@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from biosnn.biophysics.models._torch_utils import require_torch, resolve_device_dtype
 from biosnn.contracts.learning import ILearningRule, LearningBatch, LearningStepResult
 from biosnn.contracts.modulators import ModulatorKind
 from biosnn.contracts.tensor import Tensor
+from biosnn.core.torch_utils import require_torch, resolve_device_dtype
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +28,7 @@ class ThreeFactorHebbianRule(ILearningRule):
     """Simple three-factor Hebbian update with optional dopamine gating."""
 
     name = "three_factor_hebbian"
+    supports_sparse = True
 
     def __init__(self, params: ThreeFactorHebbianParams | None = None) -> None:
         self.params = params or ThreeFactorHebbianParams()

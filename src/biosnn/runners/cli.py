@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from biosnn.biophysics.models._torch_utils import require_torch
+from biosnn.core.torch_utils import require_torch
 from biosnn.experiments.demo_minimal import DemoMinimalConfig, run_demo_minimal
 from biosnn.experiments.demo_network import DemoNetworkConfig, run_demo_network
 

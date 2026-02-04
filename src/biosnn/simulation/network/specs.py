@@ -31,6 +31,7 @@ class ProjectionSpec:
     post: str
     learning: ILearningRule | None = None
     learn_every: int = 1
+    sparse_learning: bool = False
     meta: Mapping[str, Any] | None = None
 
 

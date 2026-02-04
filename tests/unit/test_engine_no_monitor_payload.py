@@ -62,23 +62,20 @@ class SilentNeuronModel(INeuronModel):
         return {"dummy": state.dummy}
 
 
-def test_cuda_step_no_item(monkeypatch):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
+def test_no_monitors_skips_event_payload(monkeypatch):
+    from biosnn.simulation.engine import torch_network_engine as tne
 
-    calls = {"count": 0}
-    original_item = torch.Tensor.item
+    def _fail(*args, **kwargs):
+        raise AssertionError("_merge_population_tensors should not be called without monitors")
 
-    def _wrapped(self, *args, **kwargs):
-        calls["count"] += 1
-        return original_item(self, *args, **kwargs)
-
-    monkeypatch.setattr(torch.Tensor, "item", _wrapped, raising=True)
+    monkeypatch.setattr(tne, "_merge_population_tensors", _fail)
 
     pop = PopulationSpec(name="A", model=SilentNeuronModel(), n=4)
-    engine = TorchNetworkEngine(populations=[pop], projections=[], fast_mode=True)
-    engine.reset(config=SimulationConfig(dt=1e-3, device="cuda"))
-    for _ in range(3):
+    engine = TorchNetworkEngine(populations=[pop], projections=[], fast_mode=False)
+    engine.reset(config=SimulationConfig(dt=1e-3))
+
+    for _ in range(10):
         engine.step()
 
-    assert calls["count"] == 0
+    assert engine._last_event is not None
+    assert engine._last_event.tensors in (None, {})

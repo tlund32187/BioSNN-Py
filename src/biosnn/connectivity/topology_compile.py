@@ -4,15 +4,18 @@ from __future__ import annotations
 
 from typing import Any, SupportsInt, cast
 
-from biosnn.biophysics.models._torch_utils import require_torch
 from biosnn.contracts.synapses import SynapseTopology
 from biosnn.contracts.tensor import Tensor
+from biosnn.core.torch_utils import require_torch
 
 
 def compile_topology(
     topology: SynapseTopology,
     device: Any,
     dtype: Any,
+    *,
+    build_edges_by_delay: bool = False,
+    build_pre_adjacency: bool = False,
 ) -> SynapseTopology:
     """Cast/move topology tensors to the requested device/dtype and populate meta."""
 
@@ -64,51 +67,55 @@ def compile_topology(
         if hasattr(ids, "tolist"):
             meta["target_comp_ids"] = [int(val) for val in ids.tolist()]
 
-    edges_by_delay = meta.get("edges_by_delay")
-    rebuild_edges = True
-    if isinstance(edges_by_delay, list) and edges_by_delay:
-        first = edges_by_delay[0]
-        if hasattr(first, "device"):
-            if device_obj is None or first.device == device_obj:
+    if build_edges_by_delay:
+        edges_by_delay = meta.get("edges_by_delay")
+        rebuild_edges = True
+        if isinstance(edges_by_delay, list):
+            first = edges_by_delay[0] if edges_by_delay else None
+            if first is None:
                 rebuild_edges = False
+            elif hasattr(first, "device"):
+                if device_obj is None or first.device == device_obj:
+                    rebuild_edges = False
+            else:
+                rebuild_edges = False
+
+        if rebuild_edges:
+            meta["edges_by_delay"] = _bucket_edges_by_delay(
+                delay_steps=delay_steps,
+                edge_count=_edge_count(pre_idx),
+                max_delay=int(meta["max_delay_steps"]),
+                device=device_obj,
+            )
+
+    if build_pre_adjacency:
+        rebuild_adj = False
+        pre_ptr_meta = meta.get("pre_ptr")
+        edge_idx_meta = meta.get("edge_idx")
+        if pre_ptr_meta is None or edge_idx_meta is None:
+            rebuild_adj = True
         else:
-            rebuild_edges = False
+            if (
+                device_obj is not None
+                and hasattr(pre_ptr_meta, "device")
+                and pre_ptr_meta.device != device_obj
+            ):
+                rebuild_adj = True
+            if (
+                device_obj is not None
+                and hasattr(edge_idx_meta, "device")
+                and edge_idx_meta.device != device_obj
+            ):
+                rebuild_adj = True
 
-    if rebuild_edges:
-        meta["edges_by_delay"] = _bucket_edges_by_delay(
-            delay_steps=delay_steps,
-            edge_count=_edge_count(pre_idx),
-            max_delay=int(meta["max_delay_steps"]),
-            device=device_obj,
-        )
-
-    rebuild_adj = False
-    pre_ptr_meta = meta.get("pre_ptr")
-    edge_idx_meta = meta.get("edge_idx")
-    if pre_ptr_meta is None or edge_idx_meta is None:
-        rebuild_adj = True
-    else:
-        if (
-            device_obj is not None
-            and hasattr(pre_ptr_meta, "device")
-            and pre_ptr_meta.device != device_obj
-        ):
-            rebuild_adj = True
-        if (
-            device_obj is not None
-            and hasattr(edge_idx_meta, "device")
-            and edge_idx_meta.device != device_obj
-        ):
-            rebuild_adj = True
-
-    if rebuild_adj:
-        pre_ptr, edge_idx = _build_pre_adjacency(
-            pre_idx=pre_idx,
-            n_pre=int(meta["n_pre"]),
-            device=device_obj,
-        )
-        meta["pre_ptr"] = pre_ptr
-        meta["edge_idx"] = edge_idx
+        if rebuild_adj:
+            pre_ptr, edge_idx = _build_pre_adjacency(
+                pre_idx=pre_idx,
+                n_pre=int(meta["n_pre"]),
+                device=device_obj,
+            )
+            meta["pre_ptr"] = pre_ptr
+            meta["edge_idx"] = edge_idx
 
     object.__setattr__(topology, "pre_idx", pre_idx)
     object.__setattr__(topology, "post_idx", post_idx)

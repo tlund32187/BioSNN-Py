@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from biosnn.biophysics.models._torch_utils import require_torch
 from biosnn.connectivity.builders.random_topology import build_erdos_renyi_edges
 from biosnn.connectivity.delays.axon import compute_delay_steps
 from biosnn.contracts.synapses import SynapseTopology
 from biosnn.contracts.tensor import Tensor
+from biosnn.core.torch_utils import require_torch
 
 
 def build_bipartite_erdos_renyi_topology(

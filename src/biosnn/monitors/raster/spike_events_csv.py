@@ -5,10 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from biosnn.biophysics.models._torch_utils import require_torch
 from biosnn.contracts.monitors import IMonitor, StepEvent
 from biosnn.contracts.tensor import Tensor
+from biosnn.core.torch_utils import require_torch
 from biosnn.io.sinks.csv_sink import CsvSink
+from biosnn.monitors.metrics.scalar_utils import scalar_to_float
 
 
 class SpikeEventsCSVMonitor(IMonitor):
@@ -44,7 +45,8 @@ class SpikeEventsCSVMonitor(IMonitor):
     def on_step(self, event: StepEvent) -> None:
         if event.spikes is None:
             return
-        step = int(event.scalars.get("step", 0)) if event.scalars else 0
+        torch = require_torch()
+        step = int(scalar_to_float(event.scalars.get("step", 0))) if event.scalars else 0
         if step % self._stride != 0:
             return
 
@@ -54,7 +56,10 @@ class SpikeEventsCSVMonitor(IMonitor):
         if population_slices:
             for pop, (start, end) in population_slices.items():
                 pop_spikes = spikes[start:end]
-                indices = (pop_spikes > 0.5).nonzero(as_tuple=False).flatten()
+                if getattr(pop_spikes, "dtype", None) == torch.bool:
+                    indices = pop_spikes.nonzero(as_tuple=False).flatten()
+                else:
+                    indices = (pop_spikes > 0.5).nonzero(as_tuple=False).flatten()
                 indices = self._filter_indices(pop, indices, end - start)
                 indices = _cap_indices(indices, self._max_spikes)
                 for idx in indices.tolist():
@@ -63,7 +68,10 @@ class SpikeEventsCSVMonitor(IMonitor):
                     )
             return
 
-        indices = (spikes > 0.5).nonzero(as_tuple=False).flatten()
+        if getattr(spikes, "dtype", None) == torch.bool:
+            indices = spikes.nonzero(as_tuple=False).flatten()
+        else:
+            indices = (spikes > 0.5).nonzero(as_tuple=False).flatten()
         indices = self._filter_indices("pop0", indices, int(spikes.shape[0]))
         indices = _cap_indices(indices, self._max_spikes)
         for idx in indices.tolist():

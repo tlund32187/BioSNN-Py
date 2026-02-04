@@ -6,12 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from biosnn.biophysics.models._torch_utils import require_torch
 from biosnn.biophysics.models.adex_2c import AdEx2CompModel
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.connectivity.builders import build_erdos_renyi_topology
 from biosnn.contracts.neurons import INeuronModel
 from biosnn.contracts.simulation import SimulationConfig
+from biosnn.core.torch_utils import require_torch
 from biosnn.io.dashboard_export import export_topology_json
 from biosnn.monitors.csv import (
     AdEx2CompCSVMonitor,

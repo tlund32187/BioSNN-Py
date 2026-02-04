@@ -6,6 +6,7 @@ from typing import Any
 
 from biosnn.contracts.monitors import IMonitor, StepEvent
 from biosnn.io.sinks.csv_sink import CsvSink
+from biosnn.monitors.metrics.scalar_utils import scalar_to_float
 
 
 class MetricsCSVMonitor(IMonitor):
@@ -39,7 +40,7 @@ class MetricsCSVMonitor(IMonitor):
         self._stride = max(1, stride)
 
     def on_step(self, event: StepEvent) -> None:
-        step = int(event.scalars.get("step", 0)) if event.scalars else 0
+        step = int(scalar_to_float(event.scalars.get("step", 0))) if event.scalars else 0
         if step % self._stride != 0:
             return
 
@@ -49,10 +50,17 @@ class MetricsCSVMonitor(IMonitor):
         if (spike_count is None or spike_fraction is None) and event.spikes is not None and hasattr(
             event.spikes, "numel"
         ):
-                total = float(event.spikes.sum().item()) if event.spikes.numel() else 0.0
-                frac = float(event.spikes.mean().item()) if event.spikes.numel() else 0.0
-                spike_count = total if spike_count is None else spike_count
-                spike_fraction = frac if spike_fraction is None else spike_fraction
+            spikes = event.spikes
+            if (
+                getattr(spikes, "dtype", None) is not None
+                and "bool" in str(spikes.dtype).lower()
+                and hasattr(spikes, "float")
+            ):
+                spikes = spikes.float()
+            total = float(spikes.sum().item()) if spikes.numel() else 0.0
+            frac = float(spikes.mean().item()) if spikes.numel() else 0.0
+            spike_count = total if spike_count is None else spike_count
+            spike_fraction = frac if spike_fraction is None else spike_fraction
 
         row = {
             "step": step,
@@ -89,7 +97,7 @@ class MetricsCSVMonitor(IMonitor):
 
 def _value_from_scalars(event: StepEvent, key: str) -> float | None:
     if event.scalars and key in event.scalars:
-        return float(event.scalars[key])
+        return scalar_to_float(event.scalars[key])
     return None
 
 

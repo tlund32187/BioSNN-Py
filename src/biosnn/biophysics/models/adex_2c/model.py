@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 
-from biosnn.biophysics.models._torch_utils import require_torch, resolve_device_dtype
 from biosnn.contracts.neurons import (
     AdEx2CompParams,
     AdEx2CompState,
@@ -18,6 +17,7 @@ from biosnn.contracts.neurons import (
     StepContext,
     Tensor,
 )
+from biosnn.core.torch_utils import require_torch, resolve_device_dtype
 
 
 @dataclass(frozen=True)

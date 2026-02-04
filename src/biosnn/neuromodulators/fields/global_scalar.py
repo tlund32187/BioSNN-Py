@@ -6,9 +6,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-from biosnn.biophysics.models._torch_utils import require_torch, resolve_device_dtype
 from biosnn.contracts.modulators import IModulatorField, ModulatorKind, ModulatorRelease
 from biosnn.contracts.tensor import Tensor
+from biosnn.core.torch_utils import require_torch, resolve_device_dtype
 
 
 @dataclass(frozen=True, slots=True)

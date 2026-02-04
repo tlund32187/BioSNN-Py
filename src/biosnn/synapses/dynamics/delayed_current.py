@@ -7,7 +7,6 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, cast
 
-from biosnn.biophysics.models._torch_utils import require_torch, resolve_device_dtype
 from biosnn.contracts.neurons import Compartment, StepContext, Tensor
 from biosnn.contracts.synapses import (
     ISynapseModel,
@@ -16,6 +15,7 @@ from biosnn.contracts.synapses import (
     SynapseStepResult,
     SynapseTopology,
 )
+from biosnn.core.torch_utils import require_torch, resolve_device_dtype
 
 _COMPARTMENT_ORDER = tuple(Compartment)
 _COMPARTMENT_TO_ID = {comp: idx for idx, comp in enumerate(_COMPARTMENT_ORDER)}
@@ -31,6 +31,8 @@ class DelayedCurrentParams:
     receptor_scale: Mapping[ReceptorKind, float] | None = None
     use_edge_buffer: bool = False
     event_driven: bool = False
+    adaptive_event_driven: bool = False
+    adaptive_threshold: float = 0.02
 
 
 @dataclass(slots=True)
@@ -40,6 +42,7 @@ class DelayedCurrentState:
     weights: Tensor  # shape [E]
     delay_buffer: Tensor | None  # shape [D, E] (legacy)
     post_ring: dict[Compartment, Tensor] | None  # shape [D, Npost] per compartment
+    post_out: dict[Compartment, Tensor] | None  # reusable output buffers [Npost] per compartment
     cursor: int
 
 
@@ -56,7 +59,13 @@ class DelayedCurrentSynapse(ISynapseModel):
         torch = require_torch()
         device, dtype = resolve_device_dtype(ctx)
         weights = torch.full((e,), self.params.init_weight, device=device, dtype=dtype)
-        return DelayedCurrentState(weights=weights, delay_buffer=None, post_ring=None, cursor=0)
+        return DelayedCurrentState(
+            weights=weights,
+            delay_buffer=None,
+            post_ring=None,
+            post_out=None,
+            cursor=0,
+        )
 
     def reset_state(
         self,
@@ -73,6 +82,9 @@ class DelayedCurrentSynapse(ISynapseModel):
             if state.post_ring is not None:
                 for ring in state.post_ring.values():
                     ring.zero_()
+            if state.post_out is not None:
+                for out in state.post_out.values():
+                    out.zero_()
             state.cursor = 0
             return state
         state.weights[edge_indices] = self.params.init_weight
@@ -81,6 +93,9 @@ class DelayedCurrentSynapse(ISynapseModel):
         if state.post_ring is not None:
             for ring in state.post_ring.values():
                 ring[:, :] = 0.0
+        if state.post_out is not None:
+            for out in state.post_out.values():
+                out[:] = 0.0
         return state
 
     def step(
@@ -125,6 +140,40 @@ class DelayedCurrentSynapse(ISynapseModel):
                 )
                 return state, SynapseStepResult(post_drive=post_drive)
 
+            if self.params.adaptive_event_driven:
+                spike_fraction = pre_spikes.float().mean()
+                active_pre = pre_spikes.nonzero(as_tuple=False).flatten()
+                use_event = active_pre.numel() < (
+                    self.params.adaptive_threshold * pre_spikes.numel()
+                )
+                if use_event:
+                    state, post_drive, extras = _step_post_ring_event_driven(
+                        self,
+                        state,
+                        topology,
+                        pre_spikes,
+                        pre_idx,
+                        post_idx,
+                        device,
+                        weights,
+                        active_pre=active_pre,
+                    )
+                    extras = dict(extras)
+                    extras["spike_fraction"] = spike_fraction
+                    return state, SynapseStepResult(post_drive=post_drive, extras=extras)
+
+                state, post_drive = _step_post_ring(
+                    self,
+                    state,
+                    topology,
+                    pre_spikes,
+                    pre_idx,
+                    post_idx,
+                    device,
+                    weights,
+                )
+                return state, SynapseStepResult(post_drive=post_drive)
+
             if self.params.event_driven:
                 state, post_drive, extras = _step_post_ring_event_driven(
                     self,
@@ -150,6 +199,113 @@ class DelayedCurrentSynapse(ISynapseModel):
             )
 
             return state, SynapseStepResult(post_drive=post_drive)
+
+    def step_into(
+        self,
+        state: DelayedCurrentState,
+        pre_spikes: Tensor,
+        out_drive: Mapping[Compartment, Tensor],
+        t: int,
+        **kwargs: Any,
+    ) -> None:
+        topology = kwargs.get("topology")
+        ctx = kwargs.get("ctx")
+        dt = kwargs.get("dt")
+        if topology is None or ctx is None or dt is None:
+            raise ValueError("step_into requires topology, dt, and ctx keyword arguments")
+
+        torch = require_torch()
+        use_no_grad = _use_no_grad(ctx)
+        with torch.no_grad() if use_no_grad else nullcontext():
+            weights = state.weights
+            device = weights.device
+            validate_shapes = _validate_shapes(ctx)
+            require_on_device = _require_inputs_on_device(ctx)
+
+            pre_spikes = _as_like(
+                pre_spikes,
+                weights,
+                name="pre_spikes",
+                validate_shapes=validate_shapes,
+                expected_len=_infer_n_pre(topology),
+                require_on_device=require_on_device,
+            )
+
+            pre_idx = _as_index(topology.pre_idx, device, name="pre_idx")
+            post_idx = _as_index(topology.post_idx, device, name="post_idx")
+            if self.params.use_edge_buffer:
+                state, post_drive = _step_edge_buffer(
+                    self,
+                    state,
+                    topology,
+                    pre_spikes,
+                    pre_idx,
+                    post_idx,
+                    device,
+                    weights,
+                )
+                for comp, drive in post_drive.items():
+                    out_drive[comp].add_(drive)
+                return
+
+            if self.params.adaptive_event_driven:
+                _ = pre_spikes.float().mean()
+                active_pre = pre_spikes.nonzero(as_tuple=False).flatten()
+                use_event = active_pre.numel() < (
+                    self.params.adaptive_threshold * pre_spikes.numel()
+                )
+                if use_event:
+                    _step_post_ring_event_driven_into(
+                        self,
+                        state,
+                        topology,
+                        pre_spikes,
+                        pre_idx,
+                        post_idx,
+                        device,
+                        weights,
+                        out_drive,
+                        active_pre=active_pre,
+                    )
+                    return
+                _step_post_ring_into(
+                    self,
+                    state,
+                    topology,
+                    pre_spikes,
+                    pre_idx,
+                    post_idx,
+                    device,
+                    weights,
+                    out_drive,
+                )
+                return
+
+            if self.params.event_driven:
+                _step_post_ring_event_driven_into(
+                    self,
+                    state,
+                    topology,
+                    pre_spikes,
+                    pre_idx,
+                    post_idx,
+                    device,
+                    weights,
+                    out_drive,
+                )
+                return
+
+            _step_post_ring_into(
+                self,
+                state,
+                topology,
+                pre_spikes,
+                pre_idx,
+                post_idx,
+                device,
+                weights,
+                out_drive,
+            )
 
     def state_tensors(self, state: DelayedCurrentState) -> Mapping[str, Tensor]:
         tensors: dict[str, Tensor] = {"weights": state.weights}
@@ -250,6 +406,11 @@ def _step_edge_buffer(
 ) -> tuple[DelayedCurrentState, Mapping[Compartment, Tensor]]:
     torch = require_torch()
     edge_spikes = pre_spikes.index_select(0, pre_idx)
+    edge_active_f = (
+        edge_spikes
+        if edge_spikes.dtype == weights.dtype
+        else edge_spikes.to(dtype=weights.dtype)
+    )
 
     delay_steps_opt = topology.delay_steps
     max_delay = _max_delay_steps(topology)
@@ -270,15 +431,15 @@ def _step_edge_buffer(
         state.delay_buffer[cursor].zero_()
         immediate_mask = cast(Tensor, delay_steps == 0)
         if immediate_mask.any():
-            delayed = delayed + edge_spikes * immediate_mask.to(edge_spikes.dtype)
+            delayed = delayed + edge_active_f * immediate_mask.to(edge_active_f.dtype)
         if (~immediate_mask).any():
             target_rows = torch.remainder(delay_steps + cursor, depth)
-            state.delay_buffer[target_rows[~immediate_mask], edge_idx[~immediate_mask]] = edge_spikes[
-                ~immediate_mask
-            ]
+            state.delay_buffer[
+                target_rows[~immediate_mask], edge_idx[~immediate_mask]
+            ] = edge_active_f[~immediate_mask]
         state.cursor = (cursor + 1) % depth
     else:
-        delayed = edge_spikes
+        delayed = edge_active_f
 
     weights = _maybe_clamp_weights(model, state, weights)
     edge_current = delayed * weights
@@ -309,13 +470,14 @@ def _step_post_ring(
     depth = max_delay + 1
     n_post = _infer_n_post(topology)
     edges_by_delay = _edges_by_delay(topology, device)
-    post_ring = _ensure_post_ring(state, topology, depth, n_post, device, weights.dtype)
+    post_ring, post_out = _ensure_post_ring(state, topology, depth, n_post, device, weights.dtype)
 
     cursor = state.cursor % depth
     post_drive: dict[Compartment, Tensor] = {}
     for comp, ring in post_ring.items():
         slot = ring[cursor]
-        out = slot.clone()
+        out = post_out[comp]
+        out.copy_(slot)
         slot.zero_()
         post_drive[comp] = out
 
@@ -328,7 +490,12 @@ def _step_post_ring(
         edge_post = post_idx.index_select(0, edges)
         edge_spikes = pre_spikes.index_select(0, edge_pre)
         edge_weights = weights.index_select(0, edges)
-        edge_current = edge_spikes * edge_weights
+        edge_active_f = (
+            edge_spikes
+            if edge_spikes.dtype == edge_weights.dtype
+            else edge_spikes.to(dtype=edge_weights.dtype)
+        )
+        edge_current = edge_active_f * edge_weights
         edge_current = _apply_receptor_scale_edges(model, topology, edges, edge_current)
 
         if topology.target_compartments is None:
@@ -360,6 +527,79 @@ def _step_post_ring(
     return state, post_drive
 
 
+def _step_post_ring_into(
+    model: DelayedCurrentSynapse,
+    state: DelayedCurrentState,
+    topology: SynapseTopology,
+    pre_spikes: Tensor,
+    pre_idx: Tensor,
+    post_idx: Tensor,
+    device: Any,
+    weights: Tensor,
+    out_drive: Mapping[Compartment, Tensor],
+) -> None:
+    torch = require_torch()
+    max_delay = _max_delay_steps(topology)
+    depth = max_delay + 1
+    n_post = _infer_n_post(topology)
+    edges_by_delay = _edges_by_delay(topology, device)
+    post_ring, _ = _ensure_post_ring(state, topology, depth, n_post, device, weights.dtype)
+
+    cursor = state.cursor % depth
+    for comp, ring in post_ring.items():
+        slot = ring[cursor]
+        if comp not in out_drive:
+            raise KeyError(f"Drive accumulator missing compartment {comp}")
+        out_drive[comp].add_(slot)
+        slot.zero_()
+
+    weights = _maybe_clamp_weights(model, state, weights)
+
+    for delay, edges in enumerate(edges_by_delay):
+        if edges.numel() == 0:
+            continue
+        edge_pre = pre_idx.index_select(0, edges)
+        edge_post = post_idx.index_select(0, edges)
+        edge_spikes = pre_spikes.index_select(0, edge_pre)
+        edge_weights = weights.index_select(0, edges)
+        edge_active_f = (
+            edge_spikes
+            if edge_spikes.dtype == edge_weights.dtype
+            else edge_spikes.to(dtype=edge_weights.dtype)
+        )
+        edge_current = edge_active_f * edge_weights
+        edge_current = _apply_receptor_scale_edges(model, topology, edges, edge_current)
+
+        if topology.target_compartments is None:
+            comp = topology.target_compartment
+            if comp not in out_drive:
+                raise KeyError(f"Drive accumulator missing compartment {comp}")
+            if delay == 0:
+                out_drive[comp].index_add_(0, edge_post, edge_current)
+            else:
+                target_row = (cursor + delay) % depth
+                post_ring[comp][target_row].index_add_(0, edge_post, edge_current)
+            continue
+
+        comp_ids = topology.target_compartments
+        if comp_ids.device != device or comp_ids.dtype != torch.long:
+            raise ValueError("target_compartments must be on the target device with dtype long")
+        comp_ids = comp_ids.index_select(0, edges)
+        for comp in out_drive:
+            comp_id = _COMPARTMENT_TO_ID[comp]
+            mask = comp_ids == comp_id
+            if mask.any():
+                posts = edge_post[mask]
+                currents = edge_current[mask]
+                if delay == 0:
+                    out_drive[comp].index_add_(0, posts, currents)
+                else:
+                    target_row = (cursor + delay) % depth
+                    post_ring[comp][target_row].index_add_(0, posts, currents)
+
+    state.cursor = (cursor + 1) % depth
+
+
 def _step_post_ring_event_driven(
     model: DelayedCurrentSynapse,
     state: DelayedCurrentState,
@@ -369,24 +609,28 @@ def _step_post_ring_event_driven(
     post_idx: Tensor,
     device: Any,
     weights: Tensor,
+    *,
+    active_pre: Tensor | None = None,
 ) -> tuple[DelayedCurrentState, Mapping[Compartment, Tensor], Mapping[str, Tensor]]:
     torch = require_torch()
     max_delay = _max_delay_steps(topology)
     depth = max_delay + 1
     n_post = _infer_n_post(topology)
-    post_ring = _ensure_post_ring(state, topology, depth, n_post, device, weights.dtype)
+    post_ring, post_out = _ensure_post_ring(state, topology, depth, n_post, device, weights.dtype)
 
     cursor = state.cursor % depth
     post_drive: dict[Compartment, Tensor] = {}
     for comp, ring in post_ring.items():
         slot = ring[cursor]
-        out = slot.clone()
+        out = post_out[comp]
+        out.copy_(slot)
         slot.zero_()
         post_drive[comp] = out
 
     weights = _maybe_clamp_weights(model, state, weights)
 
-    active_pre = pre_spikes.nonzero(as_tuple=False).flatten()
+    if active_pre is None:
+        active_pre = pre_spikes.nonzero(as_tuple=False).flatten()
     if active_pre.numel() == 0:
         state.cursor = (cursor + 1) % depth
         extras = {"processed_edges": weights.new_zeros(())}
@@ -403,7 +647,12 @@ def _step_post_ring_event_driven(
     edge_post = post_idx.index_select(0, edges)
     edge_spikes = pre_spikes.index_select(0, edge_pre)
     edge_weights = weights.index_select(0, edges)
-    edge_current = edge_spikes * edge_weights
+    edge_active_f = (
+        edge_spikes
+        if edge_spikes.dtype == edge_weights.dtype
+        else edge_spikes.to(dtype=edge_weights.dtype)
+    )
+    edge_current = edge_active_f * edge_weights
     edge_current = _apply_receptor_scale_edges(model, topology, edges, edge_current)
 
     delay_steps = topology.delay_steps
@@ -460,6 +709,115 @@ def _step_post_ring_event_driven(
     return state, post_drive, extras
 
 
+def _step_post_ring_event_driven_into(
+    model: DelayedCurrentSynapse,
+    state: DelayedCurrentState,
+    topology: SynapseTopology,
+    pre_spikes: Tensor,
+    pre_idx: Tensor,
+    post_idx: Tensor,
+    device: Any,
+    weights: Tensor,
+    out_drive: Mapping[Compartment, Tensor],
+    *,
+    active_pre: Tensor | None = None,
+) -> None:
+    torch = require_torch()
+    max_delay = _max_delay_steps(topology)
+    depth = max_delay + 1
+    n_post = _infer_n_post(topology)
+    post_ring, _ = _ensure_post_ring(state, topology, depth, n_post, device, weights.dtype)
+
+    cursor = state.cursor % depth
+    for comp, ring in post_ring.items():
+        slot = ring[cursor]
+        if comp not in out_drive:
+            raise KeyError(f"Drive accumulator missing compartment {comp}")
+        out_drive[comp].add_(slot)
+        slot.zero_()
+
+    weights = _maybe_clamp_weights(model, state, weights)
+
+    if active_pre is None:
+        active_pre = pre_spikes.nonzero(as_tuple=False).flatten()
+    if active_pre.numel() == 0:
+        state.cursor = (cursor + 1) % depth
+        return
+
+    pre_ptr, edge_idx = _require_pre_adjacency(topology, device)
+    edges = _gather_active_edges(active_pre, pre_ptr, edge_idx)
+    if edges.numel() == 0:
+        state.cursor = (cursor + 1) % depth
+        return
+
+    edge_pre = pre_idx.index_select(0, edges)
+    edge_post = post_idx.index_select(0, edges)
+    edge_spikes = pre_spikes.index_select(0, edge_pre)
+    edge_weights = weights.index_select(0, edges)
+    edge_active_f = (
+        edge_spikes
+        if edge_spikes.dtype == edge_weights.dtype
+        else edge_spikes.to(dtype=edge_weights.dtype)
+    )
+    edge_current = edge_active_f * edge_weights
+    edge_current = _apply_receptor_scale_edges(model, topology, edges, edge_current)
+
+    delay_steps = topology.delay_steps
+    delay_vals = None if delay_steps is None else delay_steps.index_select(0, edges)
+
+    if topology.target_compartments is None:
+        comp = topology.target_compartment
+        if comp not in out_drive:
+            raise KeyError(f"Drive accumulator missing compartment {comp}")
+        if delay_vals is None:
+            out_drive[comp].index_add_(0, edge_post, edge_current)
+        else:
+            immediate_mask = delay_vals == 0
+            if immediate_mask.any():
+                out_drive[comp].index_add_(
+                    0, edge_post[immediate_mask], edge_current[immediate_mask]
+                )
+            delayed_mask = ~immediate_mask
+            if delayed_mask.any():
+                target_rows = torch.remainder(delay_vals[delayed_mask] + cursor, depth)
+                post_ring[comp].index_put_(
+                    (target_rows, edge_post[delayed_mask]),
+                    edge_current[delayed_mask],
+                    accumulate=True,
+                )
+    else:
+        comp_ids = topology.target_compartments
+        if comp_ids.device != device or comp_ids.dtype != torch.long:
+            raise ValueError("target_compartments must be on the target device with dtype long")
+        comp_ids = comp_ids.index_select(0, edges)
+        for comp in out_drive:
+            comp_id = _COMPARTMENT_TO_ID[comp]
+            comp_mask = comp_ids == comp_id
+            if not comp_mask.any():
+                continue
+            comp_posts = edge_post[comp_mask]
+            comp_currents = edge_current[comp_mask]
+            if delay_vals is None:
+                out_drive[comp].index_add_(0, comp_posts, comp_currents)
+                continue
+            comp_delays = delay_vals[comp_mask]
+            immediate_mask = comp_delays == 0
+            if immediate_mask.any():
+                out_drive[comp].index_add_(
+                    0, comp_posts[immediate_mask], comp_currents[immediate_mask]
+                )
+            delayed_mask = ~immediate_mask
+            if delayed_mask.any():
+                target_rows = torch.remainder(comp_delays[delayed_mask] + cursor, depth)
+                post_ring[comp].index_put_(
+                    (target_rows, comp_posts[delayed_mask]),
+                    comp_currents[delayed_mask],
+                    accumulate=True,
+                )
+
+    state.cursor = (cursor + 1) % depth
+
+
 def _ensure_post_ring(
     state: DelayedCurrentState,
     topology: SynapseTopology,
@@ -467,16 +825,22 @@ def _ensure_post_ring(
     n_post: int,
     device: Any,
     dtype: Any,
-) -> dict[Compartment, Tensor]:
+) -> tuple[dict[Compartment, Tensor], dict[Compartment, Tensor]]:
     torch = require_torch()
     if state.post_ring is None:
         state.post_ring = {}
+    if state.post_out is None:
+        state.post_out = {}
     for comp in _ring_compartments(topology):
         ring = state.post_ring.get(comp)
         if ring is None or ring.shape != (depth, n_post) or ring.device != device or ring.dtype != dtype:
             ring = torch.zeros((depth, n_post), device=device, dtype=dtype)
             state.post_ring[comp] = ring
-    return state.post_ring
+        out = state.post_out.get(comp)
+        if out is None or out.shape != (n_post,) or out.device != device or out.dtype != dtype:
+            out = torch.zeros((n_post,), device=device, dtype=dtype)
+            state.post_out[comp] = out
+    return state.post_ring, state.post_out
 
 
 def _ring_compartments(topology: SynapseTopology) -> tuple[Compartment, ...]:
@@ -497,36 +861,31 @@ def _ring_compartments(topology: SynapseTopology) -> tuple[Compartment, ...]:
 def _edges_by_delay(topology: SynapseTopology, device: Any) -> list[Tensor]:
     meta = topology.meta or {}
     cached = meta.get("edges_by_delay")
-    if isinstance(cached, list) and cached:
+    if isinstance(cached, list):
+        if cached:
+            first = cached[0]
+            if hasattr(first, "device") and device is not None and first.device != device:
+                raise RuntimeError(
+                    "edges_by_delay is on a different device; "
+                    "compile_topology(..., build_edges_by_delay=True) with the synapse device."
+                )
         return cached
-    torch = require_torch()
-    delay_steps = topology.delay_steps
-    edge_count = topology.pre_idx.numel() if hasattr(topology.pre_idx, "numel") else 0
-    if delay_steps is None or edge_count == 0:
-        edges = torch.arange(edge_count, device=device, dtype=torch.long)
-        edges_by_delay = [edges]
-    else:
-        max_delay = _max_delay_steps(topology)
-        edges_by_delay = []
-        for delay in range(max_delay + 1):
-            mask = delay_steps == delay
-            if mask.any():
-                edges_by_delay.append(mask.nonzero(as_tuple=False).flatten())
-            else:
-                edges_by_delay.append(torch.empty((0,), device=device, dtype=torch.long))
-    meta = dict(meta)
-    meta["edges_by_delay"] = edges_by_delay
-    object.__setattr__(topology, "meta", meta)
-    return edges_by_delay
+    raise RuntimeError(
+        "edges_by_delay missing; compile_topology(..., build_edges_by_delay=True) before stepping."
+    )
 
 
 def _require_pre_adjacency(topology: SynapseTopology, device: Any) -> tuple[Tensor, Tensor]:
     if not topology.meta:
-        raise ValueError("Topology meta missing pre adjacency; compile_topology must be called.")
+        raise ValueError(
+            "Topology meta missing pre adjacency; compile_topology(..., build_pre_adjacency=True) must be called."
+        )
     pre_ptr = topology.meta.get("pre_ptr")
     edge_idx = topology.meta.get("edge_idx")
     if pre_ptr is None or edge_idx is None:
-        raise ValueError("Topology meta missing pre adjacency; compile_topology must be called.")
+        raise ValueError(
+            "Topology meta missing pre adjacency; compile_topology(..., build_pre_adjacency=True) must be called."
+        )
     if pre_ptr.device != device or edge_idx.device != device:
         raise ValueError("Adjacency tensors must be on the synapse device")
     return cast(Tensor, pre_ptr), cast(Tensor, edge_idx)
@@ -571,7 +930,7 @@ def _as_like(
     expected_len: int | None,
     require_on_device: bool,
 ) -> Tensor:
-    if tensor.device != like.device or tensor.dtype != like.dtype:
+    if tensor.device != like.device:
         if require_on_device:
             raise ValueError(
                 f"{name} must be on device {like.device} with dtype {like.dtype}, got {tensor.device}/{tensor.dtype}"
@@ -579,6 +938,16 @@ def _as_like(
         raise ValueError(
             f"{name} must be on device {like.device} with dtype {like.dtype}, got {tensor.device}/{tensor.dtype}"
         )
+    if tensor.dtype != like.dtype:
+        torch = require_torch()
+        if tensor.dtype != torch.bool:
+            if require_on_device:
+                raise ValueError(
+                    f"{name} must be on device {like.device} with dtype {like.dtype}, got {tensor.device}/{tensor.dtype}"
+                )
+            raise ValueError(
+                f"{name} must be on device {like.device} with dtype {like.dtype}, got {tensor.device}/{tensor.dtype}"
+            )
     if validate_shapes and expected_len is not None:
         _ensure_1d_len(tensor, expected_len, name)
     return tensor

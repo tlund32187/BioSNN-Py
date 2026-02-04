@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 import pytest
 
-from biosnn.biophysics.models._torch_utils import resolve_device_dtype
 from biosnn.contracts.modulators import ModulatorKind, ModulatorRelease
 from biosnn.contracts.neurons import (
     Compartment,
@@ -16,6 +15,7 @@ from biosnn.contracts.neurons import (
 from biosnn.contracts.simulation import SimulationConfig
 from biosnn.contracts.synapses import SynapseTopology
 from biosnn.contracts.tensor import Tensor
+from biosnn.core.torch_utils import resolve_device_dtype
 from biosnn.learning import ThreeFactorHebbianParams, ThreeFactorHebbianRule
 from biosnn.neuromodulators import GlobalScalarField, GlobalScalarParams
 from biosnn.simulation.engine import TorchNetworkEngine

@@ -8,7 +8,7 @@ from typing import Any
 
 from biosnn.contracts.monitors import IMonitor, StepEvent
 from biosnn.io.sinks import CsvSink
-from biosnn.monitors.metrics import reduce_stat, reduce_tensor, sample_tensor
+from biosnn.monitors.metrics import reduce_stat, reduce_tensor, sample_tensor, scalar_to_float
 
 _DEFAULT_STATS: tuple[str, ...] = ("mean", "min", "max")
 
@@ -59,12 +59,12 @@ class NeuronCSVMonitor(IMonitor):
             row["spike_fraction"] = spike_fraction
             row["spike_rate_hz"] = (spike_fraction / event.dt) if event.dt else 0.0
             if self._sample_indices is not None:
-                for idx, value in sample_tensor(event.spikes, self._sample_indices):
-                    row[f"spike_i{idx}"] = value
+                for idx, sample_value in sample_tensor(event.spikes, self._sample_indices):
+                    row[f"spike_i{idx}"] = sample_value
 
         if self._include_scalars and event.scalars:
-            for key, value in sorted(event.scalars.items()):
-                row[key] = float(value)
+            for key, scalar_value in sorted(event.scalars.items()):
+                row[key] = scalar_to_float(scalar_value)
 
         tensors = event.tensors or {}
         if self._tensor_keys is None:

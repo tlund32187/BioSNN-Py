@@ -38,7 +38,12 @@ def test_delayed_current_ring_matches_edge_buffer():
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(topology, device=ctx.device, dtype=ctx.dtype)
+    compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_edges_by_delay=True,
+    )
 
     torch.manual_seed(0)
     pre_seq = [(torch.rand((4,)) > 0.5).to(dtype=torch.float32) for _ in range(6)]
@@ -65,7 +70,12 @@ def test_delayed_current_ring_memory_shape():
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(topology, device=ctx.device, dtype=ctx.dtype)
+    compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_edges_by_delay=True,
+    )
 
     model = DelayedCurrentSynapse()
     state = model.init_state(pre_idx.numel(), ctx=ctx)
@@ -98,7 +108,13 @@ def test_delayed_current_event_driven_matches_dense():
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(topology, device=ctx.device, dtype=ctx.dtype)
+    compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_edges_by_delay=True,
+        build_pre_adjacency=True,
+    )
 
     torch.manual_seed(1)
     pre_seq = [(torch.rand((4,)) > 0.7).to(dtype=torch.float32) for _ in range(5)]
@@ -124,7 +140,12 @@ def test_delayed_current_event_driven_processes_fewer_edges():
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(topology, device=ctx.device, dtype=ctx.dtype)
+    compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_pre_adjacency=True,
+    )
 
     model = DelayedCurrentSynapse(DelayedCurrentParams(event_driven=True, init_weight=1.0))
     state = model.init_state(pre_idx.numel(), ctx=ctx)
@@ -147,6 +168,194 @@ def test_delayed_current_event_driven_processes_fewer_edges():
     assert processed < pre_idx.numel()
 
 
+def test_delayed_current_adaptive_uses_event_driven_for_sparse(monkeypatch):
+    ctx = StepContext(device="cpu", dtype="float32")
+    pre_idx = torch.tensor([0, 1, 2, 3, 0, 2], dtype=torch.long)
+    post_idx = torch.tensor([0, 1, 1, 2, 2, 0], dtype=torch.long)
+    delay_steps = torch.tensor([0, 1, 2, 0, 1, 2], dtype=torch.int32)
+    topology = SynapseTopology(
+        pre_idx=pre_idx,
+        post_idx=post_idx,
+        delay_steps=delay_steps,
+        target_compartment=Compartment.SOMA,
+    )
+    compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_edges_by_delay=True,
+        build_pre_adjacency=True,
+    )
+
+    model = DelayedCurrentSynapse(
+        DelayedCurrentParams(adaptive_event_driven=True, adaptive_threshold=0.5, init_weight=1.0)
+    )
+    state = model.init_state(pre_idx.numel(), ctx=ctx)
+    state.weights.fill_(1.0)
+
+    called = {"event": 0, "dense": 0}
+    import biosnn.synapses.dynamics.delayed_current as dc
+
+    orig_event = dc._step_post_ring_event_driven
+    orig_dense = dc._step_post_ring
+
+    def wrap_event(*args, **kwargs):
+        called["event"] += 1
+        return orig_event(*args, **kwargs)
+
+    def wrap_dense(*args, **kwargs):
+        called["dense"] += 1
+        return orig_dense(*args, **kwargs)
+
+    monkeypatch.setattr(dc, "_step_post_ring_event_driven", wrap_event)
+    monkeypatch.setattr(dc, "_step_post_ring", wrap_dense)
+
+    pre_spikes = torch.zeros((4,), dtype=state.weights.dtype)
+    pre_spikes[0] = 1.0
+
+    model.step(
+        state,
+        topology,
+        SynapseInputs(pre_spikes=pre_spikes),
+        dt=1e-3,
+        t=0.0,
+        ctx=ctx,
+    )
+
+    assert called["event"] == 1
+    assert called["dense"] == 0
+
+
+def test_delayed_current_adaptive_uses_dense_for_dense(monkeypatch):
+    ctx = StepContext(device="cpu", dtype="float32")
+    pre_idx = torch.tensor([0, 1, 2, 3, 0, 2], dtype=torch.long)
+    post_idx = torch.tensor([0, 1, 1, 2, 2, 0], dtype=torch.long)
+    delay_steps = torch.tensor([0, 1, 2, 0, 1, 2], dtype=torch.int32)
+    topology = SynapseTopology(
+        pre_idx=pre_idx,
+        post_idx=post_idx,
+        delay_steps=delay_steps,
+        target_compartment=Compartment.SOMA,
+    )
+    compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_edges_by_delay=True,
+        build_pre_adjacency=True,
+    )
+
+    model = DelayedCurrentSynapse(
+        DelayedCurrentParams(adaptive_event_driven=True, adaptive_threshold=0.1, init_weight=1.0)
+    )
+    state = model.init_state(pre_idx.numel(), ctx=ctx)
+    state.weights.fill_(1.0)
+
+    called = {"event": 0, "dense": 0}
+    import biosnn.synapses.dynamics.delayed_current as dc
+
+    orig_event = dc._step_post_ring_event_driven
+    orig_dense = dc._step_post_ring
+
+    def wrap_event(*args, **kwargs):
+        called["event"] += 1
+        return orig_event(*args, **kwargs)
+
+    def wrap_dense(*args, **kwargs):
+        called["dense"] += 1
+        return orig_dense(*args, **kwargs)
+
+    monkeypatch.setattr(dc, "_step_post_ring_event_driven", wrap_event)
+    monkeypatch.setattr(dc, "_step_post_ring", wrap_dense)
+
+    pre_spikes = torch.ones((4,), dtype=state.weights.dtype)
+
+    model.step(
+        state,
+        topology,
+        SynapseInputs(pre_spikes=pre_spikes),
+        dt=1e-3,
+        t=0.0,
+        ctx=ctx,
+    )
+
+    assert called["event"] == 0
+    assert called["dense"] == 1
+
+
+def test_delayed_current_adaptive_matches_event_driven_for_sparse():
+    ctx = StepContext(device="cpu", dtype="float32")
+    pre_idx = torch.tensor([0, 1, 2, 0, 1, 3], dtype=torch.long)
+    post_idx = torch.tensor([0, 0, 1, 2, 2, 1], dtype=torch.long)
+    delay_steps = torch.tensor([0, 1, 2, 0, 2, 1], dtype=torch.int32)
+    topology = SynapseTopology(
+        pre_idx=pre_idx,
+        post_idx=post_idx,
+        delay_steps=delay_steps,
+        target_compartment=Compartment.SOMA,
+    )
+    compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_edges_by_delay=True,
+        build_pre_adjacency=True,
+    )
+
+    pre_seq = [
+        torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32),
+        torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=torch.float32),
+        torch.tensor([0.0, 0.0, 1.0, 0.0], dtype=torch.float32),
+    ]
+
+    adaptive = DelayedCurrentSynapse(
+        DelayedCurrentParams(adaptive_event_driven=True, adaptive_threshold=0.5, init_weight=1.0)
+    )
+    event = DelayedCurrentSynapse(DelayedCurrentParams(event_driven=True, init_weight=1.0))
+
+    adaptive_out = _run_synapse(adaptive, topology, pre_seq, ctx=ctx)
+    event_out = _run_synapse(event, topology, pre_seq, ctx=ctx)
+
+    for a, b in zip(adaptive_out, event_out, strict=True):
+        torch.testing.assert_close(a, b)
+
+
+def test_delayed_current_adaptive_matches_dense_for_dense():
+    ctx = StepContext(device="cpu", dtype="float32")
+    pre_idx = torch.tensor([0, 1, 2, 0, 1, 3], dtype=torch.long)
+    post_idx = torch.tensor([0, 0, 1, 2, 2, 1], dtype=torch.long)
+    delay_steps = torch.tensor([0, 1, 2, 0, 2, 1], dtype=torch.int32)
+    topology = SynapseTopology(
+        pre_idx=pre_idx,
+        post_idx=post_idx,
+        delay_steps=delay_steps,
+        target_compartment=Compartment.SOMA,
+    )
+    compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_edges_by_delay=True,
+        build_pre_adjacency=True,
+    )
+
+    pre_seq = [
+        torch.tensor([1.0, 1.0, 1.0, 1.0], dtype=torch.float32),
+        torch.tensor([1.0, 1.0, 1.0, 1.0], dtype=torch.float32),
+    ]
+
+    adaptive = DelayedCurrentSynapse(
+        DelayedCurrentParams(adaptive_event_driven=True, adaptive_threshold=0.1, init_weight=1.0)
+    )
+    dense = DelayedCurrentSynapse(DelayedCurrentParams(event_driven=False, init_weight=1.0))
+
+    adaptive_out = _run_synapse(adaptive, topology, pre_seq, ctx=ctx)
+    dense_out = _run_synapse(dense, topology, pre_seq, ctx=ctx)
+
+    for a, b in zip(adaptive_out, dense_out, strict=True):
+        torch.testing.assert_close(a, b)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_delayed_current_ring_cuda_device():
     ctx = StepContext(device="cuda", dtype="float32")
@@ -159,7 +368,12 @@ def test_delayed_current_ring_cuda_device():
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(topology, device=ctx.device, dtype=ctx.dtype)
+    compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_edges_by_delay=True,
+    )
 
     model = DelayedCurrentSynapse()
     state = model.init_state(pre_idx.numel(), ctx=ctx)

@@ -61,7 +61,12 @@ def test_synapse_step_no_device_transfers(monkeypatch):
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(topology, device=ctx.device, dtype=ctx.dtype)
+    compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_edges_by_delay=True,
+    )
 
     pre_spikes = torch.tensor([1.0, 0.0], dtype=state.weights.dtype)
 
@@ -78,3 +83,16 @@ def test_synapse_step_no_device_transfers(monkeypatch):
         t=0.0,
         ctx=ctx,
     )
+
+
+def test_compile_topology_skips_edges_by_delay_by_default():
+    pre_idx = torch.tensor([0, 1], dtype=torch.int32)
+    post_idx = torch.tensor([1, 0], dtype=torch.int32)
+    topology = SynapseTopology(pre_idx=pre_idx, post_idx=post_idx)
+
+    compiled = compile_topology(topology, device="cpu", dtype="float32")
+
+    assert compiled.meta is not None
+    assert "edges_by_delay" not in compiled.meta
+    assert "pre_ptr" not in compiled.meta
+    assert "edge_idx" not in compiled.meta

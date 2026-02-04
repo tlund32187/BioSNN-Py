@@ -43,6 +43,7 @@ class ILearningRule(Protocol):
     """Learning rule operating on synapses/edges."""
 
     name: str
+    supports_sparse: bool
 
     def init_state(self, e: int, *, ctx: Any) -> Any:
         ...

@@ -7,17 +7,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from biosnn.biophysics.models._torch_utils import require_torch
 from biosnn.biophysics.models.adex_2c import AdEx2CompModel
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.connectivity.builders import build_bipartite_erdos_renyi_topology
 from biosnn.contracts.monitors import IMonitor, StepEvent
 from biosnn.contracts.neurons import Compartment
 from biosnn.contracts.simulation import SimulationConfig
+from biosnn.core.torch_utils import require_torch
 from biosnn.io.dashboard_export import export_population_topology_json
 from biosnn.io.sinks import CsvSink
 from biosnn.monitors.csv import NeuronCSVMonitor
 from biosnn.monitors.metrics.metrics_csv import MetricsCSVMonitor
+from biosnn.monitors.metrics.scalar_utils import scalar_to_float
 from biosnn.monitors.raster.spike_events_csv import SpikeEventsCSVMonitor
 from biosnn.monitors.weights.projection_weights_csv import ProjectionWeightsCSVMonitor
 from biosnn.simulation.engine import TorchNetworkEngine
@@ -254,7 +255,7 @@ class _AggregatedSynapseCSVMonitor(IMonitor):
         row: dict[str, Any] = {"t": event.t, "dt": event.dt}
         if event.scalars:
             for key, value in sorted(event.scalars.items()):
-                row[key] = float(value)
+                row[key] = scalar_to_float(value)
 
         weights_list = _collect_weight_tensors(event, self._weight_keys)
         if weights_list:

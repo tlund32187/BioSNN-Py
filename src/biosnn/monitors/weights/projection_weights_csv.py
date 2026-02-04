@@ -6,10 +6,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from biosnn.biophysics.models._torch_utils import require_torch
 from biosnn.contracts.monitors import IMonitor, StepEvent
 from biosnn.contracts.tensor import Tensor
+from biosnn.core.torch_utils import require_torch
 from biosnn.io.sinks.csv_sink import CsvSink
+from biosnn.monitors.metrics.scalar_utils import scalar_to_float
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +48,7 @@ class ProjectionWeightsCSVMonitor(IMonitor):
         self._projections = [_normalize_projection(proj) for proj in projections]
 
     def on_step(self, event: StepEvent) -> None:
-        step = int(event.scalars.get("step", 0)) if event.scalars else 0
+        step = int(scalar_to_float(event.scalars.get("step", 0))) if event.scalars else 0
         if step % self._stride != 0:
             return
         if not event.tensors:

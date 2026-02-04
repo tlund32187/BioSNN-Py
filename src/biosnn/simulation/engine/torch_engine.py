@@ -5,13 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, SupportsInt, cast
 
-from biosnn.biophysics.models._torch_utils import require_torch, resolve_device_dtype
 from biosnn.connectivity.topology_compile import compile_topology
-from biosnn.contracts.monitors import IMonitor, StepEvent
+from biosnn.contracts.monitors import IMonitor, Scalar, StepEvent
 from biosnn.contracts.neurons import Compartment, INeuronModel, NeuronInputs, StepContext
 from biosnn.contracts.simulation import ISimulationEngine, SimulationConfig
 from biosnn.contracts.synapses import ISynapseModel, SynapseInputs, SynapseTopology
 from biosnn.contracts.tensor import Tensor
+from biosnn.core.torch_utils import require_torch, resolve_device_dtype
 
 DriveFn = Callable[[float, int, StepContext], Mapping[Compartment, Tensor]]
 
@@ -77,12 +77,33 @@ class TorchSimulationEngine(ISimulationEngine):
         edge_count = _edge_count(self._topology)
         self._synapse_state = self._synapse_model.init_state(edge_count, ctx=self._ctx)
 
-        self._spikes = torch.zeros((self._n,), device=self._device, dtype=self._dtype)
+        self._spikes = torch.zeros((self._n,), device=self._device, dtype=torch.bool)
         _apply_initial_spikes(self._spikes, config.meta)
 
         _copy_topology_weights(self._synapse_state, self._topology.weights)
         _ensure_topology_meta(self._topology, n_pre=self._n, n_post=self._n)
-        compile_topology(self._topology, device=self._device, dtype=self._dtype)
+        build_edges_by_delay = False
+        build_pre_adjacency = False
+        try:
+            from biosnn.synapses.dynamics.delayed_current import DelayedCurrentSynapse
+        except Exception:
+            pass
+        else:
+            if isinstance(self._synapse_model, DelayedCurrentSynapse):
+                params = self._synapse_model.params
+                adaptive = bool(getattr(params, "adaptive_event_driven", False))
+                build_pre_adjacency = bool(params.event_driven or adaptive)
+                build_edges_by_delay = bool(
+                    (not params.use_edge_buffer) and (adaptive or not params.event_driven)
+                )
+
+        compile_topology(
+            self._topology,
+            device=self._device,
+            dtype=self._dtype,
+            build_edges_by_delay=build_edges_by_delay,
+            build_pre_adjacency=build_pre_adjacency,
+        )
         self._n_pre = _infer_n_pre(self._topology)
 
     def attach_monitors(self, monitors: Sequence[IMonitor]) -> None:
@@ -94,10 +115,11 @@ class TorchSimulationEngine(ISimulationEngine):
         if self._spikes is None:
             raise RuntimeError("Engine must be reset before stepping.")
 
+        torch = require_torch()
         pre_spikes = self._spikes
         weights = getattr(self._synapse_state, "weights", None)
-        if weights is not None and hasattr(pre_spikes, "to"):
-            pre_spikes = pre_spikes.to(device=weights.device, dtype=weights.dtype)
+        if weights is not None and hasattr(pre_spikes, "to") and pre_spikes.device != weights.device:
+            pre_spikes = pre_spikes.to(device=weights.device)
 
         n_pre = self._n_pre
         if n_pre is not None and hasattr(pre_spikes, "shape"):
@@ -131,20 +153,20 @@ class TorchSimulationEngine(ISimulationEngine):
         )
 
         spikes_next = neuron_result.spikes
-        spikes_next_float = (spikes_next > 0).to(
-            device=self._spikes.device,
-            dtype=self._spikes.dtype,
-        )
-        self._spikes = spikes_next_float
-
-        if spikes_next_float.numel():
-            spike_count = spikes_next_float.sum()
-            spike_fraction = spikes_next_float.mean()
+        spikes_next_bool = spikes_next if spikes_next.dtype == torch.bool else (spikes_next > 0)
+        if self._spikes is not None and self._spikes.shape == spikes_next_bool.shape:
+            self._spikes.copy_(spikes_next_bool.to(device=self._spikes.device))
         else:
-            spike_count = spikes_next_float.new_zeros(())
-            spike_fraction = spikes_next_float.new_zeros(())
+            self._spikes = spikes_next_bool.to(device=self._spikes.device)
 
-        scalars = {
+        if self._spikes.numel():
+            spike_count = self._spikes.sum()
+            spike_fraction = spike_count / float(self._spikes.numel())
+        else:
+            spike_count = self._spikes.new_zeros(())
+            spike_fraction = torch.zeros((), device=self._spikes.device, dtype=torch.float32)
+
+        scalars: dict[str, Scalar] = {
             "step": float(self._step),
             "spike_count": spike_count,
             "spike_fraction": spike_fraction,
@@ -153,12 +175,12 @@ class TorchSimulationEngine(ISimulationEngine):
         event = StepEvent(
             t=self._t,
             dt=self._dt,
-            spikes=spikes_next_float,
+            spikes=self._spikes,
             tensors=_merge_tensors(
                 self._neuron_model.state_tensors(self._neuron_state),
                 self._synapse_model.state_tensors(self._synapse_state),
             ),
-            scalars=cast(Mapping[str, float], scalars),
+            scalars=cast(Mapping[str, Scalar], scalars),
         )
 
         for monitor in self._monitors:
@@ -213,15 +235,15 @@ def _apply_initial_spikes(spikes: Tensor, meta: Mapping[str, Any] | None) -> Non
             spikes.copy_(indices.to(device=spikes.device, dtype=spikes.dtype))
             return
         idx_tensor = indices.to(device=spikes.device, dtype=require_torch().long)
-        spikes[idx_tensor] = 1.0
+        spikes[idx_tensor] = True
         return
 
     if isinstance(indices, (list, tuple)):
         for idx in indices:
-            spikes[int(idx)] = 1.0
+            spikes[int(idx)] = True
         return
 
-    spikes[int(indices)] = 1.0
+    spikes[int(indices)] = True
 
 
 def _copy_topology_weights(state: Any, weights: Tensor | None) -> None:
