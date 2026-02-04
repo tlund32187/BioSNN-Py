@@ -85,6 +85,22 @@ class ISynapseModel(Protocol):
 
 
 @runtime_checkable
+class ICompilationRequirements(Protocol):
+    """Optional hook for compilation requirements used by engines."""
+
+    def compilation_requirements(self) -> Mapping[str, bool]:
+        """Return compile flags.
+
+        Expected keys (if applicable):
+        - needs_edges_by_delay
+        - needs_pre_adjacency
+        - needs_sparse_delay_mats
+        - needs_bucket_edge_mapping
+        """
+        ...
+
+
+@runtime_checkable
 class ISynapseModelInplace(Protocol):
     """Optional in-place synapse stepping API."""
 

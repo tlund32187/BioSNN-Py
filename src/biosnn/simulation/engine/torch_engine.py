@@ -84,18 +84,27 @@ class TorchSimulationEngine(ISimulationEngine):
         _ensure_topology_meta(self._topology, n_pre=self._n, n_post=self._n)
         build_edges_by_delay = False
         build_pre_adjacency = False
-        try:
-            from biosnn.synapses.dynamics.delayed_current import DelayedCurrentSynapse
-        except Exception:
-            pass
-        else:
-            if isinstance(self._synapse_model, DelayedCurrentSynapse):
-                params = self._synapse_model.params
-                adaptive = bool(getattr(params, "adaptive_event_driven", False))
-                build_pre_adjacency = bool(params.event_driven or adaptive)
-                build_edges_by_delay = bool(
-                    (not params.use_edge_buffer) and (adaptive or not params.event_driven)
-                )
+        build_sparse_delay_mats = False
+        build_bucket_edge_mapping = False
+        reqs = None
+        if hasattr(self._synapse_model, "compilation_requirements"):
+            try:
+                reqs = self._synapse_model.compilation_requirements()
+            except Exception:
+                reqs = None
+        if isinstance(reqs, Mapping):
+            build_edges_by_delay = bool(reqs.get("needs_edges_by_delay", False))
+            build_pre_adjacency = bool(reqs.get("needs_pre_adjacency", False))
+            build_sparse_delay_mats = bool(reqs.get("needs_sparse_delay_mats", False))
+            build_bucket_edge_mapping = bool(reqs.get("needs_bucket_edge_mapping", False))
+
+        if build_sparse_delay_mats and hasattr(self._synapse_model, "params"):
+            params = getattr(self._synapse_model, "params", None)
+            receptor_scale = getattr(params, "receptor_scale", None) if params is not None else None
+            if receptor_scale is not None:
+                meta = dict(self._topology.meta) if self._topology.meta else {}
+                meta.setdefault("receptor_scale", receptor_scale)
+                object.__setattr__(self._topology, "meta", meta)
 
         compile_topology(
             self._topology,
@@ -103,6 +112,8 @@ class TorchSimulationEngine(ISimulationEngine):
             dtype=self._dtype,
             build_edges_by_delay=build_edges_by_delay,
             build_pre_adjacency=build_pre_adjacency,
+            build_sparse_delay_mats=build_sparse_delay_mats,
+            build_bucket_edge_mapping=build_bucket_edge_mapping,
         )
         self._n_pre = _infer_n_pre(self._topology)
 

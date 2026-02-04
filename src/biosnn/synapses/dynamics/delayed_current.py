@@ -313,6 +313,19 @@ class DelayedCurrentSynapse(ISynapseModel):
             tensors["delay_buffer"] = state.delay_buffer
         return tensors
 
+    def compilation_requirements(self) -> Mapping[str, bool]:
+        needs_pre_adjacency = bool(self.params.event_driven or self.params.adaptive_event_driven)
+        needs_edges_by_delay = bool(
+            (not self.params.use_edge_buffer)
+            and (self.params.adaptive_event_driven or not self.params.event_driven)
+        )
+        return {
+            "needs_edges_by_delay": needs_edges_by_delay,
+            "needs_pre_adjacency": needs_pre_adjacency,
+            "needs_sparse_delay_mats": False,
+            "needs_bucket_edge_mapping": False,
+        }
+
     def _scale_table(self, like: Tensor, kinds: tuple[ReceptorKind, ...]) -> Tensor:
         key = (like.device, like.dtype, kinds)
         cached = self._scale_cache.get(key)
@@ -637,7 +650,7 @@ def _step_post_ring_event_driven(
         return state, post_drive, extras
 
     pre_ptr, edge_idx = _require_pre_adjacency(topology, device)
-    edges = _gather_active_edges(active_pre, pre_ptr, edge_idx)
+    edges = _gather_active_edges(active_pre, pre_ptr, edge_idx, topology)
     if edges.numel() == 0:
         state.cursor = (cursor + 1) % depth
         extras = {"processed_edges": weights.new_zeros(())}
@@ -745,7 +758,7 @@ def _step_post_ring_event_driven_into(
         return
 
     pre_ptr, edge_idx = _require_pre_adjacency(topology, device)
-    edges = _gather_active_edges(active_pre, pre_ptr, edge_idx)
+    edges = _gather_active_edges(active_pre, pre_ptr, edge_idx, topology)
     if edges.numel() == 0:
         state.cursor = (cursor + 1) % depth
         return
@@ -891,17 +904,49 @@ def _require_pre_adjacency(topology: SynapseTopology, device: Any) -> tuple[Tens
     return cast(Tensor, pre_ptr), cast(Tensor, edge_idx)
 
 
-def _gather_active_edges(active_pre: Tensor, pre_ptr: Tensor, edge_idx: Tensor) -> Tensor:
+def _gather_active_edges(
+    active_pre: Tensor,
+    pre_ptr: Tensor,
+    edge_idx: Tensor,
+    topology: SynapseTopology,
+) -> Tensor:
     torch = require_torch()
+    if active_pre.numel() == 0:
+        return cast(Tensor, torch.empty((0,), device=edge_idx.device, dtype=torch.long))
+
+    if edge_idx.device.type == "cuda":
+        meta = dict(topology.meta) if topology.meta else {}
+        pre_ptr_cpu = meta.get("pre_ptr_cpu")
+        edge_idx_cpu = meta.get("edge_idx_cpu")
+        if pre_ptr_cpu is None:
+            pre_ptr_cpu = pre_ptr.cpu()
+            meta["pre_ptr_cpu"] = pre_ptr_cpu
+        if edge_idx_cpu is None:
+            edge_idx_cpu = edge_idx.cpu()
+            meta["edge_idx_cpu"] = edge_idx_cpu
+        object.__setattr__(topology, "meta", meta)
+
+        active_cpu = active_pre.cpu().tolist()
+        slices: list[Tensor] = []
+        for idx in active_cpu:
+            start = int(pre_ptr_cpu[idx])
+            end = int(pre_ptr_cpu[idx + 1])
+            if end > start:
+                slices.append(edge_idx_cpu[start:end])
+        if not slices:
+            return cast(Tensor, torch.empty((0,), device=edge_idx.device, dtype=torch.long))
+        edges_cpu = torch.cat(slices)
+        return cast(Tensor, edges_cpu.to(device=edge_idx.device))
+
     starts = pre_ptr.index_select(0, active_pre)
     ends = pre_ptr.index_select(0, active_pre + 1)
     counts = ends - starts
     if counts.numel() == 0:
         return cast(Tensor, torch.empty((0,), device=edge_idx.device, dtype=torch.long))
-    total = counts.sum()
     base = torch.repeat_interleave(starts, counts)
     prefix = torch.cumsum(counts, 0)
     group_start = torch.repeat_interleave(prefix - counts, counts)
+    total = int(counts.sum())
     intra = torch.arange(total, device=edge_idx.device) - group_start
     edge_pos = base + intra
     return cast(Tensor, edge_idx.index_select(0, edge_pos))

@@ -5,9 +5,17 @@ from biosnn.synapses.dynamics.delayed_current import (
     DelayedCurrentState,
     DelayedCurrentSynapse,
 )
+from biosnn.synapses.dynamics.delayed_sparse_matmul import (
+    DelayedSparseMatmulParams,
+    DelayedSparseMatmulState,
+    DelayedSparseMatmulSynapse,
+)
 
 __all__ = [
     "DelayedCurrentParams",
     "DelayedCurrentState",
     "DelayedCurrentSynapse",
+    "DelayedSparseMatmulParams",
+    "DelayedSparseMatmulState",
+    "DelayedSparseMatmulSynapse",
 ]

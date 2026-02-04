@@ -390,3 +390,40 @@ def test_delayed_current_ring_cuda_device():
 
     assert state.post_ring is not None
     assert state.post_ring[Compartment.SOMA].device.type == "cuda"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_delayed_current_event_driven_cuda_no_item(monkeypatch):
+    ctx = StepContext(device="cuda", dtype="float32")
+    pre_idx = torch.tensor([0, 1, 2], dtype=torch.long, device="cuda")
+    post_idx = torch.tensor([0, 1, 0], dtype=torch.long, device="cuda")
+    delay_steps = torch.tensor([1, 0, 2], dtype=torch.int32, device="cuda")
+    topology = SynapseTopology(
+        pre_idx=pre_idx,
+        post_idx=post_idx,
+        delay_steps=delay_steps,
+        target_compartment=Compartment.SOMA,
+    )
+    compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_pre_adjacency=True,
+    )
+
+    model = DelayedCurrentSynapse(DelayedCurrentParams(event_driven=True, init_weight=1.0))
+    state = model.init_state(pre_idx.numel(), ctx=ctx)
+    pre_spikes = torch.zeros((3,), device="cuda", dtype=state.weights.dtype)
+
+    def _no_item(self):
+        raise RuntimeError(".item() in hot path")
+
+    monkeypatch.setattr(torch.Tensor, "item", _no_item, raising=False)
+    model.step(
+        state,
+        topology,
+        SynapseInputs(pre_spikes=pre_spikes),
+        dt=1e-3,
+        t=0.0,
+        ctx=ctx,
+    )

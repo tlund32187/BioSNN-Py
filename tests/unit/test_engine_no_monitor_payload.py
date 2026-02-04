@@ -79,3 +79,32 @@ def test_no_monitors_skips_event_payload(monkeypatch):
 
     assert engine._last_event is not None
     assert engine._last_event.tensors in (None, {})
+
+
+def test_no_monitors_skips_event_payload_compiled(monkeypatch):
+    class _ExplodeDict(dict):
+        def __setitem__(self, key, value):  # noqa: ANN001
+            raise AssertionError("compiled event payload should not be touched without monitors")
+
+        def __getitem__(self, key):  # noqa: ANN001
+            raise AssertionError("compiled event payload should not be touched without monitors")
+
+        def get(self, key, default=None):  # noqa: ANN001
+            raise AssertionError("compiled event payload should not be touched without monitors")
+
+    pop = PopulationSpec(name="A", model=SilentNeuronModel(), n=4)
+    engine = TorchNetworkEngine(
+        populations=[pop],
+        projections=[],
+        fast_mode=False,
+        compiled_mode=True,
+    )
+    engine.reset(config=SimulationConfig(dt=1e-3))
+    engine._compiled_event_tensors = _ExplodeDict()
+    engine._compiled_pop_tensor_views = _ExplodeDict()
+
+    for _ in range(5):
+        engine.step()
+
+    assert engine._last_event is not None
+    assert engine._last_event.tensors in (None, {})

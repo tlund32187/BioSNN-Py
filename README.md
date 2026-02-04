@@ -34,6 +34,14 @@ pip install -e ".[dev]"
 pip install --index-url https://download.pytorch.org/whl/cpu torch
 ```
 
+### Torch (CPU or CUDA)
+Install the optional torch extra:
+```powershell
+pip install ".[torch]"
+```
+
+For CUDA-enabled wheels, install from PyTorch’s official instructions for your CUDA version.
+
 3) Run checks:
 ```powershell
 ruff check .

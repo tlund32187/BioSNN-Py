@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +18,16 @@ except Exception as exc:  # pragma: no cover - optional dependency
 from biosnn.biophysics.models.adex_2c import AdEx2CompModel
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.connectivity.builders import build_bipartite_erdos_renyi_topology
+from biosnn.connectivity.sparse_rebuild import rebuild_sparse_delay_mats
 from biosnn.contracts.simulation import SimulationConfig
+from biosnn.contracts.synapses import ISynapseModel
 from biosnn.simulation.engine import TorchNetworkEngine
 from biosnn.simulation.network import PopulationSpec, ProjectionSpec
 from biosnn.synapses.dynamics.delayed_current import DelayedCurrentParams, DelayedCurrentSynapse
+from biosnn.synapses.dynamics.delayed_sparse_matmul import (
+    DelayedSparseMatmulParams,
+    DelayedSparseMatmulSynapse,
+)
 
 
 class _NoOpMonitor:
@@ -52,7 +59,13 @@ def _percentile(values: list[float], pct: float) -> float:
     return values_sorted[max(0, min(idx, len(values_sorted) - 1))]
 
 
-def _build_engine(device: str, *, fast_mode: bool, compiled_mode: bool) -> TorchNetworkEngine:
+def _build_engine(
+    device: str,
+    *,
+    fast_mode: bool,
+    compiled_mode: bool,
+    sparse_matmul: bool,
+) -> TorchNetworkEngine:
     torch_device = torch.device(device)
     n_in = 64
     n_hidden = 128
@@ -87,19 +100,23 @@ def _build_engine(device: str, *, fast_mode: bool, compiled_mode: bool) -> Torch
         weight_init=0.05,
     )
 
-    syn_params = DelayedCurrentParams(init_weight=0.05)
+    synapse: ISynapseModel
+    if sparse_matmul:
+        synapse = DelayedSparseMatmulSynapse(DelayedSparseMatmulParams(init_weight=0.05))
+    else:
+        synapse = DelayedCurrentSynapse(DelayedCurrentParams(init_weight=0.05))
 
     projections = [
         ProjectionSpec(
             name="Input->Hidden",
-            synapse=DelayedCurrentSynapse(syn_params),
+            synapse=synapse,
             topology=topo_in_hidden,
             pre="Input",
             post="Hidden",
         ),
         ProjectionSpec(
             name="Hidden->Output",
-            synapse=DelayedCurrentSynapse(syn_params),
+            synapse=synapse,
             topology=topo_hidden_out,
             pre="Hidden",
             post="Output",
@@ -123,8 +140,15 @@ def _run_bench(
     fast_mode: bool,
     compiled_mode: bool,
     monitors_on: bool,
+    sparse_matmul: bool,
+    rebuild_sparse_every: int,
 ) -> dict[str, Any]:
-    engine = _build_engine(device, fast_mode=fast_mode, compiled_mode=compiled_mode)
+    engine = _build_engine(
+        device,
+        fast_mode=fast_mode,
+        compiled_mode=compiled_mode,
+        sparse_matmul=sparse_matmul,
+    )
     if monitors_on:
         engine.attach_monitors([_NoOpMonitor()])
 
@@ -138,11 +162,35 @@ def _run_bench(
         torch.cuda.reset_peak_memory_stats()
 
     step_times: list[float] = []
+    rebuild_total_ms = 0.0
+    rebuild_count = 0
     start = time.perf_counter()
     for _ in range(steps):
         step_start = time.perf_counter()
         engine.step()
         step_times.append((time.perf_counter() - step_start) * 1000.0)
+        if rebuild_sparse_every > 0 and (engine._step % rebuild_sparse_every) == 0:
+            rebuild_start = time.perf_counter()
+            for proj in engine._proj_specs:
+                reqs = None
+                if hasattr(proj.synapse, "compilation_requirements"):
+                    try:
+                        reqs = proj.synapse.compilation_requirements()
+                    except Exception:
+                        reqs = None
+                if not isinstance(reqs, Mapping):
+                    continue
+                if not bool(reqs.get("needs_sparse_delay_mats", False)):
+                    continue
+                build_bucket = bool(reqs.get("needs_bucket_edge_mapping", False))
+                rebuild_sparse_delay_mats(
+                    proj.topology,
+                    device=engine._device,
+                    dtype=engine._dtype,
+                    build_bucket_edge_mapping=build_bucket,
+                )
+            rebuild_total_ms += (time.perf_counter() - rebuild_start) * 1000.0
+            rebuild_count += 1
     if device == "cuda":
         torch.cuda.synchronize()
     total = time.perf_counter() - start
@@ -159,6 +207,11 @@ def _run_bench(
         "fast_mode": fast_mode,
         "compiled_mode": compiled_mode,
         "monitors": monitors_on,
+        "sparse_matmul": sparse_matmul,
+        "rebuild_sparse_every": rebuild_sparse_every,
+        "rebuild_sparse_count": rebuild_count,
+        "rebuild_sparse_total_ms": rebuild_total_ms,
+        "rebuild_sparse_avg_ms": (rebuild_total_ms / rebuild_count) if rebuild_count else 0.0,
         "steps_per_sec": steps_per_sec,
         "avg_step_ms": avg_ms,
         "p50_step_ms": p50_ms,
@@ -191,6 +244,17 @@ def main() -> None:
     parser.add_argument("--fast-mode", action="store_true", help="Enable fast_mode.")
     parser.add_argument("--compiled-mode", action="store_true", help="Enable compiled_mode.")
     parser.add_argument(
+        "--sparse-matmul",
+        action="store_true",
+        help="Use delayed sparse matmul synapse backend.",
+    )
+    parser.add_argument(
+        "--rebuild-sparse-every",
+        type=int,
+        default=0,
+        help="Rebuild sparse delay matrices every N steps (0 disables).",
+    )
+    parser.add_argument(
         "--monitors",
         type=str,
         default="off",
@@ -211,6 +275,8 @@ def main() -> None:
         fast_mode=bool(args.fast_mode),
         compiled_mode=bool(args.compiled_mode),
         monitors_on=args.monitors == "on",
+        sparse_matmul=bool(args.sparse_matmul),
+        rebuild_sparse_every=int(args.rebuild_sparse_every),
     )
 
     summary = (
@@ -226,6 +292,15 @@ def main() -> None:
             f"{metrics['cuda_peak_allocated_mb']:.2f} "
             "cuda_peak_reserved_mb="
             f"{metrics['cuda_peak_reserved_mb']:.2f}"
+        )
+    if metrics["rebuild_sparse_every"]:
+        print(
+            "rebuild_every="
+            f"{metrics['rebuild_sparse_every']} "
+            "rebuild_avg_ms="
+            f"{metrics['rebuild_sparse_avg_ms']:.4f} "
+            "rebuild_total_ms="
+            f"{metrics['rebuild_sparse_total_ms']:.2f}"
         )
 
     out_path = Path(args.out)

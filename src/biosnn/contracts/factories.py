@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable, Mapping
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
+
+T = TypeVar("T")
 
 
 @runtime_checkable
-class IRegistry[T](Protocol):
+class IRegistry(Protocol[T]):
     """Named registry mapping string keys to constructors."""
 
     def register(self, key: str, ctor: Callable[..., T]) -> None:
@@ -28,7 +30,7 @@ class IRegistry[T](Protocol):
         ...
 
 
-class Registry[T](IRegistry[T]):
+class Registry(IRegistry[T]):
     """Simple named registry with optional aliasing and deprecations."""
 
     def __init__(self, *, label: str | None = None) -> None:
