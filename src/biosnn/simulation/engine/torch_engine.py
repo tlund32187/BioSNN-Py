@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, SupportsInt, cast
 
 from biosnn.biophysics.models._torch_utils import require_torch, resolve_device_dtype
+from biosnn.connectivity.topology_compile import compile_topology
 from biosnn.contracts.monitors import IMonitor, StepEvent
 from biosnn.contracts.neurons import Compartment, INeuronModel, NeuronInputs, StepContext
 from biosnn.contracts.simulation import ISimulationEngine, SimulationConfig
@@ -41,6 +42,7 @@ class TorchSimulationEngine(ISimulationEngine):
         self._step = 0
         self._device = None
         self._dtype = None
+        self._n_pre: int | None = None
 
         self._neuron_state: Any = None
         self._synapse_state: Any = None
@@ -79,6 +81,9 @@ class TorchSimulationEngine(ISimulationEngine):
         _apply_initial_spikes(self._spikes, config.meta)
 
         _copy_topology_weights(self._synapse_state, self._topology.weights)
+        _ensure_topology_meta(self._topology, n_pre=self._n, n_post=self._n)
+        compile_topology(self._topology, device=self._device, dtype=self._dtype)
+        self._n_pre = _infer_n_pre(self._topology)
 
     def attach_monitors(self, monitors: Sequence[IMonitor]) -> None:
         """Replace the current monitor list with the provided sequence."""
@@ -94,7 +99,7 @@ class TorchSimulationEngine(ISimulationEngine):
         if weights is not None and hasattr(pre_spikes, "to"):
             pre_spikes = pre_spikes.to(device=weights.device, dtype=weights.dtype)
 
-        n_pre = _infer_n_pre(self._topology)
+        n_pre = self._n_pre
         if n_pre is not None and hasattr(pre_spikes, "shape"):
             if pre_spikes.shape[0] < n_pre:
                 raise ValueError(f"pre_spikes must have at least {n_pre} entries")
@@ -132,10 +137,12 @@ class TorchSimulationEngine(ISimulationEngine):
         )
         self._spikes = spikes_next_float
 
-        spike_count = float(spikes_next_float.sum().item()) if spikes_next_float.numel() else 0.0
-        spike_fraction = (
-            float(spikes_next_float.mean().item()) if spikes_next_float.numel() else 0.0
-        )
+        if spikes_next_float.numel():
+            spike_count = spikes_next_float.sum()
+            spike_fraction = spikes_next_float.mean()
+        else:
+            spike_count = spikes_next_float.new_zeros(())
+            spike_fraction = spikes_next_float.new_zeros(())
 
         scalars = {
             "step": float(self._step),
@@ -151,7 +158,7 @@ class TorchSimulationEngine(ISimulationEngine):
                 self._neuron_model.state_tensors(self._neuron_state),
                 self._synapse_model.state_tensors(self._synapse_state),
             ),
-            scalars=scalars,
+            scalars=cast(Mapping[str, float], scalars),
         )
 
         for monitor in self._monitors:
@@ -166,7 +173,7 @@ class TorchSimulationEngine(ISimulationEngine):
         return {
             "t": float(event.t),
             "t_next": float(self._t),
-            "step": float(scalars["step"]),
+            "step": float(self._step),
             "spike_count": spike_count,
             "spike_fraction": spike_fraction,
         }
@@ -296,9 +303,60 @@ def _infer_n_pre(topology: SynapseTopology) -> int | None:
     pre_idx = topology.pre_idx
     if hasattr(pre_idx, "numel"):
         if pre_idx.numel():
-            return int(pre_idx.max().item()) + 1
+            max_val = pre_idx.detach()
+            if hasattr(max_val, "max"):
+                max_val = max_val.max()
+            if hasattr(max_val, "cpu"):
+                max_val = max_val.cpu()
+            if hasattr(max_val, "tolist"):
+                max_list = max_val.tolist()
+                if isinstance(max_list, list):
+                    scalar = max_list[0] if max_list else 0
+                    return int(cast(SupportsInt, scalar)) + 1
+                return int(cast(SupportsInt, max_list)) + 1
+            return int(max_val) + 1
         return None
     try:
         return int(max(pre_idx)) + 1
     except Exception:
         return None
+
+
+def _ensure_topology_meta(
+    topology: SynapseTopology,
+    *,
+    n_pre: int | None = None,
+    n_post: int | None = None,
+) -> None:
+    meta = dict(topology.meta) if topology.meta else {}
+    updated = False
+    if n_pre is not None and "n_pre" not in meta:
+        meta["n_pre"] = int(n_pre)
+        updated = True
+    if n_post is not None and "n_post" not in meta:
+        meta["n_post"] = int(n_post)
+        updated = True
+
+    if topology.delay_steps is not None and "max_delay_steps" not in meta:
+        delay_steps = topology.delay_steps
+        max_delay = 0
+        if hasattr(delay_steps, "numel") and delay_steps.numel():
+            max_val = delay_steps.detach()
+            if hasattr(max_val, "max"):
+                max_val = max_val.max()
+            if hasattr(max_val, "cpu"):
+                max_val = max_val.cpu()
+            if hasattr(max_val, "tolist"):
+                max_list = max_val.tolist()
+                if isinstance(max_list, list):
+                    scalar = max_list[0] if max_list else 0
+                    max_delay = int(cast(SupportsInt, scalar))
+                else:
+                    max_delay = int(cast(SupportsInt, max_list))
+            else:
+                max_delay = int(max_val)
+        meta["max_delay_steps"] = max_delay
+        updated = True
+
+    if updated:
+        object.__setattr__(topology, "meta", meta)

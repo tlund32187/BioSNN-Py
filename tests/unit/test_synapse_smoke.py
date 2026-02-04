@@ -1,6 +1,7 @@
 import pytest
 
 from biosnn.connectivity import DelayParams, compute_delay_steps
+from biosnn.connectivity.topology_compile import compile_topology
 from biosnn.contracts.neurons import Compartment, StepContext
 from biosnn.contracts.synapses import ReceptorKind, SynapseInputs, SynapseTopology
 from biosnn.synapses.dynamics import DelayedCurrentParams, DelayedCurrentSynapse
@@ -35,6 +36,7 @@ def test_synapse_ring_buffer_delay():
     post_idx = torch.tensor([0], dtype=torch.long)
     delay_steps = torch.tensor([2], dtype=torch.int32)
     topology = _topology(pre_idx, post_idx, delay_steps=delay_steps, target_compartment=Compartment.SOMA)
+    compile_topology(topology, device=ctx.device, dtype=ctx.dtype)
 
     spikes = [1.0, 0.0, 0.0, 0.0]
     outputs = []
@@ -72,6 +74,7 @@ def test_synapse_receptor_scale_per_edge():
         receptor_kinds=(ReceptorKind.AMPA, ReceptorKind.GABA),
         target_compartment=Compartment.SOMA,
     )
+    compile_topology(topology, device=ctx.device, dtype=ctx.dtype)
 
     pre_spikes = torch.tensor([1.0, 1.0], dtype=state.weights.dtype)
     state, result = model.step(
@@ -101,6 +104,7 @@ def test_synapse_target_compartments_per_edge():
         post_idx,
         target_compartments=target_compartments,
     )
+    compile_topology(topology, device=ctx.device, dtype=ctx.dtype)
 
     pre_spikes = torch.tensor([1.0, 1.0], dtype=state.weights.dtype)
     state, result = model.step(
@@ -123,6 +127,7 @@ def test_synapse_input_shape_validation():
     pre_idx = torch.tensor([0], dtype=torch.long)
     post_idx = torch.tensor([0], dtype=torch.long)
     topology = _topology(pre_idx, post_idx)
+    compile_topology(topology, device=ctx.device, dtype=ctx.dtype)
 
     pre_spikes = torch.zeros((1, 1), dtype=state.weights.dtype)
     with pytest.raises(ValueError):

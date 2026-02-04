@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from biosnn.biophysics.models._torch_utils import require_torch
+from biosnn.connectivity.builders.random_topology import build_erdos_renyi_edges
 from biosnn.connectivity.delays.axon import compute_delay_steps
 from biosnn.contracts.synapses import SynapseTopology
 from biosnn.contracts.tensor import Tensor
@@ -36,14 +37,13 @@ def build_bipartite_erdos_renyi_topology(
     device_obj = torch.device(device) if device else None
     dtype_obj = _resolve_dtype(torch, dtype) if dtype else torch.get_default_dtype()
 
-    mask = torch.rand((n_pre, n_post), device=device_obj) < p
-    idx = mask.nonzero(as_tuple=False)
-    pre_idx = idx[:, 0].to(dtype=torch.long)
-    post_idx = idx[:, 1].to(dtype=torch.long)
-
-    if device_obj is not None:
-        pre_idx = pre_idx.to(device=device_obj)
-        post_idx = post_idx.to(device=device_obj)
+    pre_idx, post_idx = build_erdos_renyi_edges(
+        n_pre=n_pre,
+        n_post=n_post,
+        p=p,
+        device=device,
+        allow_self=True,
+    )
 
     weights = None
     if weight_init is not None:

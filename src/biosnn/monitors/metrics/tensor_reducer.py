@@ -139,8 +139,12 @@ def _to_list(values: Any) -> list[Any]:
 
 
 def _to_scalar(value: Any) -> float:
-    if hasattr(value, "item"):
-        return float(value.item())
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "cpu"):
+        value = value.cpu()
+    if hasattr(value, "tolist"):
+        value = value.tolist()
     return float(value)
 
 

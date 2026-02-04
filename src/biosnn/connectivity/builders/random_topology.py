@@ -35,20 +35,13 @@ def build_erdos_renyi_topology(
     device_obj = torch.device(device) if device else None
     dtype_obj = _resolve_dtype(torch, dtype) if dtype else torch.get_default_dtype()
 
-    mask = torch.rand((n, n), device=device_obj) < p
-    if not allow_self:
-        if hasattr(mask, "fill_diagonal_"):
-            mask.fill_diagonal_(False)
-        else:
-            mask = mask & ~torch.eye(n, dtype=torch.bool, device=device_obj)
-
-    idx = mask.nonzero(as_tuple=False)
-    pre_idx = idx[:, 0].to(dtype=torch.long)
-    post_idx = idx[:, 1].to(dtype=torch.long)
-
-    if device_obj is not None:
-        pre_idx = pre_idx.to(device=device_obj)
-        post_idx = post_idx.to(device=device_obj)
+    pre_idx, post_idx = build_erdos_renyi_edges(
+        n_pre=n,
+        n_post=n,
+        p=p,
+        device=device,
+        allow_self=allow_self,
+    )
 
     weights = None
     if weight_init is not None:
@@ -117,14 +110,13 @@ def build_bipartite_erdos_renyi_topology(
     device_obj = torch.device(device) if device else None
     dtype_obj = _resolve_dtype(torch, dtype) if dtype else torch.get_default_dtype()
 
-    mask = torch.rand((n_pre, n_post), device=device_obj) < p
-    idx = mask.nonzero(as_tuple=False)
-    pre_idx = idx[:, 0].to(dtype=torch.long)
-    post_idx = idx[:, 1].to(dtype=torch.long)
-
-    if device_obj is not None:
-        pre_idx = pre_idx.to(device=device_obj)
-        post_idx = post_idx.to(device=device_obj)
+    pre_idx, post_idx = build_erdos_renyi_edges(
+        n_pre=n_pre,
+        n_post=n_post,
+        p=p,
+        device=device,
+        allow_self=True,
+    )
 
     weights = None
     if weight_init is not None:
@@ -168,6 +160,115 @@ def build_bipartite_erdos_renyi_topology(
     )
 
 
+def build_erdos_renyi_edges(
+    n_pre: int,
+    n_post: int,
+    p: float,
+    *,
+    device: str | None = None,
+    allow_self: bool = False,
+    seed: int | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Sample Erdos-Renyi edges without allocating a dense mask.
+
+    Edges are sampled with replacement; duplicate pairs may occur.
+    """
+
+    if n_pre <= 0 or n_post <= 0:
+        raise ValueError("n_pre and n_post must be positive")
+    if p < 0 or p > 1:
+        raise ValueError("p must be within [0,1]")
+
+    torch = require_torch()
+    device_obj = torch.device(device) if device else None
+
+    total = n_pre * n_post
+    if total <= 0:
+        empty = torch.empty((0,), device=device_obj, dtype=torch.long)
+        return empty, empty
+
+    max_edges = total
+    if not allow_self and n_pre == n_post:
+        max_edges = total - n_pre
+
+    target = int(p * total)
+    if target <= 0 or max_edges <= 0:
+        empty = torch.empty((0,), device=device_obj, dtype=torch.long)
+        return empty, empty
+    if target > max_edges:
+        target = max_edges
+
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(device=device_obj) if device_obj is not None else torch.Generator()
+        generator.manual_seed(seed)
+
+    def _sample_edges(count: int) -> tuple[Tensor, Tensor]:
+        pre = torch.randint(
+            0,
+            n_pre,
+            (count,),
+            device=device_obj,
+            dtype=torch.long,
+            generator=generator,
+        )
+        post = torch.randint(
+            0,
+            n_post,
+            (count,),
+            device=device_obj,
+            dtype=torch.long,
+            generator=generator,
+        )
+        if not allow_self and n_pre == n_post:
+            mask = pre != post
+            if mask.all():
+                return pre, post
+            if hasattr(mask, "any") and not mask.any():
+                empty = pre.new_empty((0,))
+                return empty, empty
+            return pre[mask], post[mask]
+        return pre, post
+
+    pre_parts: list[Tensor] = []
+    post_parts: list[Tensor] = []
+    remaining = target
+    total_kept = 0
+    oversample = 1.0
+    if not allow_self and n_pre == n_post and n_pre > 1:
+        oversample = 1.0 / (1.0 - 1.0 / n_pre)
+
+    for _ in range(20):
+        if remaining <= 0:
+            break
+        sample_size = int(remaining * oversample)
+        if sample_size < remaining:
+            sample_size = remaining
+        pre, post = _sample_edges(sample_size)
+        if pre.numel() == 0:
+            continue
+        pre_parts.append(pre)
+        post_parts.append(post)
+        total_kept += int(pre.numel())
+        remaining = target - total_kept
+
+    if not pre_parts:
+        empty = torch.empty((0,), device=device_obj, dtype=torch.long)
+        return empty, empty
+
+    if len(pre_parts) == 1:
+        pre_idx = pre_parts[0]
+        post_idx = post_parts[0]
+    else:
+        pre_idx = torch.cat(pre_parts)
+        post_idx = torch.cat(post_parts)
+    if pre_idx.numel() > target:
+        pre_idx = pre_idx[:target]
+        post_idx = post_idx[:target]
+
+    return pre_idx, post_idx
+
+
 def _resolve_dtype(torch: Any, dtype: str | None) -> Any:
     if dtype is None:
         return torch.get_default_dtype()
@@ -190,4 +291,8 @@ def _to_device(tensor: Tensor | None, device: Any, dtype: Any | None) -> Tensor 
     return tensor
 
 
-__all__ = ["build_erdos_renyi_topology", "build_bipartite_erdos_renyi_topology"]
+__all__ = [
+    "build_erdos_renyi_edges",
+    "build_erdos_renyi_topology",
+    "build_bipartite_erdos_renyi_topology",
+]
