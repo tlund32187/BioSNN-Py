@@ -86,7 +86,7 @@ def test_compilation_flags_for_sparse_matmul():
     engine = _build_engine(syn)
     engine.reset(config=SimulationConfig(dt=1e-3, device="cpu"))
     meta = engine._proj_specs[0].topology.meta or {}
-    assert "W_by_delay_by_comp" in meta
+    assert "W_by_delay_by_comp_csr" in meta or "W_by_delay_by_comp" in meta
     assert "edge_bucket_comp" in meta
     assert "edge_bucket_delay" in meta
     assert "edge_bucket_pos" in meta

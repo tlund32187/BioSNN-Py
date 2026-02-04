@@ -63,3 +63,6 @@ cache_dir = "C:/Users/tlund/AppData/Local/Temp/biosnn_mypy_cache"
 
 [tool.pytest.ini_options]
 addopts = "-p no:cacheprovider -p no:tmpdir"
+filterwarnings = [
+  "ignore:Sparse CSR tensor support is in beta state.*:UserWarning",
+]

@@ -99,7 +99,7 @@ class SparseDeltaRule(ILearningRule):
         return {}
 
 
-def _build_engine(*, compiled_mode: bool) -> TorchNetworkEngine:
+def _build_engine(*, compiled_mode: bool, clamp_max: float | None = None) -> TorchNetworkEngine:
     pre_spikes = torch.tensor([True, False, False])
     post_spikes = torch.tensor([False, False])
 
@@ -122,7 +122,11 @@ def _build_engine(*, compiled_mode: bool) -> TorchNetworkEngine:
 
     receptor_scale = {ReceptorKind.AMPA: 2.0, ReceptorKind.NMDA: 0.5}
     synapse = DelayedSparseMatmulSynapse(
-        DelayedSparseMatmulParams(init_weight=0.0, receptor_scale=receptor_scale)
+        DelayedSparseMatmulParams(
+            init_weight=0.0,
+            receptor_scale=receptor_scale,
+            clamp_max=clamp_max,
+        )
     )
     proj = ProjectionSpec(
         name="P",
@@ -182,3 +186,36 @@ def test_sparse_matmul_learning_updates(compiled_mode: bool) -> None:
     expected_drive = torch.zeros_like(drive_second)
     expected_drive[0] = expected_val
     torch.testing.assert_close(drive_second, expected_drive)
+
+
+@pytest.mark.parametrize("compiled_mode", [False, True])
+def test_sparse_matmul_clamp_and_weight_binding(compiled_mode: bool) -> None:
+    engine = _build_engine(compiled_mode=compiled_mode, clamp_max=0.25)
+    config = SimulationConfig(dt=1e-3, device="cpu")
+    engine.reset(config=config)
+
+    engine.step()
+
+    proj_state = engine._proj_states["P"].state
+    topo_weights = engine._proj_specs[0].topology.weights
+    assert topo_weights is not None
+    assert proj_state.weights is topo_weights
+
+    expected = torch.zeros_like(topo_weights)
+    expected[0] = 0.25
+    torch.testing.assert_close(topo_weights, expected)
+
+    meta = engine._proj_specs[0].topology.meta or {}
+    values_by_comp = meta["values_by_comp"]
+    edge_bucket_comp = meta["edge_bucket_comp"]
+    edge_bucket_delay = meta["edge_bucket_delay"]
+    edge_bucket_pos = meta["edge_bucket_pos"]
+    edge_scale = meta["edge_scale"]
+
+    comp_id = int(edge_bucket_comp[0].item())
+    delay = int(edge_bucket_delay[0].item())
+    pos = int(edge_bucket_pos[0].item())
+    comp = tuple(Compartment)[comp_id]
+    values = values_by_comp[comp][delay]
+    assert values is not None
+    torch.testing.assert_close(values[pos], expected[0] * edge_scale[0])

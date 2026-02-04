@@ -6,7 +6,8 @@ import argparse
 import csv
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,13 @@ try:
     import torch
 except Exception as exc:  # pragma: no cover - optional dependency
     raise SystemExit("torch is required to run this benchmark") from exc
+
+try:
+    import biosnn  # noqa: F401
+except Exception as exc:  # pragma: no cover - optional dependency
+    raise SystemExit(
+        "biosnn is not installed. Run: pip install -e \".[torch]\" from the repo root."
+    ) from exc
 
 from biosnn.biophysics.models.adex_2c import AdEx2CompModel
 from biosnn.biophysics.models.glif import GLIFModel
@@ -62,10 +70,16 @@ def _percentile(values: list[float], pct: float) -> float:
 def _build_engine(
     device: str,
     *,
+    backend: str,
     fast_mode: bool,
     compiled_mode: bool,
-    sparse_matmul: bool,
+    seed: int | None,
 ) -> TorchNetworkEngine:
+    if seed is not None:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
     torch_device = torch.device(device)
     n_in = 64
     n_hidden = 128
@@ -101,10 +115,26 @@ def _build_engine(
     )
 
     synapse: ISynapseModel
-    if sparse_matmul:
+    if backend == "sparse":
         synapse = DelayedSparseMatmulSynapse(DelayedSparseMatmulParams(init_weight=0.05))
+    elif backend == "event":
+        synapse = DelayedCurrentSynapse(
+            DelayedCurrentParams(
+                init_weight=0.05,
+                event_driven=True,
+                adaptive_event_driven=False,
+            )
+        )
+    elif backend == "dense":
+        synapse = DelayedCurrentSynapse(
+            DelayedCurrentParams(
+                init_weight=0.05,
+                event_driven=False,
+                adaptive_event_driven=False,
+            )
+        )
     else:
-        synapse = DelayedCurrentSynapse(DelayedCurrentParams(init_weight=0.05))
+        raise ValueError(f"Unknown backend '{backend}'")
 
     projections = [
         ProjectionSpec(
@@ -132,7 +162,9 @@ def _build_engine(
     return engine
 
 
-def _run_bench(
+def run_benchmark_case(
+    case_name: str,
+    build_engine_fn: Callable[[], TorchNetworkEngine],
     *,
     steps: int,
     warmup: int,
@@ -140,19 +172,14 @@ def _run_bench(
     fast_mode: bool,
     compiled_mode: bool,
     monitors_on: bool,
-    sparse_matmul: bool,
     rebuild_sparse_every: int,
+    seed: int | None,
 ) -> dict[str, Any]:
-    engine = _build_engine(
-        device,
-        fast_mode=fast_mode,
-        compiled_mode=compiled_mode,
-        sparse_matmul=sparse_matmul,
-    )
+    engine = build_engine_fn()
     if monitors_on:
         engine.attach_monitors([_NoOpMonitor()])
 
-    engine.reset(config=SimulationConfig(dt=1e-3, device=device))
+    engine.reset(config=SimulationConfig(dt=1e-3, device=device, seed=seed))
 
     for _ in range(warmup):
         engine.step()
@@ -191,9 +218,10 @@ def _run_bench(
                 )
             rebuild_total_ms += (time.perf_counter() - rebuild_start) * 1000.0
             rebuild_count += 1
+
+    total = time.perf_counter() - start
     if device == "cuda":
         torch.cuda.synchronize()
-    total = time.perf_counter() - start
 
     steps_per_sec = steps / total if total > 0 else 0.0
     avg_ms = (total / steps) * 1000.0 if steps else 0.0
@@ -201,13 +229,13 @@ def _run_bench(
     p95_ms = _percentile(step_times, 95.0)
 
     metrics: dict[str, Any] = {
+        "backend": case_name,
         "steps": steps,
         "warmup": warmup,
         "device": device,
         "fast_mode": fast_mode,
         "compiled_mode": compiled_mode,
         "monitors": monitors_on,
-        "sparse_matmul": sparse_matmul,
         "rebuild_sparse_every": rebuild_sparse_every,
         "rebuild_sparse_count": rebuild_count,
         "rebuild_sparse_total_ms": rebuild_total_ms,
@@ -244,15 +272,11 @@ def main() -> None:
     parser.add_argument("--fast-mode", action="store_true", help="Enable fast_mode.")
     parser.add_argument("--compiled-mode", action="store_true", help="Enable compiled_mode.")
     parser.add_argument(
-        "--sparse-matmul",
-        action="store_true",
-        help="Use delayed sparse matmul synapse backend.",
-    )
-    parser.add_argument(
-        "--rebuild-sparse-every",
-        type=int,
-        default=0,
-        help="Rebuild sparse delay matrices every N steps (0 disables).",
+        "--backends",
+        type=str,
+        default="all",
+        choices=["all", "dense", "event", "sparse"],
+        help="Synapse backend(s) to benchmark.",
     )
     parser.add_argument(
         "--monitors",
@@ -262,57 +286,118 @@ def main() -> None:
         help="Enable simple monitors.",
     )
     parser.add_argument("--out", type=str, default="bench_results.json", help="Output JSON/CSV path.")
+    parser.add_argument("--seed", type=int, default=123, help="Random seed for topology.")
+    parser.add_argument(
+        "--rebuild-sparse-every",
+        type=int,
+        default=0,
+        help="Rebuild sparse delay matrices every N steps (0 disables).",
+    )
 
     args = parser.parse_args()
 
     if args.device == "cuda" and not torch.cuda.is_available():
         raise SystemExit("CUDA requested but not available.")
 
-    metrics = _run_bench(
-        steps=args.steps,
-        warmup=args.warmup,
-        device=args.device,
-        fast_mode=bool(args.fast_mode),
-        compiled_mode=bool(args.compiled_mode),
-        monitors_on=args.monitors == "on",
-        sparse_matmul=bool(args.sparse_matmul),
-        rebuild_sparse_every=int(args.rebuild_sparse_every),
-    )
+    backends = ["dense", "event", "sparse"] if args.backends == "all" else [args.backends]
+    results: list[dict[str, Any]] = []
 
-    summary = (
-        f"device={metrics['device']} steps={metrics['steps']} "
-        f"fast_mode={metrics['fast_mode']} compiled_mode={metrics['compiled_mode']} "
-        f"steps/sec={metrics['steps_per_sec']:.2f} avg_ms={metrics['avg_step_ms']:.4f} "
-        f"p50_ms={metrics['p50_step_ms']:.4f} p95_ms={metrics['p95_step_ms']:.4f}"
-    )
-    print(summary)
-    if metrics["device"] == "cuda":
-        print(
-            "cuda_peak_allocated_mb="
-            f"{metrics['cuda_peak_allocated_mb']:.2f} "
-            "cuda_peak_reserved_mb="
-            f"{metrics['cuda_peak_reserved_mb']:.2f}"
+    def _make_builder(name: str) -> Callable[[], TorchNetworkEngine]:
+        def _builder() -> TorchNetworkEngine:
+            return _build_engine(
+                args.device,
+                backend=name,
+                fast_mode=bool(args.fast_mode),
+                compiled_mode=bool(args.compiled_mode),
+                seed=args.seed,
+            )
+
+        return _builder
+
+    for backend in backends:
+        metrics = run_benchmark_case(
+            backend,
+            _make_builder(backend),
+            steps=args.steps,
+            warmup=args.warmup,
+            device=args.device,
+            fast_mode=bool(args.fast_mode),
+            compiled_mode=bool(args.compiled_mode),
+            monitors_on=args.monitors == "on",
+            rebuild_sparse_every=int(args.rebuild_sparse_every) if backend == "sparse" else 0,
+            seed=args.seed,
         )
-    if metrics["rebuild_sparse_every"]:
+        results.append(metrics)
+
+    print("backend  steps/sec  avg_ms  p50_ms  p95_ms  peak_alloc_mb  peak_res_mb")
+    for metrics in results:
+        peak_alloc = metrics.get("cuda_peak_allocated_mb", 0.0)
+        peak_res = metrics.get("cuda_peak_reserved_mb", 0.0)
         print(
-            "rebuild_every="
-            f"{metrics['rebuild_sparse_every']} "
-            "rebuild_avg_ms="
-            f"{metrics['rebuild_sparse_avg_ms']:.4f} "
-            "rebuild_total_ms="
-            f"{metrics['rebuild_sparse_total_ms']:.2f}"
+            f"{metrics['backend']:<7} "
+            f"{metrics['steps_per_sec']:>9.2f} "
+            f"{metrics['avg_step_ms']:>7.4f} "
+            f"{metrics['p50_step_ms']:>7.4f} "
+            f"{metrics['p95_step_ms']:>7.4f} "
+            f"{peak_alloc:>14.2f} "
+            f"{peak_res:>12.2f}"
         )
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).isoformat()
     if out_path.suffix.lower() == ".csv":
-        _write_csv_row(out_path, metrics)
+        for metrics in results:
+            row = {
+                "timestamp": timestamp,
+                "device": args.device,
+                "backend": metrics["backend"],
+                "steps": metrics["steps"],
+                "warmup": metrics["warmup"],
+                "steps_per_sec": metrics["steps_per_sec"],
+                "avg_ms": metrics["avg_step_ms"],
+                "p50_ms": metrics["p50_step_ms"],
+                "p95_ms": metrics["p95_step_ms"],
+                "peak_alloc_mb": metrics.get("cuda_peak_allocated_mb", 0.0),
+                "peak_res_mb": metrics.get("cuda_peak_reserved_mb", 0.0),
+            }
+            _write_csv_row(out_path, row)
         json_path = out_path.with_suffix(".json")
         with json_path.open("w", encoding="utf-8") as handle:
-            json.dump(metrics, handle, indent=2)
+            json.dump(
+                {
+                    "config": {
+                        "device": args.device,
+                        "steps": args.steps,
+                        "warmup": args.warmup,
+                        "fast_mode": bool(args.fast_mode),
+                        "compiled_mode": bool(args.compiled_mode),
+                        "monitors": args.monitors,
+                        "seed": args.seed,
+                    },
+                    "results": results,
+                },
+                handle,
+                indent=2,
+            )
     else:
         with out_path.open("w", encoding="utf-8") as handle:
-            json.dump(metrics, handle, indent=2)
+            json.dump(
+                {
+                    "config": {
+                        "device": args.device,
+                        "steps": args.steps,
+                        "warmup": args.warmup,
+                        "fast_mode": bool(args.fast_mode),
+                        "compiled_mode": bool(args.compiled_mode),
+                        "monitors": args.monitors,
+                        "seed": args.seed,
+                    },
+                    "results": results,
+                },
+                handle,
+                indent=2,
+            )
 
 
 if __name__ == "__main__":

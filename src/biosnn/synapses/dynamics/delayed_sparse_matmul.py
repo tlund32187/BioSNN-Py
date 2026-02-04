@@ -36,6 +36,8 @@ class DelayedSparseMatmulState:
     post_ring: dict[Compartment, Tensor] | None
     post_out: dict[Compartment, Tensor] | None
     cursor: int
+    bind_weights_to_topology: bool = True
+    pre_activity_buf: Tensor | None = None
 
 
 class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
@@ -59,6 +61,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
             post_ring=None,
             post_out=None,
             cursor=0,
+            pre_activity_buf=None,
         )
 
     def reset_state(
@@ -78,6 +81,8 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                 for out in state.post_out.values():
                     out.zero_()
             state.cursor = 0
+            if state.pre_activity_buf is not None:
+                state.pre_activity_buf.zero_()
             return state
         state.weights[edge_indices] = self.params.init_weight
         if state.post_ring is not None:
@@ -86,6 +91,8 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         if state.post_out is not None:
             for out in state.post_out.values():
                 out[:] = 0.0
+        if state.pre_activity_buf is not None:
+            state.pre_activity_buf.zero_()
         return state
 
     def step(
@@ -102,7 +109,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         use_no_grad = _use_no_grad(ctx)
         with torch.no_grad() if use_no_grad else nullcontext():
             _ensure_supported_topology(topology)
-            weights = state.weights
+            weights = _resolve_weights(state, topology, ctx)
             device = weights.device
             validate_shapes = _validate_shapes(ctx)
             require_on_device = _require_inputs_on_device(ctx)
@@ -144,7 +151,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         use_no_grad = _use_no_grad(ctx)
         with torch.no_grad() if use_no_grad else nullcontext():
             _ensure_supported_topology(topology)
-            weights = state.weights
+            weights = _resolve_weights(state, topology, ctx)
             device = weights.device
             validate_shapes = _validate_shapes(ctx)
             require_on_device = _require_inputs_on_device(ctx)
@@ -180,7 +187,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
     def apply_weight_updates(
         self,
         topology: SynapseTopology,
-        active_edges: Tensor,
+        active_edges: Tensor | None,
         d_weights: Tensor,
     ) -> None:
         weights = topology.weights
@@ -192,48 +199,40 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
             weights.add_(d_weights)
             edge_ids = None
             delta = d_weights
-        elif d_weights.numel() == active_edges.numel():
+        elif active_edges is not None and d_weights.numel() == active_edges.numel():
             weights.index_add_(0, active_edges, d_weights)
             edge_ids = active_edges
             delta = d_weights
         else:
             raise RuntimeError(
                 "Sparse matmul weight update shape mismatch: "
-                f"d_weights={tuple(d_weights.shape)} active_edges={tuple(active_edges.shape)} "
+                f"d_weights={tuple(d_weights.shape)} active_edges={tuple(active_edges.shape) if active_edges is not None else None} "
                 f"weights={tuple(weights.shape)}"
             )
+
+        if edge_ids is None:
+            _sync_sparse_values(topology)
+            return
 
         values_by_comp, edge_bucket_comp, edge_bucket_delay, edge_bucket_pos, edge_scale = (
             _require_sparse_update_meta(topology)
         )
-        if edge_ids is None:
-            comp_ids = edge_bucket_comp
-            delay_ids = edge_bucket_delay
-            pos_ids = edge_bucket_pos
-            scale_vals = edge_scale
-        else:
-            comp_ids = edge_bucket_comp.index_select(0, edge_ids)
-            delay_ids = edge_bucket_delay.index_select(0, edge_ids)
-            pos_ids = edge_bucket_pos.index_select(0, edge_ids)
-            scale_vals = edge_scale.index_select(0, edge_ids) if edge_scale is not None else None
+        comp_ids = edge_bucket_comp.index_select(0, edge_ids)
+        delay_ids = edge_bucket_delay.index_select(0, edge_ids)
+        pos_ids = edge_bucket_pos.index_select(0, edge_ids)
+        scale_vals = edge_scale.index_select(0, edge_ids) if edge_scale is not None else None
 
-        comp_order = tuple(Compartment)
-        for comp, values_by_delay in values_by_comp.items():
-            if comp not in comp_order:
-                continue
-            comp_id = comp_order.index(comp)
-            for delay, values in enumerate(values_by_delay):
-                if values is None:
-                    continue
-                mask = (comp_ids == comp_id) & (delay_ids == delay)
-                selected = mask.nonzero(as_tuple=False).flatten()
-                if selected.numel() == 0:
-                    continue
-                pos = pos_ids.index_select(0, selected)
-                delta_vals = delta.index_select(0, selected)
-                if scale_vals is not None:
-                    delta_vals = delta_vals * scale_vals.index_select(0, selected)
-                values.index_add_(0, pos, delta_vals)
+        _apply_sparse_value_updates(
+            values_by_comp=values_by_comp,
+            comp_ids=comp_ids,
+            delay_ids=delay_ids,
+            pos_ids=pos_ids,
+            delta=delta,
+            scale_vals=scale_vals,
+        )
+
+    def sync_sparse_values(self, topology: SynapseTopology) -> None:
+        _sync_sparse_values(topology)
 
 
 def _step_sparse_matmul(
@@ -259,18 +258,12 @@ def _step_sparse_matmul(
         slot.zero_()
         post_drive[comp] = out
 
-    weights = _maybe_clamp_weights(model, state, weights)
-    pre_activity = (
-        pre_spikes
-        if pre_spikes.dtype == weights.dtype
-        else pre_spikes.to(dtype=weights.dtype)
-    )
+    weights = _maybe_clamp_weights(model, state, topology, weights)
+    pre_activity = _fill_pre_activity_buf(state, pre_spikes, weights, device)
 
-    mats_by_comp = _sparse_mats_by_delay_by_comp(topology, device)
+    mats_by_comp = _nonempty_mats_by_comp(topology, device)
     for comp, mats in mats_by_comp.items():
-        for delay, mat in enumerate(mats):
-            if mat is None:
-                continue
+        for delay, mat in mats:
             contrib = torch.sparse.mm(mat, pre_activity.unsqueeze(1)).squeeze(1)
             target_row = (cursor + delay) % depth
             if delay == 0:
@@ -305,20 +298,14 @@ def _step_sparse_matmul_into(
         out_drive[comp].add_(slot)
         slot.zero_()
 
-    weights = _maybe_clamp_weights(model, state, weights)
-    pre_activity = (
-        pre_spikes
-        if pre_spikes.dtype == weights.dtype
-        else pre_spikes.to(dtype=weights.dtype)
-    )
+    weights = _maybe_clamp_weights(model, state, topology, weights)
+    pre_activity = _fill_pre_activity_buf(state, pre_spikes, weights, device)
 
-    mats_by_comp = _sparse_mats_by_delay_by_comp(topology, device)
+    mats_by_comp = _nonempty_mats_by_comp(topology, device)
     for comp, mats in mats_by_comp.items():
         if comp not in out_drive:
             raise KeyError(f"Drive accumulator missing compartment {comp}")
-        for delay, mat in enumerate(mats):
-            if mat is None:
-                continue
+        for delay, mat in mats:
             contrib = torch.sparse.mm(mat, pre_activity.unsqueeze(1)).squeeze(1)
             target_row = (cursor + delay) % depth
             if delay == 0:
@@ -385,6 +372,70 @@ def _sparse_mats_by_delay_by_comp(
     )
 
 
+def _nonempty_mats_by_comp(
+    topology: SynapseTopology, device: Any
+) -> dict[Compartment, list[tuple[int, Tensor]]]:
+    meta = topology.meta or {}
+    cached = meta.get("nonempty_mats_by_comp_csr")
+    if isinstance(cached, dict):
+        out_csr: dict[Compartment, list[tuple[int, Tensor]]] = {}
+        for comp, entries in cached.items():
+            if not isinstance(entries, list):
+                continue
+            valid_csr: list[tuple[int, Tensor]] = []
+            for entry in entries:
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                delay, mat = entry
+                if mat is None:
+                    continue
+                if hasattr(mat, "device") and device is not None and mat.device != device:
+                    raise RuntimeError(
+                        "nonempty_mats_by_comp is on a different device; "
+                        "compile_topology(..., build_sparse_delay_mats=True) with the synapse device."
+                    )
+                valid_csr.append((int(delay), cast(Tensor, mat)))
+            out_csr[cast(Compartment, comp)] = valid_csr
+        if out_csr:
+            return out_csr
+
+    mats_csr = meta.get("W_by_delay_by_comp_csr")
+    if isinstance(mats_csr, dict):
+        return {
+            comp: [(delay, mat) for delay, mat in enumerate(mats) if mat is not None]
+            for comp, mats in mats_csr.items()
+        }
+
+    cached = meta.get("nonempty_mats_by_comp")
+    if isinstance(cached, dict):
+        out_coo: dict[Compartment, list[tuple[int, Tensor]]] = {}
+        for comp, entries in cached.items():
+            if not isinstance(entries, list):
+                continue
+            valid_coo: list[tuple[int, Tensor]] = []
+            for entry in entries:
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                delay, mat = entry
+                if mat is None:
+                    continue
+                if hasattr(mat, "device") and device is not None and mat.device != device:
+                    raise RuntimeError(
+                        "nonempty_mats_by_comp is on a different device; "
+                        "compile_topology(..., build_sparse_delay_mats=True) with the synapse device."
+                    )
+                valid_coo.append((int(delay), cast(Tensor, mat)))
+            out_coo[cast(Compartment, comp)] = valid_coo
+        if out_coo:
+            return out_coo
+
+    mats_by_comp = _sparse_mats_by_delay_by_comp(topology, device)
+    return {
+        comp: [(delay, mat) for delay, mat in enumerate(mats) if mat is not None]
+        for comp, mats in mats_by_comp.items()
+    }
+
+
 def _validate_sparse_mats_by_comp(
     mats: dict[Any, Any], device: Any
 ) -> dict[Compartment, list[Tensor | None]]:
@@ -412,14 +463,17 @@ def _validate_sparse_mats(
 def _maybe_clamp_weights(
     model: DelayedSparseMatmulSynapse,
     state: DelayedSparseMatmulState,
+    topology: SynapseTopology,
     weights: Tensor,
 ) -> Tensor:
     if model.params.clamp_min is not None or model.params.clamp_max is not None:
-        weights = weights.clamp(
+        weights.clamp_(
             min=model.params.clamp_min if model.params.clamp_min is not None else None,
             max=model.params.clamp_max if model.params.clamp_max is not None else None,
         )
-        state.weights.copy_(weights)
+        if state.weights is not weights:
+            state.weights = weights
+        _sync_sparse_values(topology)
     return weights
 
 
@@ -502,6 +556,105 @@ def _require_inputs_on_device(ctx: StepContext) -> bool:
     if ctx.extras and "require_inputs_on_device" in ctx.extras:
         return bool(ctx.extras["require_inputs_on_device"])
     return False
+
+
+def _resolve_weights(
+    state: DelayedSparseMatmulState,
+    topology: SynapseTopology,
+    ctx: StepContext,
+) -> Tensor:
+    weights = topology.weights
+    if weights is None:
+        weights = state.weights
+        object.__setattr__(topology, "weights", weights)
+    elif weights is not state.weights:
+        state.weights = weights
+    return weights
+
+
+def _ensure_pre_activity_buf(
+    state: DelayedSparseMatmulState,
+    n_pre: int,
+    device: Any,
+    dtype: Any,
+) -> Tensor:
+    torch = require_torch()
+    buf = state.pre_activity_buf
+    if buf is None or buf.shape != (n_pre,) or buf.device != device or buf.dtype != dtype:
+        buf = torch.zeros((n_pre,), device=device, dtype=dtype)
+        state.pre_activity_buf = buf
+    return buf
+
+
+def _fill_pre_activity_buf(
+    state: DelayedSparseMatmulState,
+    pre_spikes: Tensor,
+    weights: Tensor,
+    device: Any,
+) -> Tensor:
+    buf = _ensure_pre_activity_buf(state, int(pre_spikes.shape[0]), device, weights.dtype)
+    try:
+        buf.copy_(pre_spikes)
+    except Exception:
+        buf.zero_()
+        buf.masked_fill_(pre_spikes, 1.0)
+    return buf
+
+
+def _sync_sparse_values(topology: SynapseTopology) -> None:
+    values_by_comp, edge_bucket_comp, edge_bucket_delay, edge_bucket_pos, edge_scale = (
+        _require_sparse_update_meta(topology)
+    )
+    weights = topology.weights
+    if weights is None:
+        raise RuntimeError("Topology weights missing; cannot sync sparse values.")
+    comp_ids = edge_bucket_comp
+    delay_ids = edge_bucket_delay
+    pos_ids = edge_bucket_pos
+    scale_vals = edge_scale
+
+    _apply_sparse_value_updates(
+        values_by_comp=values_by_comp,
+        comp_ids=comp_ids,
+        delay_ids=delay_ids,
+        pos_ids=pos_ids,
+        delta=weights,
+        scale_vals=scale_vals,
+        replace=True,
+    )
+
+
+def _apply_sparse_value_updates(
+    *,
+    values_by_comp: Mapping[Compartment, list[Tensor | None]],
+    comp_ids: Tensor,
+    delay_ids: Tensor,
+    pos_ids: Tensor,
+    delta: Tensor,
+    scale_vals: Tensor | None,
+    replace: bool = False,
+) -> None:
+    comp_order = tuple(Compartment)
+    for comp, values_by_delay in values_by_comp.items():
+        if comp not in comp_order:
+            continue
+        comp_id = comp_order.index(comp)
+        comp_mask = comp_ids == comp_id
+        for delay, values in enumerate(values_by_delay):
+            if values is None:
+                continue
+            mask = comp_mask & (delay_ids == delay)
+            selected = mask.nonzero(as_tuple=False).flatten()
+            if selected.numel() == 0:
+                continue
+            pos = pos_ids.index_select(0, selected)
+            vals = delta.index_select(0, selected)
+            if scale_vals is not None:
+                vals = vals * scale_vals.index_select(0, selected)
+            if replace:
+                values.index_copy_(0, pos, vals)
+            else:
+                values.index_add_(0, pos, vals)
 
 
 def _require_sparse_update_meta(

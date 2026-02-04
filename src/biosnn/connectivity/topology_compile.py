@@ -142,17 +142,53 @@ def compile_topology(
                 receptor_scale=receptor_scale,
                 build_bucket_edge_mapping=build_bucket_edge_mapping,
             )
-            meta["W_by_delay_by_comp"] = mats_by_comp
+            keep_coo = bool(meta.get("keep_sparse_coo", False))
+            if keep_coo:
+                meta["W_by_delay_by_comp"] = mats_by_comp
             meta["values_by_comp"] = values_by_comp
             meta["indices_by_comp"] = indices_by_comp
             meta["scale_by_comp"] = scale_by_comp
+
+            nonempty_coo: dict[Compartment, list[tuple[int, Tensor]]] = {}
+            for comp, mats in mats_by_comp.items():
+                nonempty_coo[comp] = [
+                    (delay, mat)
+                    for delay, mat in enumerate(mats)
+                    if mat is not None
+                ]
+            if keep_coo:
+                meta["nonempty_mats_by_comp"] = nonempty_coo
+
+            csr_supported = hasattr(torch.Tensor, "to_sparse_csr")
+            mats_by_comp_csr: dict[Compartment, list[Tensor | None]] = {}
+            if csr_supported:
+                nonempty_csr: dict[Compartment, list[tuple[int, Tensor]]] = {}
+                for comp, mats in mats_by_comp.items():
+                    mats_csr: list[Tensor | None] = [None for _ in range(len(mats))]
+                    for delay, mat in enumerate(mats):
+                        if mat is None:
+                            continue
+                        try:
+                            mats_csr[delay] = mat.to_sparse_csr()
+                        except Exception:
+                            mats_csr[delay] = None
+                    mats_by_comp_csr[comp] = mats_csr
+                    nonempty_csr[comp] = [
+                        (delay, cast(Tensor, mat))
+                        for delay, mat in enumerate(mats_csr)
+                        if mat is not None
+                    ]
+                meta["W_by_delay_by_comp_csr"] = mats_by_comp_csr
+                meta["nonempty_mats_by_comp_csr"] = nonempty_csr
             if build_bucket_edge_mapping:
                 meta["edge_scale"] = edge_scale
                 meta["edge_bucket_comp"] = edge_bucket_comp
                 meta["edge_bucket_delay"] = edge_bucket_delay
                 meta["edge_bucket_pos"] = edge_bucket_pos
-            if target_compartments is None:
+            if target_compartments is None and keep_coo:
                 meta["W_by_delay"] = mats_by_comp.get(topology.target_compartment)
+            if target_compartments is None and csr_supported:
+                meta["W_by_delay_csr"] = mats_by_comp_csr.get(topology.target_compartment)
 
     if build_pre_adjacency:
         rebuild_adj = False

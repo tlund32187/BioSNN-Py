@@ -140,6 +140,8 @@ class TorchNetworkEngine(ISimulationEngine):
             if proj.learning is not None:
                 learn_state = proj.learning.init_state(edge_count, ctx=self._ctx)
             self._proj_states[proj.name] = _ProjectionState(state=syn_state, learning_state=learn_state)
+            if proj.topology.weights is None and getattr(syn_state, "bind_weights_to_topology", False):
+                object.__setattr__(proj.topology, "weights", syn_state.weights)
             _copy_topology_weights(syn_state, proj.topology.weights)
 
         pop_map = {spec.name: spec for spec in self._pop_specs}
@@ -860,9 +862,15 @@ def _apply_indices(spikes: Tensor, indices: Any) -> None:
 
 def _copy_topology_weights(state: Any, weights: Tensor | None) -> None:
     if weights is None or not hasattr(state, "weights"):
+        if weights is None and getattr(state, "bind_weights_to_topology", False):
+            # Topology will be set to state weights later if needed.
+            return
         return
     state_weights = state.weights
     if not hasattr(state_weights, "shape"):
+        return
+    if getattr(state, "bind_weights_to_topology", False):
+        state.weights = weights
         return
     if state_weights.shape != weights.shape:
         return
@@ -1073,6 +1081,9 @@ def _apply_weight_clamp(weights: Tensor, proj: ProjectionSpec) -> None:
     if clamp_min is None and clamp_max is None:
         return
     weights.clamp_(min=clamp_min, max=clamp_max)
+    sync_fn = getattr(proj.synapse, "sync_sparse_values", None)
+    if callable(sync_fn):
+        sync_fn(proj.topology)
 
 
 def _merge_population_tensors(
@@ -1388,7 +1399,7 @@ def _apply_learning_update(
             f"weights={tuple(target.shape)}"
         )
 
-    if active_edges is not None and synapse is not None and topology is not None:
+    if synapse is not None and topology is not None:
         apply_fn = getattr(synapse, "apply_weight_updates", None)
         if callable(apply_fn):
             apply_fn(topology, active_edges, result.d_weights)

@@ -80,6 +80,8 @@ class TorchSimulationEngine(ISimulationEngine):
         self._spikes = torch.zeros((self._n,), device=self._device, dtype=torch.bool)
         _apply_initial_spikes(self._spikes, config.meta)
 
+        if self._topology.weights is None and getattr(self._synapse_state, "bind_weights_to_topology", False):
+            object.__setattr__(self._topology, "weights", self._synapse_state.weights)
         _copy_topology_weights(self._synapse_state, self._topology.weights)
         _ensure_topology_meta(self._topology, n_pre=self._n, n_post=self._n)
         build_edges_by_delay = False
@@ -259,9 +261,14 @@ def _apply_initial_spikes(spikes: Tensor, meta: Mapping[str, Any] | None) -> Non
 
 def _copy_topology_weights(state: Any, weights: Tensor | None) -> None:
     if weights is None or not hasattr(state, "weights"):
+        if weights is None and getattr(state, "bind_weights_to_topology", False):
+            return
         return
     state_weights = state.weights
     if not hasattr(state_weights, "shape"):
+        return
+    if getattr(state, "bind_weights_to_topology", False):
+        state.weights = weights
         return
     if state_weights.shape != weights.shape:
         return

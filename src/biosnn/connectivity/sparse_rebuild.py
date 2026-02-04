@@ -30,9 +30,13 @@ def rebuild_sparse_delay_mats(
     for key in (
         "W_by_delay_by_comp",
         "W_by_delay",
+        "W_by_delay_by_comp_csr",
+        "W_by_delay_csr",
         "values_by_comp",
         "indices_by_comp",
         "scale_by_comp",
+        "nonempty_mats_by_comp",
+        "nonempty_mats_by_comp_csr",
     ):
         meta.pop(key, None)
 
