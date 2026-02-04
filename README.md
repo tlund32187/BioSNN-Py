@@ -27,20 +27,36 @@ py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
+Optional: auto-detect CUDA and install the correct torch build:
+```powershell
+.\scripts\install_torch.ps1 -Dev
+```
+
 2) Install the library in editable mode with dev tools:
 ```powershell
 python -m pip install -U pip
-pip install -e ".[dev]"
-pip install --index-url https://download.pytorch.org/whl/cpu torch
+pip install -e ".[dev,torch]"
 ```
 
 ### Torch (CPU or CUDA)
-Install the optional torch extra:
+Install the optional torch extra (CPU by default):
 ```powershell
 pip install -e ".[torch]"
 ```
 
-For CUDA-enabled wheels, install from PyTorch’s official instructions for your CUDA version.
+This extra also installs `numpy` to avoid optional torch warnings.
+
+For CUDA-enabled wheels (example: CUDA 13.0 / cu130), use:
+```powershell
+pip install -e ".[dev,torch-cu130]" --index-url https://download.pytorch.org/whl/cu130 --extra-index-url https://pypi.org/simple
+```
+
+For CPU-only wheels, use:
+```powershell
+pip install -e ".[dev,torch-cpu]"
+```
+
+If you already have a CUDA-enabled torch in another Python, re-installing inside your `.venv` is required.
 
 ### Benchmark (optional)
 ```powershell
@@ -52,6 +68,10 @@ python scripts/bench_step.py --device cuda --steps 5000
 ruff check .
 mypy .
 pytest
+```
+If `ruff` or `mypy` are missing, install the dev extra:
+```powershell
+pip install -e ".[dev]"
 ```
 
 ## Public API policy
@@ -66,6 +86,9 @@ See: `docs/public_api.md` and `docs/architecture/decisions/0001-library-first.md
 
 ## Guides
 - `docs/guides/synapses.md`
+- `docs/guides/network_builder.md`
+- `docs/guides/presets.md`
+- `docs/guides/adding_neuron_models.md`
 
 ## Dashboard (local)
 The synapse dashboard is a static page under `docs/dashboard/`.

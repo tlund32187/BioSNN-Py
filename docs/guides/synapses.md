@@ -14,10 +14,15 @@ step a simple delayed-current synapse model.
 ```python
 import torch
 
-from biosnn.connectivity import DelayParams, compute_delay_steps
-from biosnn.contracts.neurons import Compartment, StepContext
-from biosnn.contracts.synapses import ReceptorKind, SynapseInputs, SynapseTopology
-from biosnn.synapses.dynamics import DelayedCurrentParams, DelayedCurrentSynapse
+from biosnn.api import (
+    Compartment,
+    StepContext,
+    ReceptorKind,
+    SynapseInputs,
+    SynapseTopology,
+    DelayedCurrentParams,
+    DelayedCurrentSynapse,
+)
 
 # 1) Define a tiny graph (2 pre -> 2 post)
 pre_idx = torch.tensor([0, 1], dtype=torch.long)
@@ -28,17 +33,8 @@ pre_pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
 post_pos = torch.tensor([[0.0, 2.0, 0.0], [1.0, 2.0, 0.0]])
 myelin = torch.tensor([0.0, 1.0])
 
-# 3) Compute delay steps (dt in seconds)
-params = DelayParams(base_velocity=1.0, myelin_scale=1.0, use_ceil=True)
-delay_steps = compute_delay_steps(
-    pre_pos,
-    post_pos,
-    pre_idx,
-    post_idx,
-    dt=1e-3,
-    myelin=myelin,
-    params=params,
-)
+# 3) Provide delay steps (dt in seconds); compute externally if needed
+delay_steps = torch.tensor([1, 2], dtype=torch.long)
 
 # 4) Optional per-edge receptor and target compartments
 receptor = torch.tensor([0, 1], dtype=torch.long)  # AMPA for edge0, GABA for edge1
@@ -89,18 +85,5 @@ print(post_drive[Compartment.DENDRITE])
   ctx.extras["require_inputs_on_device"] = True.
 
 ## Monitoring
-To log synapse weights or per-edge samples, use the CSV monitor preset:
-
-```python
-from pathlib import Path
-
-from biosnn.monitors.csv import SynapseCSVMonitor
-
-out_dir = Path("docs/dashboard/data")
-out_dir.mkdir(parents=True, exist_ok=True)
-
-monitor = SynapseCSVMonitor(
-    out_dir / "synapse.csv",
-    sample_indices=list(range(64)),
-)
-```
+Monitoring is supported via engine monitors; wire these through `Trainer` or the engine
+directly when you need CSV output.

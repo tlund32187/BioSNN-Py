@@ -163,7 +163,7 @@ def _dashboard_param(repo_root: Path, run_dir: Path, filename: str) -> str:
         rel = run_dir.relative_to(repo_root)
     except ValueError:
         return (run_dir / filename).as_posix()
-    return (Path("..") / ".." / rel / filename).as_posix()
+    return (Path("/") / rel / filename).as_posix()
 
 
 def _find_port(requested: int | None) -> int:

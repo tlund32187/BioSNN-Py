@@ -38,61 +38,9 @@ http://localhost:8000/docs/dashboard/?neuron=PATH&synapse=PATH&spikes=PATH&metri
 ```
 
 ## How to generate CSVs
-Use the CSV monitors from BioSNN and write into the dashboard data folder.
-
-```python
-from pathlib import Path
-
-from biosnn.monitors.csv import NeuronCSVMonitor, SynapseCSVMonitor
-
-out_dir = Path("docs/dashboard/data")
-out_dir.mkdir(parents=True, exist_ok=True)
-
-neuron_monitor = NeuronCSVMonitor(
-    out_dir / "neuron.csv",
-    tensor_keys=("v_soma", "refrac_left", "spike_hold_left", "theta"),
-    sample_indices=list(range(32)),
-    include_spikes=True,
-)
-
-synapse_monitor = SynapseCSVMonitor(
-    out_dir / "synapse.csv",
-    sample_indices=list(range(64)),
-)
-```
-
-## Export topology + synapse snapshot
-Use the helper to export the topology JSON and a synapse CSV snapshot together.
-
-```python
-from biosnn.io.dashboard_export import export_dashboard_snapshot
-
-export_dashboard_snapshot(
-    topology,
-    weights=state.weights,
-    out_dir="docs/dashboard/data",
-    neuron_tensors={
-        "v_soma": neuron_state.v_soma,
-        "refrac_left": neuron_state.refrac_left,
-    },
-    neuron_spikes=step_result.spikes,
-)
-```
-
-## Export neuron snapshot from a model step
-If you already have the model + state + step result, you can snapshot a neuron CSV in one call.
-
-```python
-from biosnn.io.dashboard_export import export_neuron_snapshot
-
-export_neuron_snapshot(
-    model,
-    state,
-    step_result,
-    path="docs/dashboard/data/neuron.csv",
-    sample_indices=list(range(32)),
-)
-```
+Use the public API to run a demo network and point the dashboard at its
+artifact folder (query params). The CLI runner already writes the required
+CSV files into `artifacts/run_*`.
 
 ## Topology JSON (optional)
 Provide a topology file to render your true graph layout.

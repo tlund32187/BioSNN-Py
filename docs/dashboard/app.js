@@ -18,6 +18,13 @@ const uiControls = {
   rasterStride: document.getElementById("rasterStride"),
   rasterWindow: document.getElementById("rasterWindow"),
   rasterMaxPoints: document.getElementById("rasterMaxPoints"),
+  neuronMaxPerPop: document.getElementById("neuronMaxPerPop"),
+  neuronMaxPerPopValue: document.getElementById("neuronMaxPerPopValue"),
+  neuronViewMode: document.getElementById("neuronViewMode"),
+  neuronSampleMode: document.getElementById("neuronSampleMode"),
+  neuronSampleInfo: document.getElementById("neuronSampleInfo"),
+  neuronClampBadge: document.getElementById("neuronClampBadge"),
+  neuronControls: document.getElementById("neuronControls"),
   weightProjection: document.getElementById("weightProjectionSelect"),
   weightStep: document.getElementById("weightStepSelect"),
   weightClampMin: document.getElementById("weightClampMin"),
@@ -33,6 +40,7 @@ const metricNodes = {
   list: document.getElementById("metricList"),
   status: document.getElementById("dataStatus"),
   statusDot: document.getElementById("dataStatusDot"),
+  dataLink: document.getElementById("dataLink"),
   trainAccLatest: document.getElementById("trainAccLatest"),
   evalAccLatest: document.getElementById("evalAccLatest"),
   lossLatest: document.getElementById("lossLatest"),
@@ -65,6 +73,7 @@ const dataConfig = (() => {
     weightsCsv: params.get("weights") || "data/weights.csv",
     topologyJson: params.get("topology") || "data/topology.json",
     refreshMs: Number(params.get("refresh") || 1200),
+    totalSteps: Number(params.get("total_steps") || params.get("steps") || 0),
   };
 })();
 
@@ -77,9 +86,22 @@ const dataState = {
   weightsIndex: null,
   topology: null,
   topologyMode: "neurons",
+  totalSteps: 0,
+  popIndex: null,
+  neuronView: {
+    maxPerPop: 64,
+    mode: "auto",
+    sampleMode: "evenlySpaced",
+    shownByPop: {},
+    clampWarning: false,
+  },
+  neuronViewVersion: 0,
+  neuronRatesCache: null,
   live: false,
   lastUpdated: null,
 };
+
+const NEURON_SHOW_ALL_CAP = 512;
 
 let network = buildNetwork();
 let networkNeuron = network;
@@ -165,6 +187,316 @@ function normalizeTopology(topology) {
   return { nodes, edges, layerSizes: [] };
 }
 
+function buildPopulationIndexMap(popTopology) {
+  if (!popTopology || !Array.isArray(popTopology.nodes)) {
+    return null;
+  }
+  const pops = [];
+  let offset = 0;
+  popTopology.nodes.forEach((node) => {
+    const n = Number(node.nNeurons ?? 0);
+    const name = node.id ?? node.label ?? `pop_${pops.length}`;
+    const pop = {
+      name,
+      n,
+      offsetStart: offset,
+      offsetEnd: offset + n,
+      layer: Number(node.layer ?? 0),
+      x: clamp01(node.x ?? Math.random()),
+      y: clamp01(node.y ?? Math.random()),
+    };
+    pops.push(pop);
+    offset += n;
+  });
+  const byName = new Map(pops.map((pop) => [pop.name, pop]));
+  const popFromGlobalIndex = (globalIdx) => {
+    for (const pop of pops) {
+      if (globalIdx >= pop.offsetStart && globalIdx < pop.offsetEnd) {
+        return { popName: pop.name, localIdx: globalIdx - pop.offsetStart };
+      }
+    }
+    return null;
+  };
+  const globalIndex = (popName, localIdx) => {
+    const pop = byName.get(popName);
+    if (!pop) return null;
+    if (localIdx < 0 || localIdx >= pop.n) return null;
+    return pop.offsetStart + localIdx;
+  };
+  return { pops, byName, total: offset, popFromGlobalIndex, globalIndex };
+}
+
+function sampleIndices(nTotal, maxShow, mode) {
+  if (nTotal <= 0) return [];
+  if (mode === "all" || nTotal <= maxShow) {
+    return Array.from({ length: nTotal }, (_, idx) => idx);
+  }
+  const target = Math.max(1, Math.min(maxShow, nTotal));
+  if (mode === "firstK") {
+    return Array.from({ length: target }, (_, idx) => idx);
+  }
+  if (mode !== "evenlySpaced") {
+    throw new Error(`Unknown sampling mode: ${mode}`);
+  }
+  if (target === 1) return [0];
+  const last = nTotal - 1;
+  const step = last / (target - 1);
+  const indices = [];
+  for (let i = 0; i < target; i += 1) {
+    indices.push(Math.floor(i * step));
+  }
+  indices[indices.length - 1] = last;
+  return indices;
+}
+
+function buildNeuronViewState(popIndex, current) {
+  if (!popIndex) return current;
+  const maxPerPop = Number(current?.maxPerPop ?? 64);
+  const mode = current?.mode ?? "auto";
+  const sampleMode = current?.sampleMode ?? "evenlySpaced";
+  const shownByPop = {};
+  let clampWarning = false;
+
+  popIndex.pops.forEach((pop) => {
+    const nTotal = pop.n;
+    let indices = [];
+    if (mode === "all") {
+      const target = Math.min(nTotal, NEURON_SHOW_ALL_CAP);
+      if (nTotal > NEURON_SHOW_ALL_CAP) {
+        clampWarning = true;
+      }
+      indices = sampleIndices(nTotal, target, "all");
+    } else if (mode === "sample") {
+      indices = sampleIndices(nTotal, maxPerPop, sampleMode);
+    } else {
+      const useAll = nTotal <= maxPerPop;
+      indices = sampleIndices(nTotal, maxPerPop, useAll ? "all" : sampleMode);
+    }
+    shownByPop[pop.name] = { nTotal, indices, nShown: indices.length };
+  });
+
+  return {
+    maxPerPop,
+    mode,
+    sampleMode,
+    shownByPop,
+    clampWarning,
+  };
+}
+
+function bumpNeuronViewVersion() {
+  dataState.neuronViewVersion += 1;
+  dataState.neuronRatesCache = null;
+}
+
+function getSpikeWindowSteps() {
+  return Math.max(10, Number(uiControls.rasterWindow?.value || 200));
+}
+
+function getDtSeconds() {
+  const last = dataState.metricsRows?.[dataState.metricsRows.length - 1];
+  if (last) {
+    const candidate = Number(last.dt ?? last.delta_t ?? last.timestep ?? last.time_step ?? 0);
+    if (candidate > 0) return candidate;
+  }
+  return 1e-3;
+}
+
+function computeNeuronRatesForVisible() {
+  if (!dataState.spikesRows || dataState.spikesRows.length === 0) return null;
+  if (!dataState.neuronView?.shownByPop) return null;
+  const windowSteps = getSpikeWindowSteps();
+  const key = `${dataState.spikesRows.length}|${windowSteps}|${dataState.neuronViewVersion}`;
+  if (dataState.neuronRatesCache?.key === key) {
+    return dataState.neuronRatesCache.ratesByPop;
+  }
+
+  const lastRow = dataState.spikesRows[dataState.spikesRows.length - 1];
+  const maxStep = Number(lastRow.step || 0);
+  const minStep = Math.max(0, maxStep - windowSteps + 1);
+  const shownByPop = dataState.neuronView.shownByPop;
+  const shownSets = {};
+  Object.keys(shownByPop).forEach((pop) => {
+    shownSets[pop] = new Set(shownByPop[pop].indices || []);
+  });
+
+  const counts = new Map();
+  dataState.spikesRows.forEach((row) => {
+    const step = Number(row.step || 0);
+    if (step < minStep) return;
+    const pop = row.pop || "pop0";
+    const neuron = Number(row.neuron || 0);
+    const set = shownSets[pop];
+    if (!set || !set.has(neuron)) return;
+    const keyPop = `${pop}:${neuron}`;
+    counts.set(keyPop, (counts.get(keyPop) || 0) + 1);
+  });
+
+  const dt = getDtSeconds();
+  const windowSeconds = windowSteps * dt || 1;
+  const ratesByPop = new Map();
+  Object.entries(shownByPop).forEach(([pop, info]) => {
+    const rateMap = new Map();
+    (info.indices || []).forEach((idx) => {
+      const count = counts.get(`${pop}:${idx}`) || 0;
+      rateMap.set(idx, count / windowSeconds);
+    });
+    ratesByPop.set(pop, rateMap);
+  });
+
+  dataState.neuronRatesCache = { key, ratesByPop };
+  return ratesByPop;
+}
+
+function formatIndicesForInfo(indices, maxItems) {
+  if (!indices || indices.length === 0) {
+    return { text: "", fullText: "" };
+  }
+  const fullText = indices.join(", ");
+  if (indices.length <= 5) {
+    return { text: fullText, fullText };
+  }
+  const head = indices.slice(0, 4).join(", ");
+  const tail = indices[indices.length - 1];
+  return { text: `${head}, …, ${tail}`, fullText };
+}
+
+function syncNeuronViewControls() {
+  if (!uiControls.neuronMaxPerPop || !uiControls.neuronViewMode || !uiControls.neuronSampleMode) {
+    return;
+  }
+  uiControls.neuronMaxPerPop.value = String(dataState.neuronView.maxPerPop ?? 64);
+  if (uiControls.neuronMaxPerPopValue) {
+    uiControls.neuronMaxPerPopValue.textContent = uiControls.neuronMaxPerPop.value;
+  }
+  uiControls.neuronViewMode.value = dataState.neuronView.mode ?? "auto";
+  uiControls.neuronSampleMode.value = dataState.neuronView.sampleMode ?? "evenlySpaced";
+}
+
+function updateNeuronControlsEnabled() {
+  const enabled = Boolean(dataState.popIndex) && networkView === "neurons";
+  [uiControls.neuronMaxPerPop, uiControls.neuronViewMode, uiControls.neuronSampleMode].forEach(
+    (control) => {
+      if (control) control.disabled = !enabled;
+    }
+  );
+  if (uiControls.neuronControls) {
+    uiControls.neuronControls.classList.toggle("hidden", !enabled);
+  }
+}
+
+function readNeuronViewSettings() {
+  const maxPerPop = Math.max(8, Number(uiControls.neuronMaxPerPop?.value || 64));
+  const mode = uiControls.neuronViewMode?.value || "auto";
+  const sampleMode = uiControls.neuronSampleMode?.value || "evenlySpaced";
+  return { maxPerPop, mode, sampleMode };
+}
+
+function applyNeuronViewSettings() {
+  if (!dataState.popIndex || !networkPopulation) {
+    updateNeuronViewInfo();
+    return;
+  }
+  const settings = readNeuronViewSettings();
+  dataState.neuronView = buildNeuronViewState(dataState.popIndex, {
+    ...dataState.neuronView,
+    ...settings,
+  });
+  bumpNeuronViewVersion();
+  networkNeuron = buildNeuronTopologyFromPopulations(
+    networkPopulation,
+    dataState.popIndex,
+    dataState.neuronView
+  );
+  resolveNetworkView();
+  updateNeuronViewInfo();
+}
+
+function updateNeuronViewInfo() {
+  const infoEl = uiControls.neuronSampleInfo;
+  if (!infoEl) return;
+  if (networkView !== "neurons") {
+    infoEl.textContent = "";
+    infoEl.title = "";
+    infoEl.dataset.copyText = "";
+    infoEl.classList.add("hidden");
+    if (uiControls.neuronClampBadge) {
+      uiControls.neuronClampBadge.classList.add("hidden");
+    }
+    return;
+  }
+  if (!dataState.popIndex || !dataState.neuronView) {
+    infoEl.textContent = "Neuron sampling unavailable (no population topology).";
+    infoEl.title = "";
+    infoEl.dataset.copyText = "";
+    infoEl.classList.remove("hidden");
+    if (uiControls.neuronClampBadge) {
+      uiControls.neuronClampBadge.classList.add("hidden");
+    }
+    return;
+  }
+  const ordered = [...dataState.popIndex.pops].sort((a, b) => a.layer - b.layer);
+  const lines = [];
+  const titles = [];
+  const copyLines = [];
+  ordered.forEach((pop) => {
+    const shown = dataState.neuronView.shownByPop?.[pop.name];
+    if (!shown) return;
+    const formatted = formatIndicesForInfo(shown.indices, 32);
+    const isSampled = shown.nShown < shown.nTotal;
+    const line = isSampled
+      ? `${pop.name}: showing ${shown.nShown}/${shown.nTotal} (sample: ${formatted.text})`
+      : `${pop.name}: showing ${shown.nShown}/${shown.nTotal}`;
+    lines.push(line);
+    titles.push(`${pop.name}: ${formatted.fullText}`);
+    copyLines.push(
+      `${pop.name}: ${shown.nShown}/${shown.nTotal} [${formatted.fullText}]`
+    );
+  });
+  infoEl.textContent = lines.join("\n");
+  infoEl.title = titles.join("\n");
+  infoEl.dataset.copyText = copyLines.join("\n");
+  infoEl.classList.remove("hidden");
+  if (uiControls.neuronClampBadge) {
+    uiControls.neuronClampBadge.classList.toggle("hidden", !dataState.neuronView.clampWarning);
+  }
+}
+
+function jitterForIndex(idx, scale) {
+  const seed = (idx * 9301 + 49297) % 233280;
+  const unit = seed / 233280 - 0.5;
+  return unit * scale;
+}
+
+function buildNeuronTopologyFromPopulations(popTopology, popIndex, neuronView) {
+  if (!popTopology || !popIndex) {
+    return null;
+  }
+  const nodes = [];
+  popIndex.pops.forEach((pop) => {
+    const shown = neuronView?.shownByPop?.[pop.name];
+    const indices = shown?.indices ?? [];
+    const count = indices.length;
+    const spread = Math.min(0.6, 0.8 / Math.max(count, 1));
+    indices.forEach((localIdx, idx) => {
+      const offsetY = count <= 1 ? 0 : (idx / (count - 1) - 0.5) * spread;
+      const x = clamp01(pop.x + jitterForIndex(localIdx, 0.05));
+      const y = clamp01(pop.y + offsetY);
+      const globalIdx = pop.offsetStart + localIdx;
+      nodes.push({
+        index: globalIdx,
+        pop: pop.name,
+        localIdx,
+        globalIdx,
+        x,
+        y,
+        layer: pop.layer,
+      });
+    });
+  });
+  return { nodes, edges: [], layerSizes: [] };
+}
+
 
 
 function normalizePopulationTopology(topology) {
@@ -229,6 +561,30 @@ function randWeight() {
   return Math.random() * 2 - 1;
 }
 
+function getTotalSteps() {
+  if (Number.isFinite(dataConfig.totalSteps) && dataConfig.totalSteps > 0) {
+    return dataConfig.totalSteps;
+  }
+  const meta = dataState.topology?.meta ?? dataState.topology?.metadata ?? null;
+  const candidate =
+    meta?.total_steps ?? meta?.steps ?? dataState.topology?.total_steps ?? dataState.topology?.steps;
+  const asNumber = Number(candidate || 0);
+  return Number.isFinite(asNumber) && asNumber > 0 ? asNumber : 0;
+}
+
+function isLearningDisabled(rows) {
+  if (!rows || rows.length === 0) return true;
+  const last = rows[rows.length - 1];
+  const train = Number(last.train_accuracy ?? last.trainAcc);
+  const evalAcc = Number(last.eval_accuracy ?? last.evalAcc);
+  const loss = Number(last.loss ?? last.train_loss ?? last.eval_loss);
+  const allMissing =
+    (Number.isNaN(train) || !Number.isFinite(train)) &&
+    (Number.isNaN(evalAcc) || !Number.isFinite(evalAcc)) &&
+    (Number.isNaN(loss) || !Number.isFinite(loss));
+  return allMissing;
+}
+
 function updateMetrics() {
   metricNodes.fps.textContent = fpsSmooth.toFixed(0);
   metricNodes.activeEdges.textContent = network.edges.length.toString();
@@ -238,8 +594,27 @@ function updateMetrics() {
     ? `${(Number(spikeRateValue) * 100).toFixed(1)}%`
     : `${(Math.random() * 60 + 20).toFixed(1)} Hz`;
 
+  const learningDisabled = isLearningDisabled(dataState.metricsRows);
+  const stepValue =
+    latestValue(dataState.metricsRows, "step") ??
+    latestValue(dataState.metricsRows, "time_step") ??
+    latestValue(dataState.metricsRows, "timestep");
+  const totalSteps = getTotalSteps();
+  const stepNumber = stepValue !== null ? Number(stepValue) : null;
+  const progressLabel =
+    stepNumber !== null && Number.isFinite(stepNumber)
+      ? totalSteps > 0
+        ? `Step: ${stepNumber} / ${totalSteps} (${((stepNumber / totalSteps) * 100).toFixed(1)}%)`
+        : `Step: ${stepNumber}`
+      : "Step: --";
+
   const metrics = [
-    ["Current Accuracy", latestValue(dataState.metricsRows, "train_accuracy") || "0.0%"],
+    [
+      "Current Accuracy",
+      learningDisabled
+        ? "Learning disabled"
+        : latestValue(dataState.metricsRows, "train_accuracy") || "0.0%",
+    ],
     [
       "Weight Mean",
       latestValue(dataState.synapseRows, "weights_mean")
@@ -258,7 +633,7 @@ function updateMetrics() {
     ],
     [
       "Progress",
-      latestValue(dataState.neuronRows, "progress") || `${Math.floor(Math.random() * 40) + 20}/32000`,
+      learningDisabled ? progressLabel : progressLabel,
     ],
   ];
 
@@ -337,6 +712,7 @@ function drawNeuronNetwork() {
   });
   ctx.globalAlpha = 1;
 
+  const screenNodes = [];
   network.nodes.forEach((node) => {
     const radius = node.layer === 1 ? 4.5 : 4;
     const fill = node.layer === 0 ? theme.input : node.layer === 1 ? theme.hidden : theme.output;
@@ -344,7 +720,17 @@ function drawNeuronNetwork() {
     ctx.beginPath();
     ctx.arc(node.x * width, node.y * height, radius, 0, Math.PI * 2);
     ctx.fill();
+    screenNodes.push({
+      node,
+      x: node.x * width,
+      y: node.y * height,
+      radius,
+    });
   });
+
+  if (networkNeuron) {
+    networkNeuron._screen = { nodes: screenNodes };
+  }
 }
 
 
@@ -564,7 +950,7 @@ function drawStateSpace() {
 }
 
 async function refreshData() {
-  const [neuronRows, synapseRows, spikesRows, metricsRows, weightsRows, topology] = await Promise.all([
+  const [neuronRes, synapseRes, spikesRes, metricsRes, weightsRes, topologyRes] = await Promise.all([
     loadCsv(dataConfig.neuronCsv),
     loadCsv(dataConfig.synapseCsv),
     loadCsv(dataConfig.spikesCsv),
@@ -573,6 +959,13 @@ async function refreshData() {
     loadJson(dataConfig.topologyJson),
   ]);
 
+  const neuronRows = neuronRes.data;
+  const synapseRows = synapseRes.data;
+  const spikesRows = spikesRes.data;
+  const metricsRows = metricsRes.data;
+  const weightsRows = weightsRes.data;
+  const topology = topologyRes.data;
+
   dataState.neuronRows = neuronRows;
   dataState.synapseRows = synapseRows;
   dataState.spikesRows = spikesRows;
@@ -580,16 +973,41 @@ async function refreshData() {
   dataState.weightsRows = weightsRows;
   dataState.weightsIndex = weightsRows ? buildWeightsIndex(weightsRows) : null;
   dataState.topology = topology;
+  dataState.totalSteps = getTotalSteps();
   dataState.live = Boolean(neuronRows || synapseRows || spikesRows || metricsRows || weightsRows || topology);
   dataState.lastUpdated = new Date();
+
+  updateDataStatus([
+    neuronRes,
+    synapseRes,
+    spikesRes,
+    metricsRes,
+    weightsRes,
+    topologyRes,
+  ]);
+  updateDataLink();
 
   if (topology) {
     if (topology.mode === "population") {
       networkPopulation = normalizePopulationTopology(topology);
+      dataState.popIndex = buildPopulationIndexMap(networkPopulation);
+      dataState.neuronView = buildNeuronViewState(dataState.popIndex, dataState.neuronView);
+      bumpNeuronViewVersion();
+      networkNeuron = buildNeuronTopologyFromPopulations(
+        networkPopulation,
+        dataState.popIndex,
+        dataState.neuronView
+      );
       dataState.topologyMode = "populations";
+      syncNeuronViewControls();
+      updateNeuronControlsEnabled();
+      updateNeuronViewInfo();
     } else {
       networkNeuron = normalizeTopology(topology);
       dataState.topologyMode = "neurons";
+      dataState.popIndex = null;
+      updateNeuronControlsEnabled();
+      updateNeuronViewInfo();
     }
     resolveNetworkView();
   }
@@ -597,27 +1015,84 @@ async function refreshData() {
   refreshWeightSelectors();
 }
 
-}
-
 async function loadCsv(path) {
   try {
     const response = await fetch(`${path}?ts=${Date.now()}`);
-    if (!response.ok) return null;
+    if (!response.ok) {
+      return { data: null, error: `${response.status} ${response.statusText}`, url: path };
+    }
     const text = await response.text();
-    return parseCsv(text);
+    return { data: parseCsv(text), error: null, url: path };
   } catch (error) {
-    return null;
+    return { data: null, error: String(error), url: path };
   }
 }
 
 async function loadJson(path) {
   try {
     const response = await fetch(`${path}?ts=${Date.now()}`);
-    if (!response.ok) return null;
-    return await response.json();
+    if (!response.ok) {
+      return { data: null, error: `${response.status} ${response.statusText}`, url: path };
+    }
+    return { data: await response.json(), error: null, url: path };
   } catch (error) {
-    return null;
+    return { data: null, error: String(error), url: path };
   }
+}
+
+function updateDataStatus(results) {
+  if (!metricNodes.status || !metricNodes.statusDot) return;
+  const failures = results.filter((res) => !res.data && res.error);
+  if (failures.length > 0) {
+    metricNodes.status.textContent = `Missing data (${failures.length})`;
+    metricNodes.status.title = failures
+      .map((res) => `${res.url}: ${res.error}`)
+      .join("\n");
+    metricNodes.statusDot.parentElement?.classList.remove("live");
+    return;
+  }
+
+  if (dataState.live) {
+    metricNodes.status.textContent = "Live data";
+    metricNodes.status.title = "";
+    metricNodes.statusDot.parentElement?.classList.add("live");
+  } else {
+    metricNodes.status.textContent = "Demo data";
+    metricNodes.status.title = "";
+    metricNodes.statusDot.parentElement?.classList.remove("live");
+  }
+}
+
+function resolveRunFolderUrl() {
+  const candidates = [
+    dataConfig.topologyJson,
+    dataConfig.neuronCsv,
+    dataConfig.synapseCsv,
+    dataConfig.spikesCsv,
+    dataConfig.metricsCsv,
+    dataConfig.weightsCsv,
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const url = new URL(candidate, window.location.href);
+    const parts = url.pathname.split("/");
+    parts.pop();
+    const basePath = parts.join("/") + "/";
+    return `${url.origin}${basePath}`;
+  }
+  return null;
+}
+
+function updateDataLink() {
+  const link = metricNodes.dataLink;
+  if (!link) return;
+  const runUrl = resolveRunFolderUrl();
+  if (!runUrl) {
+    link.style.display = "none";
+    return;
+  }
+  link.href = runUrl;
+  link.style.display = "inline-flex";
 }
 
 function parseCsv(text) {
@@ -687,6 +1162,35 @@ function hideNetworkTooltip() {
 }
 
 function onNetworkHover(event) {
+  if (networkView === "neurons" && networkNeuron?._screen) {
+    const rect = canvases.network.getBoundingClientRect();
+    const mx = event.clientX - rect.left;
+    const my = event.clientY - rect.top;
+    const screen = networkNeuron._screen;
+    const ratesByPop = computeNeuronRatesForVisible();
+
+    for (const item of screen.nodes) {
+      const dx = mx - item.x;
+      const dy = my - item.y;
+      if (Math.sqrt(dx * dx + dy * dy) <= item.radius + 3) {
+        const node = item.node;
+        const popName = node.pop || "pop";
+        const localIdx = node.localIdx ?? node.index ?? 0;
+        const rate =
+          ratesByPop?.get(popName)?.get(localIdx) ??
+          ratesByPop?.get(popName)?.get(Number(localIdx));
+        const rateText = rate !== undefined ? `<br/>Rate: ${rate.toFixed(2)} Hz` : "";
+        showNetworkTooltip(
+          `<strong>${popName}[${localIdx}]</strong>${rateText}`,
+          mx,
+          my
+        );
+        return;
+      }
+    }
+    hideNetworkTooltip();
+    return;
+  }
   if (networkView !== "populations" || !networkPopulation || !networkPopulation._screen) {
     hideNetworkTooltip();
     return;
@@ -802,6 +1306,14 @@ function getRasterSettings() {
 }
 
 function getPopulationInfo() {
+  if (dataState.popIndex) {
+    const ordered = [...dataState.popIndex.pops].sort((a, b) => a.layer - b.layer);
+    const sizes = {};
+    ordered.forEach((pop) => {
+      sizes[pop.name] = pop.n;
+    });
+    return { order: ordered.map((pop) => pop.name), sizes };
+  }
   if (dataState.topology && dataState.topology.mode === "population") {
     const nodes = dataState.topology.nodes || [];
     const ordered = [...nodes].sort((a, b) => (a.layer ?? 0) - (b.layer ?? 0));
@@ -882,6 +1394,20 @@ function drawAccuracyChart() {
   if (!rows || rows.length === 0) {
     ctx.fillStyle = theme.muted;
     ctx.fillText("Accuracy unavailable", 12, 20);
+    return;
+  }
+  if (isLearningDisabled(rows)) {
+    ctx.fillStyle = theme.muted;
+    ctx.fillText("Learning disabled", 12, 20);
+    if (metricNodes.trainAccLatest) {
+      metricNodes.trainAccLatest.textContent = "--";
+    }
+    if (metricNodes.evalAccLatest) {
+      metricNodes.evalAccLatest.textContent = "--";
+    }
+    if (metricNodes.lossLatest) {
+      metricNodes.lossLatest.textContent = "--";
+    }
     return;
   }
 
@@ -1120,13 +1646,45 @@ if (networkControls.viewSelect) {
     userViewSelection = true;
     networkView = event.target.value;
     resolveNetworkView();
+    updateNeuronControlsEnabled();
+    updateNeuronViewInfo();
   });
+}
+const onNeuronViewChange = () => {
+  if (uiControls.neuronMaxPerPop && uiControls.neuronMaxPerPopValue) {
+    uiControls.neuronMaxPerPopValue.textContent = uiControls.neuronMaxPerPop.value;
+  }
+  applyNeuronViewSettings();
+};
+if (uiControls.neuronMaxPerPop) {
+  uiControls.neuronMaxPerPop.addEventListener("input", onNeuronViewChange);
+  uiControls.neuronMaxPerPop.addEventListener("change", onNeuronViewChange);
+}
+if (uiControls.neuronViewMode) {
+  uiControls.neuronViewMode.addEventListener("change", onNeuronViewChange);
+}
+if (uiControls.neuronSampleMode) {
+  uiControls.neuronSampleMode.addEventListener("change", onNeuronViewChange);
 }
 if (canvases.network) {
   canvases.network.addEventListener("mousemove", onNetworkHover);
   canvases.network.addEventListener("mouseleave", hideNetworkTooltip);
 }
 resizeAll();
+syncNeuronViewControls();
+updateNeuronControlsEnabled();
+updateNeuronViewInfo();
+if (uiControls.neuronSampleInfo) {
+  uiControls.neuronSampleInfo.addEventListener("click", async () => {
+    const text = uiControls.neuronSampleInfo.dataset.copyText;
+    if (!text || !navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // ignore clipboard errors
+    }
+  });
+}
 if (uiControls.weightProjection) {
   uiControls.weightProjection.addEventListener("change", () => {
     refreshWeightSelectors();

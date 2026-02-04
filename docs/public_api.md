@@ -17,17 +17,28 @@ This log is the canonical list of the current stable façade.
 - `NeuronInputs`
 - `NeuronStepResult`
 - `INeuronModel`
+- `NeuronModelBase`
+- `StateTensorSpec`
+- `TemplateNeuronModel`
+- `GLIFModel`
+- `AdEx2CompModel`
 
 ### Synapses
 - `SynapseTopology`
 - `SynapseInputs`
 - `SynapseStepResult`
 - `ISynapseModel`
+- `DelayedCurrentParams`
+- `DelayedCurrentSynapse`
+- `DelayedSparseMatmulParams`
+- `DelayedSparseMatmulSynapse`
 
 ### Learning
 - `LearningBatch`
 - `LearningStepResult`
 - `ILearningRule`
+- `ThreeFactorHebbianParams`
+- `ThreeFactorHebbianRule`
 
 ### Neuromodulators
 - `ModulatorKind`
@@ -38,8 +49,21 @@ This log is the canonical list of the current stable façade.
 - `StepEvent`
 - `IMonitor`
 
-## Notes
+### Builders
+- `NetworkBuilder`
+- `NetworkSpec`
+- `ErdosRenyi`
+- `Init`
 
+### Training
+- `Trainer`
+- `EngineConfig`
+- `TrainReport`
+
+### Presets
+- `presets`
+
+## Notes
 - Neuron-model specific DTOs like `GLIFParams` and `AdEx2CompParams` exist under
   `biosnn.contracts.neurons` but are **not yet** exported from `biosnn.api` until
   sign conventions and units are finalized.

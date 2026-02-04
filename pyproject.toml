@@ -31,7 +31,22 @@ dev = [
   "types-setuptools",
   "pre-commit>=3.7.0",
 ]
-torch = ["torch>=2.3.0"]
+torch = [
+  "torch>=2.3.0",
+  "numpy>=1.26.0",
+]
+torch-cu130 = [
+  "torch>=2.3.0",
+  "torchvision>=0.18.0",
+  "torchaudio>=2.3.0",
+  "numpy>=1.26.0",
+]
+torch-cpu = [
+  "torch>=2.3.0",
+  "torchvision>=0.18.0",
+  "torchaudio>=2.3.0",
+  "numpy>=1.26.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/biosnn"]

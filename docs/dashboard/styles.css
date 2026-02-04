@@ -71,6 +71,21 @@ h1 {
   text-transform: uppercase;
 }
 
+.status-link {
+  color: var(--accent-2);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(93, 220, 255, 0.4);
+  padding-bottom: 2px;
+  margin-left: 6px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  opacity: 0.85;
+}
+
+.status-link:hover {
+  opacity: 1;
+}
+
 .status-dot {
   width: 8px;
   height: 8px;
@@ -141,6 +156,7 @@ h1 {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .view-toggle {
@@ -193,6 +209,24 @@ h1 {
   width: 140px;
 }
 
+.neuron-controls input {
+  width: 120px;
+}
+
+.neuron-controls select {
+  width: 140px;
+}
+
+.neuron-controls {
+  gap: 12px;
+}
+
+.neuron-controls span {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+}
+
 .card h2 {
   font-size: 14px;
   margin: 0;
@@ -212,6 +246,15 @@ h1 {
 .chip.muted {
   background: rgba(120, 129, 155, 0.2);
   color: var(--muted);
+}
+
+.chip.warn {
+  background: rgba(251, 113, 133, 0.2);
+  color: var(--danger);
+}
+
+.hidden {
+  display: none !important;
 }
 
 .card canvas {
@@ -263,6 +306,17 @@ h1 {
   font-size: 11px;
   color: var(--muted);
   padding-top: 6px;
+}
+
+.neuron-sample-info {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+  white-space: pre-line;
+  max-height: 90px;
+  overflow: auto;
+  padding-right: 6px;
 }
 
 .network-tooltip {

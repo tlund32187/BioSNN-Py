@@ -25,6 +25,7 @@
           <div class="status">
             <span class="status-dot" id="dataStatusDot"></span>
             <span id="dataStatus">Demo data</span>
+            <a id="dataLink" class="status-link" href="#" target="_blank" rel="noreferrer">Open run folder</a>
           </div>
         </div>
         <div class="header-metrics">
@@ -55,6 +56,26 @@
                   <option value="populations">Populations</option>
                 </select>
               </div>
+              <div class="control-row neuron-controls" id="neuronControls">
+                <label>Mode
+                  <select id="neuronViewMode">
+                    <option value="auto">Auto</option>
+                    <option value="all">Show all</option>
+                    <option value="sample">Sample</option>
+                  </select>
+                </label>
+                <label>Max/Pop
+                  <input id="neuronMaxPerPop" type="range" min="8" max="256" value="64" step="1" />
+                  <span id="neuronMaxPerPopValue">64</span>
+                </label>
+                <label>Sampling
+                  <select id="neuronSampleMode">
+                    <option value="evenlySpaced">Evenly spaced</option>
+                    <option value="firstK">First K</option>
+                  </select>
+                </label>
+                <span id="neuronClampBadge" class="chip warn hidden">Clamped to 512</span>
+              </div>
               <span class="chip">Topology + weights</span>
             </div>
           </div>
@@ -70,6 +91,7 @@
             <span><i class="dot dot-adex"></i> AdEx</span>
             <span><i class="dot dot-unknown"></i> Other</span>
           </div>
+          <div id="neuronSampleInfo" class="neuron-sample-info"></div>
         </section>
 
         <section class="card card-raster">
