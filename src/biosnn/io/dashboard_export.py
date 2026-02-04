@@ -52,6 +52,7 @@ def export_population_topology_json(
     *,
     path: str | Path | None = None,
     weights_by_projection: Mapping[str, Tensor] | None = None,
+    include_neuron_topology: bool = False,
 ) -> dict[str, Any]:
     """Export a population-level topology JSON payload for the dashboard."""
 
@@ -59,6 +60,7 @@ def export_population_topology_json(
         populations,
         projections,
         weights_by_projection=weights_by_projection,
+        include_neuron_topology=include_neuron_topology,
     )
 
     if path is not None:

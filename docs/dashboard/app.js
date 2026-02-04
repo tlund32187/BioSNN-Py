@@ -22,6 +22,7 @@ const uiControls = {
   neuronMaxPerPopValue: document.getElementById("neuronMaxPerPopValue"),
   neuronViewMode: document.getElementById("neuronViewMode"),
   neuronSampleMode: document.getElementById("neuronSampleMode"),
+  neuronLayoutMode: document.getElementById("neuronLayoutMode"),
   neuronSampleInfo: document.getElementById("neuronSampleInfo"),
   neuronClampBadge: document.getElementById("neuronClampBadge"),
   neuronControls: document.getElementById("neuronControls"),
@@ -92,6 +93,7 @@ const dataState = {
     maxPerPop: 64,
     mode: "auto",
     sampleMode: "evenlySpaced",
+    layoutMode: "layered",
     shownByPop: {},
     clampWarning: false,
   },
@@ -102,6 +104,7 @@ const dataState = {
 };
 
 const NEURON_SHOW_ALL_CAP = 512;
+const NEURON_EDGE_SAMPLE_CAP = 600;
 
 let network = buildNetwork();
 let networkNeuron = network;
@@ -254,6 +257,7 @@ function buildNeuronViewState(popIndex, current) {
   const maxPerPop = Number(current?.maxPerPop ?? 64);
   const mode = current?.mode ?? "auto";
   const sampleMode = current?.sampleMode ?? "evenlySpaced";
+  const layoutMode = current?.layoutMode ?? "layered";
   const shownByPop = {};
   let clampWarning = false;
 
@@ -279,6 +283,7 @@ function buildNeuronViewState(popIndex, current) {
     maxPerPop,
     mode,
     sampleMode,
+    layoutMode,
     shownByPop,
     clampWarning,
   };
@@ -371,15 +376,21 @@ function syncNeuronViewControls() {
   }
   uiControls.neuronViewMode.value = dataState.neuronView.mode ?? "auto";
   uiControls.neuronSampleMode.value = dataState.neuronView.sampleMode ?? "evenlySpaced";
+  if (uiControls.neuronLayoutMode) {
+    uiControls.neuronLayoutMode.value = dataState.neuronView.layoutMode ?? "layered";
+  }
 }
 
 function updateNeuronControlsEnabled() {
   const enabled = Boolean(dataState.popIndex) && networkView === "neurons";
-  [uiControls.neuronMaxPerPop, uiControls.neuronViewMode, uiControls.neuronSampleMode].forEach(
-    (control) => {
-      if (control) control.disabled = !enabled;
-    }
-  );
+  [
+    uiControls.neuronMaxPerPop,
+    uiControls.neuronViewMode,
+    uiControls.neuronSampleMode,
+    uiControls.neuronLayoutMode,
+  ].forEach((control) => {
+    if (control) control.disabled = !enabled;
+  });
   if (uiControls.neuronControls) {
     uiControls.neuronControls.classList.toggle("hidden", !enabled);
   }
@@ -389,7 +400,8 @@ function readNeuronViewSettings() {
   const maxPerPop = Math.max(8, Number(uiControls.neuronMaxPerPop?.value || 64));
   const mode = uiControls.neuronViewMode?.value || "auto";
   const sampleMode = uiControls.neuronSampleMode?.value || "evenlySpaced";
-  return { maxPerPop, mode, sampleMode };
+  const layoutMode = uiControls.neuronLayoutMode?.value || "layered";
+  return { maxPerPop, mode, sampleMode, layoutMode };
 }
 
 function applyNeuronViewSettings() {
@@ -403,11 +415,19 @@ function applyNeuronViewSettings() {
     ...settings,
   });
   bumpNeuronViewVersion();
-  networkNeuron = buildNeuronTopologyFromPopulations(
-    networkPopulation,
-    dataState.popIndex,
-    dataState.neuronView
-  );
+  if (Array.isArray(dataState.topology?.neuron_nodes) && Array.isArray(dataState.topology?.neuron_edges)) {
+    networkNeuron = buildNeuronTopologyFromPayload(
+      dataState.topology,
+      dataState.popIndex,
+      dataState.neuronView
+    );
+  } else {
+    networkNeuron = buildNeuronTopologyFromPopulations(
+      networkPopulation,
+      dataState.popIndex,
+      dataState.neuronView
+    );
+  }
   resolveNetworkView();
   updateNeuronViewInfo();
 }
@@ -468,11 +488,29 @@ function jitterForIndex(idx, scale) {
   return unit * scale;
 }
 
+function hashString(value) {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function makeRng(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+}
+
 function buildNeuronTopologyFromPopulations(popTopology, popIndex, neuronView) {
   if (!popTopology || !popIndex) {
     return null;
   }
   const nodes = [];
+  const nodeIndexByGlobal = new Map();
   popIndex.pops.forEach((pop) => {
     const shown = neuronView?.shownByPop?.[pop.name];
     const indices = shown?.indices ?? [];
@@ -492,9 +530,180 @@ function buildNeuronTopologyFromPopulations(popTopology, popIndex, neuronView) {
         y,
         layer: pop.layer,
       });
+      nodeIndexByGlobal.set(globalIdx, nodes.length - 1);
     });
   });
-  return { nodes, edges: [], layerSizes: [] };
+  applyNeuronLayout(nodes, popIndex, neuronView?.layoutMode);
+  const edges = [];
+  if (Array.isArray(popTopology.edges) && popTopology.edges.length) {
+    popTopology.edges.forEach((edge) => {
+      const fromPop = popIndex.byName.get(edge.from);
+      const toPop = popIndex.byName.get(edge.to);
+      if (!fromPop || !toPop) return;
+      const shownPre = neuronView?.shownByPop?.[fromPop.name]?.indices ?? [];
+      const shownPost = neuronView?.shownByPop?.[toPop.name]?.indices ?? [];
+      if (!shownPre.length || !shownPost.length) return;
+
+      const nSyn = Number(edge.nSynapses || 0);
+      const p =
+        nSyn > 0 && fromPop.n > 0 && toPop.n > 0
+          ? Math.min(1, nSyn / (fromPop.n * toPop.n))
+          : 0;
+      const target = Math.max(1, Math.round(p * shownPre.length * shownPost.length));
+      const sampleCount = Math.min(target, NEURON_EDGE_SAMPLE_CAP);
+      if (sampleCount <= 0) return;
+
+      const baseSeed = hashString(`${edge.from}->${edge.to}`);
+      const rand = makeRng(baseSeed);
+      const receptorCounts = edge.receptorCounts || {};
+      const gabaCount = receptorCounts.gaba ?? receptorCounts.GABA ?? 0;
+      const meanWeight = Number(edge.meanWeight || 0);
+      const baseWeight =
+        meanWeight !== 0
+          ? meanWeight
+          : gabaCount > 0
+            ? -0.4
+            : 0.4;
+
+      const seen = new Set();
+      let guard = 0;
+      const startLen = edges.length;
+      while (edges.length - startLen < sampleCount && guard < sampleCount * 4) {
+        guard += 1;
+        const preLocal = shownPre[Math.floor(rand() * shownPre.length)];
+        const postLocal = shownPost[Math.floor(rand() * shownPost.length)];
+        const globalPre = fromPop.offsetStart + preLocal;
+        const globalPost = toPop.offsetStart + postLocal;
+        const fromIdx = nodeIndexByGlobal.get(globalPre);
+        const toIdx = nodeIndexByGlobal.get(globalPost);
+        if (fromIdx === undefined || toIdx === undefined) continue;
+        const key = `${fromIdx}-${toIdx}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        edges.push({
+          from: fromIdx,
+          to: toIdx,
+          weight: baseWeight + (rand() - 0.5) * 0.2,
+        });
+      }
+    });
+  }
+  return { nodes, edges, layerSizes: [] };
+}
+
+function buildNeuronTopologyFromPayload(neuronPayload, popIndex, neuronView) {
+  if (!neuronPayload || !Array.isArray(neuronPayload.neuron_nodes) || !popIndex) {
+    return null;
+  }
+  const nodes = [];
+  const nodeIndexByGlobal = new Map();
+  const allowed = new Set();
+  if (neuronView?.shownByPop) {
+    Object.entries(neuronView.shownByPop).forEach(([popName, info]) => {
+      const pop = popIndex.byName.get(popName);
+      if (!pop) return;
+      (info.indices || []).forEach((localIdx) => {
+        allowed.add(pop.offsetStart + localIdx);
+      });
+    });
+  }
+
+  neuronPayload.neuron_nodes.forEach((node) => {
+    const globalIdx = Number(node.index ?? node.global_idx ?? node.id ?? 0);
+    if (allowed.size > 0 && !allowed.has(globalIdx)) return;
+    const popInfo = popIndex.popFromGlobalIndex(globalIdx);
+    const popName = node.pop ?? popInfo?.popName ?? "pop";
+    const localIdx = node.local_idx ?? node.localIdx ?? popInfo?.localIdx ?? 0;
+    nodes.push({
+      index: globalIdx,
+      pop: popName,
+      localIdx,
+      globalIdx,
+      x: clamp01(node.x ?? Math.random()),
+      y: clamp01(node.y ?? Math.random()),
+      layer: Number(node.layer ?? 0),
+    });
+    nodeIndexByGlobal.set(globalIdx, nodes.length - 1);
+  });
+  applyNeuronLayout(nodes, popIndex, neuronView?.layoutMode);
+
+  const edges = [];
+  if (Array.isArray(neuronPayload.neuron_edges)) {
+    neuronPayload.neuron_edges.forEach((edge) => {
+      const fromGlobal = Number(edge.from ?? edge.source ?? 0);
+      const toGlobal = Number(edge.to ?? edge.target ?? 0);
+      const fromIdx = nodeIndexByGlobal.get(fromGlobal);
+      const toIdx = nodeIndexByGlobal.get(toGlobal);
+      if (fromIdx === undefined || toIdx === undefined) return;
+      edges.push({
+        from: fromIdx,
+        to: toIdx,
+        weight: Number(edge.weight ?? 0),
+        receptor: edge.receptor || "ampa",
+      });
+    });
+  }
+  return { nodes, edges, layerSizes: [] };
+}
+
+function applyNeuronLayout(nodes, popIndex, layoutMode) {
+  if (!nodes || nodes.length === 0) return;
+  const marginX = 0.08;
+  const marginY = 0.08;
+  if (layoutMode === "spatial") {
+    normalizeNodePositions(nodes, marginX, marginY);
+    return;
+  }
+  if (popIndex) {
+    const groups = new Map();
+    nodes.forEach((node) => {
+      if (!node.pop) return;
+      if (!groups.has(node.pop)) {
+        groups.set(node.pop, []);
+      }
+      groups.get(node.pop).push(node);
+    });
+    if (groups.size > 0) {
+      const orderedPops = [...popIndex.pops].sort((a, b) => a.layer - b.layer);
+      const activePops = orderedPops.filter((pop) => groups.has(pop.name));
+      const count = activePops.length || groups.size;
+      const step = count > 1 ? (1 - 2 * marginX) / (count - 1) : 0;
+      activePops.forEach((pop, idx) => {
+        const group = groups.get(pop.name) || [];
+        group.sort((a, b) => (a.localIdx ?? 0) - (b.localIdx ?? 0));
+        const x = marginX + step * idx;
+        const n = group.length;
+        group.forEach((node, i) => {
+          const y = marginY + ((i + 1) / (n + 1)) * (1 - 2 * marginY);
+          node.x = clamp01(x + jitterForIndex(node.localIdx ?? i, 0.015));
+          node.y = clamp01(y);
+        });
+      });
+      return;
+    }
+  }
+  normalizeNodePositions(nodes, marginX, marginY);
+}
+
+function normalizeNodePositions(nodes, marginX, marginY) {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  nodes.forEach((node) => {
+    minX = Math.min(minX, node.x ?? 0);
+    maxX = Math.max(maxX, node.x ?? 0);
+    minY = Math.min(minY, node.y ?? 0);
+    maxY = Math.max(maxY, node.y ?? 0);
+  });
+  const rangeX = Math.max(maxX - minX, 1e-6);
+  const rangeY = Math.max(maxY - minY, 1e-6);
+  nodes.forEach((node) => {
+    const nx = (node.x - minX) / rangeX;
+    const ny = (node.y - minY) / rangeY;
+    node.x = marginX + nx * (1 - 2 * marginX);
+    node.y = marginY + ny * (1 - 2 * marginY);
+  });
 }
 
 
@@ -993,11 +1202,19 @@ async function refreshData() {
       dataState.popIndex = buildPopulationIndexMap(networkPopulation);
       dataState.neuronView = buildNeuronViewState(dataState.popIndex, dataState.neuronView);
       bumpNeuronViewVersion();
-      networkNeuron = buildNeuronTopologyFromPopulations(
-        networkPopulation,
-        dataState.popIndex,
-        dataState.neuronView
-      );
+      if (Array.isArray(topology.neuron_nodes) && Array.isArray(topology.neuron_edges)) {
+        networkNeuron = buildNeuronTopologyFromPayload(
+          topology,
+          dataState.popIndex,
+          dataState.neuronView
+        );
+      } else {
+        networkNeuron = buildNeuronTopologyFromPopulations(
+          networkPopulation,
+          dataState.popIndex,
+          dataState.neuronView
+        );
+      }
       dataState.topologyMode = "populations";
       syncNeuronViewControls();
       updateNeuronControlsEnabled();
@@ -1665,6 +1882,9 @@ if (uiControls.neuronViewMode) {
 }
 if (uiControls.neuronSampleMode) {
   uiControls.neuronSampleMode.addEventListener("change", onNeuronViewChange);
+}
+if (uiControls.neuronLayoutMode) {
+  uiControls.neuronLayoutMode.addEventListener("change", onNeuronViewChange);
 }
 if (canvases.network) {
   canvases.network.addEventListener("mousemove", onNetworkHover);

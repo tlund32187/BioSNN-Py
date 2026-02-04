@@ -17,6 +17,7 @@ def build_population_topology_payload(
     *,
     weights_by_projection: Mapping[str, Tensor] | None = None,
     layout: str = "layers",
+    include_neuron_topology: bool = False,
 ) -> dict[str, Any]:
     """Build a population-level topology payload for visualization."""
 
@@ -26,13 +27,86 @@ def build_population_topology_payload(
 
     nodes = _build_population_nodes(pop_specs)
     edges = _build_population_edges(proj_specs, weights_by_projection)
-
-    return {
+    payload = {
         "mode": "population",
         "nodes": nodes,
         "edges": edges,
         "meta": {"created_by": "biosnn", "version": 1},
     }
+    if include_neuron_topology:
+        neuron_nodes, neuron_edges = _build_neuron_topology(pop_specs, proj_specs, nodes)
+        payload["neuron_nodes"] = neuron_nodes
+        payload["neuron_edges"] = neuron_edges
+    return payload
+
+
+def _build_neuron_topology(
+    pop_specs: Sequence[Any],
+    proj_specs: Sequence[Any],
+    pop_nodes: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    offsets: dict[str, int] = {}
+    total = 0
+    for pop, node in zip(pop_specs, pop_nodes, strict=True):
+        offsets[_pop_name(pop)] = total
+        total += int(node.get("n_neurons") or 0)
+
+    neuron_nodes: list[dict[str, Any]] = []
+    for pop, node in zip(pop_specs, pop_nodes, strict=True):
+        n = int(node.get("n_neurons") or 0)
+        if n <= 0:
+            continue
+        pop_name = _pop_name(pop)
+        base_x = float(node.get("x") or 0.5)
+        base_y = float(node.get("y") or 0.5)
+        spread = min(0.8, 0.6 / max(n, 1))
+        for i in range(n):
+            y_offset = 0.0 if n == 1 else (i / (n - 1) - 0.5) * spread
+            x_jitter = ((_hash_int(i + offsets[pop_name]) % 1000) / 1000 - 0.5) * 0.05
+            neuron_nodes.append(
+                {
+                    "index": offsets[pop_name] + i,
+                    "pop": pop_name,
+                    "local_idx": i,
+                    "x": _clamp01(base_x + x_jitter),
+                    "y": _clamp01(base_y + y_offset),
+                    "layer": int(node.get("layer") or 0),
+                }
+            )
+
+    neuron_edges: list[dict[str, Any]] = []
+    for proj in proj_specs:
+        topo = _proj_topology(proj)
+        pre = _proj_pre(proj)
+        post = _proj_post(proj)
+        pre_offset = offsets.get(pre, 0)
+        post_offset = offsets.get(post, 0)
+        pre_idx = _to_int_list(topo.pre_idx)
+        post_idx = _to_int_list(topo.post_idx)
+        weights = _to_float_list(topo.weights) or [0.0] * len(pre_idx)
+        receptor_names = _receptor_names(topo)
+        for idx, (src, dst) in enumerate(zip(pre_idx, post_idx, strict=True)):
+            edge: dict[str, Any] = {
+                "from": pre_offset + src,
+                "to": post_offset + dst,
+                "weight": weights[idx] if idx < len(weights) else 0.0,
+            }
+            if receptor_names is not None:
+                edge["receptor"] = receptor_names[idx] if idx < len(receptor_names) else "unknown"
+            neuron_edges.append(edge)
+
+    return neuron_nodes, neuron_edges
+
+
+def _hash_int(value: int) -> int:
+    value ^= (value << 13) & 0xFFFFFFFF
+    value ^= (value >> 17) & 0xFFFFFFFF
+    value ^= (value << 5) & 0xFFFFFFFF
+    return value & 0xFFFFFFFF
+
+
+def _clamp01(value: float) -> float:
+    return float(max(0.0, min(1.0, value)))
 
 
 def _build_population_nodes(pop_specs: Sequence[Any]) -> list[dict[str, Any]]:
@@ -263,6 +337,21 @@ def _target_counts(topology: SynapseTopology) -> dict[str, int] | None:
             name = comp_names[idx]
             counts[name] = counts.get(name, 0) + 1
     return counts
+
+
+def _receptor_names(topology: SynapseTopology) -> list[str] | None:
+    if topology.receptor is None:
+        return None
+    receptor_ids = _to_int_list(topology.receptor)
+    kinds = topology.receptor_kinds or (ReceptorKind.AMPA, ReceptorKind.NMDA, ReceptorKind.GABA)
+    names = [kind.value for kind in kinds]
+    resolved = []
+    for idx in receptor_ids:
+        if idx < 0 or idx >= len(names):
+            resolved.append("unknown")
+        else:
+            resolved.append(names[idx])
+    return resolved
 
 
 def _to_int_list(tensor: Tensor | None) -> list[int]:

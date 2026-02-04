@@ -210,6 +210,7 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
         [pop_input, pop_hidden, pop_output],
         [proj_in_hidden, proj_hidden_out],
         path=topology_path,
+        include_neuron_topology=True,
     )
 
     return {
