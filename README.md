@@ -31,6 +31,7 @@ py -m venv .venv
 ```powershell
 python -m pip install -U pip
 pip install -e ".[dev]"
+pip install --index-url https://download.pytorch.org/whl/cpu torch
 ```
 
 3) Run checks:
