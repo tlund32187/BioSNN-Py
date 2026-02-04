@@ -8,13 +8,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from biosnn.contracts.tensor import Tensor
 
 
-class ModulatorKind(str, Enum):
+class ModulatorKind(StrEnum):
     """Canonical modulator types.
 
     Keep this small and stable; add new modulators cautiously because they tend

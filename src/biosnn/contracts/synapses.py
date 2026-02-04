@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from biosnn.contracts.neurons import Compartment
 from biosnn.contracts.tensor import Tensor
 
 
-class ReceptorKind(str, Enum):
+class ReceptorKind(StrEnum):
     AMPA = "ampa"
     NMDA = "nmda"
     GABA = "gaba"

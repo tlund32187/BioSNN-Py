@@ -11,14 +11,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from biosnn.contracts.modulators import ModulatorKind
 from biosnn.contracts.tensor import Tensor
 
 
-class Compartment(str, Enum):
+class Compartment(StrEnum):
     SOMA = "soma"
     DENDRITE = "dendrite"
     AIS = "ais"

@@ -26,7 +26,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0.0",
-  "ruff>=0.6.0",
+  "ruff>=0.7.0",
   "mypy>=1.10.0",
   "types-setuptools",
   "pre-commit>=3.7.0",
@@ -42,6 +42,7 @@ line-length = 100
 target-version = "py313"
 src = ["src", "tests"]
 cache-dir = "C:/Users/tlund/AppData/Local/Temp/ruff_cache"
+required-version = ">=0.7.0"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
