@@ -22,12 +22,15 @@ def compile_topology(
     build_sparse_delay_mats: bool = False,
     build_bucket_edge_mapping: bool = False,
     fuse_delay_buckets: bool = True,
+    store_sparse_by_delay: bool = True,
 ) -> SynapseTopology:
     """Cast/move topology tensors to the requested device/dtype and populate meta.
 
     Returns a new SynapseTopology instance; the input topology is left unchanged.
     When building sparse delay mats, fused delay buckets are created by default
     (disable via fuse_delay_buckets=False).
+    Set store_sparse_by_delay=False to keep only fused sparse artifacts and
+    edge bucket mappings.
     """
 
     torch = require_torch()
@@ -151,11 +154,12 @@ def compile_topology(
                 build_bucket_edge_mapping=build_bucket_edge_mapping,
             )
             keep_coo = bool(meta.get("keep_sparse_coo", False))
-            if keep_coo:
-                meta["W_by_delay_by_comp"] = mats_by_comp
-            meta["values_by_comp"] = values_by_comp
-            meta["indices_by_comp"] = indices_by_comp
-            meta["scale_by_comp"] = scale_by_comp
+            if store_sparse_by_delay:
+                if keep_coo:
+                    meta["W_by_delay_by_comp"] = mats_by_comp
+                meta["values_by_comp"] = values_by_comp
+                meta["indices_by_comp"] = indices_by_comp
+                meta["scale_by_comp"] = scale_by_comp
 
             if fuse_delay_buckets:
                 (
@@ -175,70 +179,70 @@ def compile_topology(
                 meta["fused_W_delays_by_comp"] = fused_delays_by_comp
                 meta["fused_W_n_post_by_comp"] = fused_n_post_by_comp
 
-            nonempty_coo: dict[Compartment, list[tuple[int, Tensor]]] = {}
-            for comp, mats in mats_by_comp.items():
-                nonempty_coo[comp] = [
-                    (delay, mat)
-                    for delay, mat in enumerate(mats)
-                    if mat is not None
-                ]
-            if keep_coo:
-                meta["nonempty_mats_by_comp"] = nonempty_coo
-
-            csr_supported = hasattr(torch.Tensor, "to_sparse_csr")
-            mats_by_comp_csr: dict[Compartment, list[Tensor | None]] = {}
-            if csr_supported:
-                nonempty_csr: dict[Compartment, list[tuple[int, Tensor]]] = {}
+            if store_sparse_by_delay:
+                nonempty_coo: dict[Compartment, list[tuple[int, Tensor]]] = {}
                 for comp, mats in mats_by_comp.items():
-                    mats_csr: list[Tensor | None] = [None for _ in range(len(mats))]
-                    for delay, mat in enumerate(mats):
-                        if mat is None:
-                            continue
-                        try:
-                            mats_csr[delay] = mat.to_sparse_csr()
-                        except Exception:
-                            mats_csr[delay] = None
-                    mats_by_comp_csr[comp] = mats_csr
-                    nonempty_csr[comp] = [
-                        (delay, cast(Tensor, mat))
-                        for delay, mat in enumerate(mats_csr)
+                    nonempty_coo[comp] = [
+                        (delay, mat)
+                        for delay, mat in enumerate(mats)
                         if mat is not None
                     ]
-                meta["W_by_delay_by_comp_csr"] = mats_by_comp_csr
-                meta["nonempty_mats_by_comp_csr"] = nonempty_csr
+                if keep_coo:
+                    meta["nonempty_mats_by_comp"] = nonempty_coo
+
+                csr_supported = hasattr(torch.Tensor, "to_sparse_csr")
+                mats_by_comp_csr: dict[Compartment, list[Tensor | None]] = {}
+                if csr_supported:
+                    nonempty_csr: dict[Compartment, list[tuple[int, Tensor]]] = {}
+                    for comp, mats in mats_by_comp.items():
+                        mats_csr: list[Tensor | None] = [None for _ in range(len(mats))]
+                        for delay, mat in enumerate(mats):
+                            if mat is None:
+                                continue
+                            try:
+                                mats_csr[delay] = mat.to_sparse_csr()
+                            except Exception:
+                                mats_csr[delay] = None
+                        mats_by_comp_csr[comp] = mats_csr
+                        nonempty_csr[comp] = [
+                            (delay, cast(Tensor, mat))
+                            for delay, mat in enumerate(mats_csr)
+                            if mat is not None
+                        ]
+                    meta["W_by_delay_by_comp_csr"] = mats_by_comp_csr
+                    meta["nonempty_mats_by_comp_csr"] = nonempty_csr
             if build_bucket_edge_mapping and fuse_delay_buckets:
                 meta["edge_scale"] = edge_scale
                 meta["edge_bucket_comp"] = edge_bucket_comp
                 meta["edge_bucket_delay"] = edge_bucket_delay
                 meta["edge_bucket_pos"] = edge_bucket_pos
                 if edge_bucket_comp is not None and edge_bucket_delay is not None and edge_bucket_pos is not None:
-                    edge_bucket_fused_pos = torch.full(
-                        edge_bucket_comp.shape,
-                        -1,
-                        device=edge_bucket_comp.device,
-                        dtype=edge_bucket_comp.dtype,
+                    edge_bucket_fused_pos = _build_edge_bucket_fused_pos(
+                        edge_bucket_comp=edge_bucket_comp,
+                        edge_bucket_delay=edge_bucket_delay,
+                        edge_bucket_pos=edge_bucket_pos,
+                        fused_offsets_by_comp=fused_offsets_by_comp,
+                        max_delay=int(meta["max_delay_steps"]),
                     )
-                    comp_order = tuple(Compartment)
-                    for comp, offsets in fused_offsets_by_comp.items():
-                        if comp not in comp_order:
-                            continue
-                        comp_id = comp_order.index(comp)
-                        comp_mask = edge_bucket_comp == comp_id
-                        if not comp_mask.any():
-                            continue
-                        for delay, offset in offsets.items():
-                            delay_mask = edge_bucket_delay == delay
-                            mask = comp_mask & delay_mask
-                            if not mask.any():
-                                continue
-                            selected = mask.nonzero(as_tuple=False).flatten()
-                            pos = edge_bucket_pos.index_select(0, selected)
-                            edge_bucket_fused_pos.index_copy_(0, selected, pos + int(offset))
                     meta["edge_bucket_fused_pos"] = edge_bucket_fused_pos
-            if target_compartments is None and keep_coo:
+            if store_sparse_by_delay and target_compartments is None and keep_coo:
                 meta["W_by_delay"] = mats_by_comp.get(topology.target_compartment)
-            if target_compartments is None and csr_supported:
+            if store_sparse_by_delay and target_compartments is None and csr_supported:
                 meta["W_by_delay_csr"] = mats_by_comp_csr.get(topology.target_compartment)
+
+            if not store_sparse_by_delay:
+                for key in (
+                    "W_by_delay_by_comp",
+                    "W_by_delay",
+                    "W_by_delay_by_comp_csr",
+                    "W_by_delay_csr",
+                    "values_by_comp",
+                    "indices_by_comp",
+                    "scale_by_comp",
+                    "nonempty_mats_by_comp",
+                    "nonempty_mats_by_comp_csr",
+                ):
+                    meta.pop(key, None)
 
         if fuse_delay_buckets:
             fused_ready = (
@@ -275,28 +279,13 @@ def compile_topology(
                         edge_bucket_comp = cast(Tensor, meta.get("edge_bucket_comp"))
                         edge_bucket_delay = cast(Tensor, meta.get("edge_bucket_delay"))
                         edge_bucket_pos = cast(Tensor, meta.get("edge_bucket_pos"))
-                        edge_bucket_fused_pos = torch.full(
-                            edge_bucket_comp.shape,
-                            -1,
-                            device=edge_bucket_comp.device,
-                            dtype=edge_bucket_comp.dtype,
+                        edge_bucket_fused_pos = _build_edge_bucket_fused_pos(
+                            edge_bucket_comp=edge_bucket_comp,
+                            edge_bucket_delay=edge_bucket_delay,
+                            edge_bucket_pos=edge_bucket_pos,
+                            fused_offsets_by_comp=fused_offsets_by_comp,
+                            max_delay=int(meta["max_delay_steps"]),
                         )
-                        comp_order = tuple(Compartment)
-                        for comp, offsets in fused_offsets_by_comp.items():
-                            if comp not in comp_order:
-                                continue
-                            comp_id = comp_order.index(comp)
-                            comp_mask = edge_bucket_comp == comp_id
-                            if not comp_mask.any():
-                                continue
-                            for delay, offset in offsets.items():
-                                delay_mask = edge_bucket_delay == delay
-                                mask = comp_mask & delay_mask
-                                if not mask.any():
-                                    continue
-                                selected = mask.nonzero(as_tuple=False).flatten()
-                                pos = edge_bucket_pos.index_select(0, selected)
-                                edge_bucket_fused_pos.index_copy_(0, selected, pos + int(offset))
                         meta["edge_bucket_fused_pos"] = edge_bucket_fused_pos
 
     if build_pre_adjacency:
@@ -452,10 +441,11 @@ def _bucket_edges_by_delay(
     buckets: list[Tensor] = []
     for delay in range(max_delay + 1):
         mask = delay_steps == delay
-        if mask.any():
-            buckets.append(mask.nonzero(as_tuple=False).flatten())
-        else:
+        selected = mask.nonzero(as_tuple=False).flatten()
+        if selected.numel() == 0:
             buckets.append(torch.empty((0,), device=device, dtype=torch.long))
+        else:
+            buckets.append(selected)
     return buckets
 
 
@@ -561,9 +551,9 @@ def _build_sparse_delay_mats_by_comp(
         for delay in range(depth):
             delay_mask = delays == delay
             mask = delay_mask & comp_mask if comp_mask is not None else delay_mask
-            if not mask.any():
-                continue
             idx = mask.nonzero(as_tuple=False).flatten()
+            if idx.numel() == 0:
+                continue
             rows = post_idx.index_select(0, idx)
             cols = pre_idx.index_select(0, idx)
             vals = values_all.index_select(0, idx)
@@ -604,6 +594,53 @@ def _build_sparse_delay_mats_by_comp(
         edge_bucket_delay,
         edge_bucket_pos,
     )
+
+
+def _build_edge_bucket_fused_pos(
+    *,
+    edge_bucket_comp: Tensor,
+    edge_bucket_delay: Tensor,
+    edge_bucket_pos: Tensor,
+    fused_offsets_by_comp: Mapping[Compartment, Mapping[int, int]],
+    max_delay: int,
+) -> Tensor:
+    torch = require_torch()
+    comp_order = tuple(Compartment)
+    n_comp = len(comp_order)
+    offset_table = torch.full(
+        (n_comp, max_delay + 1),
+        -1,
+        device=edge_bucket_comp.device,
+        dtype=edge_bucket_pos.dtype,
+    )
+    for comp, offsets in fused_offsets_by_comp.items():
+        if comp not in comp_order:
+            continue
+        comp_id = comp_order.index(comp)
+        for delay, offset in offsets.items():
+            if 0 <= delay <= max_delay:
+                offset_table[comp_id, delay] = int(offset)
+
+    fused_pos = cast(Tensor, torch.full_like(edge_bucket_pos, -1))
+    valid = (
+        (edge_bucket_comp >= 0)
+        & (edge_bucket_comp < n_comp)
+        & (edge_bucket_delay >= 0)
+        & (edge_bucket_delay <= max_delay)
+    )
+    valid_idx = valid.nonzero(as_tuple=False).flatten()
+    if valid_idx.numel() == 0:
+        return fused_pos
+    comp_ids = edge_bucket_comp.index_select(0, valid_idx)
+    delay_ids = edge_bucket_delay.index_select(0, valid_idx)
+    offsets = offset_table[comp_ids, delay_ids]
+    offset_idx = (offsets >= 0).nonzero(as_tuple=False).flatten()
+    if offset_idx.numel() == 0:
+        return fused_pos
+    fused_idx = valid_idx.index_select(0, offset_idx)
+    pos_vals = edge_bucket_pos.index_select(0, fused_idx)
+    fused_pos.index_copy_(0, fused_idx, pos_vals + offsets.index_select(0, offset_idx))
+    return fused_pos
 
 
 def _build_fused_sparse_by_comp(

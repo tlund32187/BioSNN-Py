@@ -33,6 +33,7 @@ class ProjectionWeightsCSVMonitor(IMonitor):
         stride: int = 1,
         max_edges_full: int = 20000,
         max_edges_sample: int = 20000,
+        safe_max_edges_sample: int | None = None,
         append: bool = False,
         flush_every: int = 1,
     ) -> None:
@@ -44,7 +45,11 @@ class ProjectionWeightsCSVMonitor(IMonitor):
         )
         self._stride = max(1, stride)
         self._max_edges_full = max_edges_full
-        self._max_edges_sample = max_edges_sample
+        safe_cap = int(safe_max_edges_sample) if safe_max_edges_sample else None
+        if safe_cap is not None and safe_cap > 0:
+            self._max_edges_sample = min(max_edges_sample, safe_cap)
+        else:
+            self._max_edges_sample = max_edges_sample
         self._projections = [_normalize_projection(proj) for proj in projections]
 
     def on_step(self, event: StepEvent) -> None:

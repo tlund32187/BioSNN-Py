@@ -41,6 +41,7 @@ class DelayedCurrentState:
 
     weights: Tensor  # shape [E]
     delay_buffer: Tensor | None  # shape [D, E] (legacy)
+    delay_tmp: Tensor | None  # shape [E] scratch for edge buffer
     post_ring: dict[Compartment, Tensor] | None  # shape [D, Npost] per compartment
     post_out: dict[Compartment, Tensor] | None  # reusable output buffers [Npost] per compartment
     cursor: int
@@ -62,6 +63,7 @@ class DelayedCurrentSynapse(ISynapseModel):
         return DelayedCurrentState(
             weights=weights,
             delay_buffer=None,
+            delay_tmp=None,
             post_ring=None,
             post_out=None,
             cursor=0,
@@ -79,6 +81,8 @@ class DelayedCurrentSynapse(ISynapseModel):
             state.weights.fill_(self.params.init_weight)
             if state.delay_buffer is not None:
                 state.delay_buffer.zero_()
+            if state.delay_tmp is not None:
+                state.delay_tmp.zero_()
             if state.post_ring is not None:
                 for ring in state.post_ring.values():
                     ring.zero_()
@@ -90,6 +94,8 @@ class DelayedCurrentSynapse(ISynapseModel):
         state.weights[edge_indices] = self.params.init_weight
         if state.delay_buffer is not None:
             state.delay_buffer[:, edge_indices] = 0.0
+        if state.delay_tmp is not None:
+            state.delay_tmp.zero_()
         if state.post_ring is not None:
             for ring in state.post_ring.values():
                 ring[:, :] = 0.0
@@ -400,10 +406,16 @@ def _accumulate_post_drive(
         raise ValueError("target_compartments must be on the target device with dtype long")
     for comp, comp_id in _COMPARTMENT_TO_ID.items():
         mask = comp_ids == comp_id
-        if mask.any():
-            out = torch.zeros((n_post,), device=device, dtype=dtype)
-            out.scatter_add_(0, post_idx[mask], edge_current[mask])
-            post_drive[comp] = out
+        selected = mask.nonzero(as_tuple=False).flatten()
+        if selected.numel() == 0:
+            continue
+        out = torch.zeros((n_post,), device=device, dtype=dtype)
+        out.scatter_add_(
+            0,
+            post_idx.index_select(0, selected),
+            edge_current.index_select(0, selected),
+        )
+        post_drive[comp] = out
     return post_drive
 
 
@@ -438,18 +450,28 @@ def _step_edge_buffer(
         if state.delay_buffer is None or state.delay_buffer.shape != (depth, pre_idx.numel()):
             state.delay_buffer = torch.zeros((depth, pre_idx.numel()), device=device, dtype=weights.dtype)
             state.cursor = 0
+        if (
+            state.delay_tmp is None
+            or state.delay_tmp.shape != (pre_idx.numel(),)
+            or state.delay_tmp.device != device
+            or state.delay_tmp.dtype != weights.dtype
+        ):
+            state.delay_tmp = torch.empty((pre_idx.numel(),), device=device, dtype=weights.dtype)
         cursor = state.cursor % depth
         edge_idx = torch.arange(pre_idx.numel(), device=device)
-        delayed = state.delay_buffer[cursor].clone()
+        delayed = state.delay_tmp
+        delayed.copy_(state.delay_buffer[cursor])
         state.delay_buffer[cursor].zero_()
         immediate_mask = cast(Tensor, delay_steps == 0)
-        if immediate_mask.any():
-            delayed = delayed + edge_active_f * immediate_mask.to(edge_active_f.dtype)
-        if (~immediate_mask).any():
-            target_rows = torch.remainder(delay_steps + cursor, depth)
+        delayed = delayed + edge_active_f * immediate_mask.to(edge_active_f.dtype)
+        delayed_idx = (~immediate_mask).nonzero(as_tuple=False).flatten()
+        if delayed_idx.numel() > 0:
+            target_rows = torch.remainder(
+                delay_steps.index_select(0, delayed_idx) + cursor, depth
+            )
             state.delay_buffer[
-                target_rows[~immediate_mask], edge_idx[~immediate_mask]
-            ] = edge_active_f[~immediate_mask]
+                target_rows, edge_idx.index_select(0, delayed_idx)
+            ] = edge_active_f.index_select(0, delayed_idx)
         state.cursor = (cursor + 1) % depth
     else:
         delayed = edge_active_f
@@ -527,14 +549,16 @@ def _step_post_ring(
         for comp in post_drive:
             comp_id = _COMPARTMENT_TO_ID[comp]
             mask = comp_ids == comp_id
-            if mask.any():
-                posts = edge_post[mask]
-                currents = edge_current[mask]
-                if delay == 0:
-                    post_drive[comp].index_add_(0, posts, currents)
-                else:
-                    target_row = (cursor + delay) % depth
-                    post_ring[comp][target_row].index_add_(0, posts, currents)
+            selected = mask.nonzero(as_tuple=False).flatten()
+            if selected.numel() == 0:
+                continue
+            posts = edge_post.index_select(0, selected)
+            currents = edge_current.index_select(0, selected)
+            if delay == 0:
+                post_drive[comp].index_add_(0, posts, currents)
+            else:
+                target_row = (cursor + delay) % depth
+                post_ring[comp][target_row].index_add_(0, posts, currents)
 
     state.cursor = (cursor + 1) % depth
     return state, post_drive
@@ -601,14 +625,16 @@ def _step_post_ring_into(
         for comp in out_drive:
             comp_id = _COMPARTMENT_TO_ID[comp]
             mask = comp_ids == comp_id
-            if mask.any():
-                posts = edge_post[mask]
-                currents = edge_current[mask]
-                if delay == 0:
-                    out_drive[comp].index_add_(0, posts, currents)
-                else:
-                    target_row = (cursor + delay) % depth
-                    post_ring[comp][target_row].index_add_(0, posts, currents)
+            selected = mask.nonzero(as_tuple=False).flatten()
+            if selected.numel() == 0:
+                continue
+            posts = edge_post.index_select(0, selected)
+            currents = edge_current.index_select(0, selected)
+            if delay == 0:
+                out_drive[comp].index_add_(0, posts, currents)
+            else:
+                target_row = (cursor + delay) % depth
+                post_ring[comp][target_row].index_add_(0, posts, currents)
 
     state.cursor = (cursor + 1) % depth
 
@@ -677,14 +703,21 @@ def _step_post_ring_event_driven(
             post_drive[comp].index_add_(0, edge_post, edge_current)
         else:
             immediate_mask = delay_vals == 0
-            if immediate_mask.any():
-                post_drive[comp].index_add_(0, edge_post[immediate_mask], edge_current[immediate_mask])
-            delayed_mask = ~immediate_mask
-            if delayed_mask.any():
-                target_rows = torch.remainder(delay_vals[delayed_mask] + cursor, depth)
+            immediate_idx = immediate_mask.nonzero(as_tuple=False).flatten()
+            if immediate_idx.numel() > 0:
+                post_drive[comp].index_add_(
+                    0,
+                    edge_post.index_select(0, immediate_idx),
+                    edge_current.index_select(0, immediate_idx),
+                )
+            delayed_idx = (~immediate_mask).nonzero(as_tuple=False).flatten()
+            if delayed_idx.numel() > 0:
+                target_rows = torch.remainder(
+                    delay_vals.index_select(0, delayed_idx) + cursor, depth
+                )
                 post_ring[comp].index_put_(
-                    (target_rows, edge_post[delayed_mask]),
-                    edge_current[delayed_mask],
+                    (target_rows, edge_post.index_select(0, delayed_idx)),
+                    edge_current.index_select(0, delayed_idx),
                     accumulate=True,
                 )
     else:
@@ -695,25 +728,31 @@ def _step_post_ring_event_driven(
         for comp in post_drive:
             comp_id = _COMPARTMENT_TO_ID[comp]
             comp_mask = comp_ids == comp_id
-            if not comp_mask.any():
+            comp_idx = comp_mask.nonzero(as_tuple=False).flatten()
+            if comp_idx.numel() == 0:
                 continue
-            comp_posts = edge_post[comp_mask]
-            comp_currents = edge_current[comp_mask]
+            comp_posts = edge_post.index_select(0, comp_idx)
+            comp_currents = edge_current.index_select(0, comp_idx)
             if delay_vals is None:
                 post_drive[comp].index_add_(0, comp_posts, comp_currents)
                 continue
-            comp_delays = delay_vals[comp_mask]
+            comp_delays = delay_vals.index_select(0, comp_idx)
             immediate_mask = comp_delays == 0
-            if immediate_mask.any():
+            immediate_idx = immediate_mask.nonzero(as_tuple=False).flatten()
+            if immediate_idx.numel() > 0:
                 post_drive[comp].index_add_(
-                    0, comp_posts[immediate_mask], comp_currents[immediate_mask]
+                    0,
+                    comp_posts.index_select(0, immediate_idx),
+                    comp_currents.index_select(0, immediate_idx),
                 )
-            delayed_mask = ~immediate_mask
-            if delayed_mask.any():
-                target_rows = torch.remainder(comp_delays[delayed_mask] + cursor, depth)
+            delayed_idx = (~immediate_mask).nonzero(as_tuple=False).flatten()
+            if delayed_idx.numel() > 0:
+                target_rows = torch.remainder(
+                    comp_delays.index_select(0, delayed_idx) + cursor, depth
+                )
                 post_ring[comp].index_put_(
-                    (target_rows, comp_posts[delayed_mask]),
-                    comp_currents[delayed_mask],
+                    (target_rows, comp_posts.index_select(0, delayed_idx)),
+                    comp_currents.index_select(0, delayed_idx),
                     accumulate=True,
                 )
 
@@ -786,16 +825,21 @@ def _step_post_ring_event_driven_into(
             out_drive[comp].index_add_(0, edge_post, edge_current)
         else:
             immediate_mask = delay_vals == 0
-            if immediate_mask.any():
+            immediate_idx = immediate_mask.nonzero(as_tuple=False).flatten()
+            if immediate_idx.numel() > 0:
                 out_drive[comp].index_add_(
-                    0, edge_post[immediate_mask], edge_current[immediate_mask]
+                    0,
+                    edge_post.index_select(0, immediate_idx),
+                    edge_current.index_select(0, immediate_idx),
                 )
-            delayed_mask = ~immediate_mask
-            if delayed_mask.any():
-                target_rows = torch.remainder(delay_vals[delayed_mask] + cursor, depth)
+            delayed_idx = (~immediate_mask).nonzero(as_tuple=False).flatten()
+            if delayed_idx.numel() > 0:
+                target_rows = torch.remainder(
+                    delay_vals.index_select(0, delayed_idx) + cursor, depth
+                )
                 post_ring[comp].index_put_(
-                    (target_rows, edge_post[delayed_mask]),
-                    edge_current[delayed_mask],
+                    (target_rows, edge_post.index_select(0, delayed_idx)),
+                    edge_current.index_select(0, delayed_idx),
                     accumulate=True,
                 )
     else:
@@ -806,25 +850,31 @@ def _step_post_ring_event_driven_into(
         for comp in out_drive:
             comp_id = _COMPARTMENT_TO_ID[comp]
             comp_mask = comp_ids == comp_id
-            if not comp_mask.any():
+            comp_idx = comp_mask.nonzero(as_tuple=False).flatten()
+            if comp_idx.numel() == 0:
                 continue
-            comp_posts = edge_post[comp_mask]
-            comp_currents = edge_current[comp_mask]
+            comp_posts = edge_post.index_select(0, comp_idx)
+            comp_currents = edge_current.index_select(0, comp_idx)
             if delay_vals is None:
                 out_drive[comp].index_add_(0, comp_posts, comp_currents)
                 continue
-            comp_delays = delay_vals[comp_mask]
+            comp_delays = delay_vals.index_select(0, comp_idx)
             immediate_mask = comp_delays == 0
-            if immediate_mask.any():
+            immediate_idx = immediate_mask.nonzero(as_tuple=False).flatten()
+            if immediate_idx.numel() > 0:
                 out_drive[comp].index_add_(
-                    0, comp_posts[immediate_mask], comp_currents[immediate_mask]
+                    0,
+                    comp_posts.index_select(0, immediate_idx),
+                    comp_currents.index_select(0, immediate_idx),
                 )
-            delayed_mask = ~immediate_mask
-            if delayed_mask.any():
-                target_rows = torch.remainder(comp_delays[delayed_mask] + cursor, depth)
+            delayed_idx = (~immediate_mask).nonzero(as_tuple=False).flatten()
+            if delayed_idx.numel() > 0:
+                target_rows = torch.remainder(
+                    comp_delays.index_select(0, delayed_idx) + cursor, depth
+                )
                 post_ring[comp].index_put_(
-                    (target_rows, comp_posts[delayed_mask]),
-                    comp_currents[delayed_mask],
+                    (target_rows, comp_posts.index_select(0, delayed_idx)),
+                    comp_currents.index_select(0, delayed_idx),
                     accumulate=True,
                 )
 

@@ -422,12 +422,13 @@ def build_erdos_renyi_edges(
         )
         if not allow_self and n_pre == n_post:
             mask = pre != post
-            if mask.all():
-                return pre, post
-            if hasattr(mask, "any") and not mask.any():
+            selected = mask.nonzero(as_tuple=False).flatten()
+            if selected.numel() == 0:
                 empty = pre.new_empty((0,))
                 return empty, empty
-            return pre[mask], post[mask]
+            if selected.numel() == mask.numel():
+                return pre, post
+            return pre.index_select(0, selected), post.index_select(0, selected)
         return pre, post
 
     pre_parts: list[Tensor] = []

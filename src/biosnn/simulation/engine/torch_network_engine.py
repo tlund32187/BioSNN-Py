@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Any, SupportsInt, cast
 
@@ -155,9 +157,10 @@ class TorchNetworkEngine(ISimulationEngine):
 
         self._proj_states.clear()
         pop_map = {spec.name: spec for spec in self._pop_specs}
-        compiled_specs: list[ProjectionSpec] = []
+        compiled_specs: list[ProjectionSpec | None] = [None] * len(self._proj_specs)
+        compile_jobs: list[tuple[int, ProjectionSpec, SynapseTopology, dict[str, Any]]] = []
 
-        for proj in self._proj_specs:
+        for idx, proj in enumerate(self._proj_specs):
             edge_count = _edge_count(proj.topology)
             syn_state = proj.synapse.init_state(edge_count, ctx=self._ctx)
             learn_state = None
@@ -185,19 +188,35 @@ class TorchNetworkEngine(ISimulationEngine):
                     meta.setdefault("receptor_scale", receptor_scale)
                     topology = replace(topology, meta=meta)
 
-            topology = compile_topology(
-                topology,
-                device=self._device,
-                dtype=self._dtype,
-                build_edges_by_delay=build_edges,
-                build_pre_adjacency=build_adj,
-                build_sparse_delay_mats=build_sparse,
-                build_bucket_edge_mapping=build_bucket_mapping,
-                fuse_delay_buckets=build_sparse,
-            )
-            compiled_specs.append(replace(proj, topology=topology))
+            compile_kwargs: dict[str, Any] = {
+                "device": self._device,
+                "dtype": self._dtype,
+                "build_edges_by_delay": build_edges,
+                "build_pre_adjacency": build_adj,
+                "build_sparse_delay_mats": build_sparse,
+                "build_bucket_edge_mapping": build_bucket_mapping,
+                "fuse_delay_buckets": build_sparse,
+            }
+            compile_jobs.append((idx, proj, topology, compile_kwargs))
 
-        self._proj_specs = compiled_specs
+        is_cuda = self._device is not None and getattr(self._device, "type", None) == "cuda"
+        if is_cuda or len(compile_jobs) <= 1:
+            for idx, proj, topology, compile_kwargs in compile_jobs:
+                compiled_topology = compile_topology(topology, **compile_kwargs)
+                compiled_specs[idx] = replace(proj, topology=compiled_topology)
+        else:
+            max_workers = min(os.cpu_count() or 1, len(compile_jobs))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(compile_topology, topology, **compile_kwargs): (idx, proj)
+                    for idx, proj, topology, compile_kwargs in compile_jobs
+                }
+                for future, info in futures.items():
+                    compiled_topology = future.result()
+                    idx, proj = info
+                    compiled_specs[idx] = replace(proj, topology=compiled_topology)
+
+        self._proj_specs = [cast(ProjectionSpec, spec) for spec in compiled_specs]
 
         self._mod_states.clear()
         for mod in self._mod_specs:

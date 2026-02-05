@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import threading
 import time
 import webbrowser
@@ -20,7 +21,12 @@ from biosnn.experiments.demo_network import DemoNetworkConfig, run_demo_network
 
 def main() -> None:
     args = _parse_args()
+    torch_threads = _parse_thread_setting(args.torch_threads)
+    torch_interop = _parse_thread_setting(args.torch_interop_threads)
+    if args.set_omp_env:
+        _apply_threading_env(torch_threads, torch_interop)
     torch = require_torch()
+    _apply_threading_torch(torch, torch_threads, torch_interop)
 
     repo_root = Path(__file__).resolve().parents[3]
     run_dir = _make_run_dir(repo_root / "artifacts")
@@ -51,6 +57,11 @@ def main() -> None:
                 dt=dt,
                 seed=args.seed,
                 device=device,
+                profile=args.profile,
+                profile_steps=args.profile_steps,
+                monitor_safe_defaults=bool(args.monitor_safe_defaults),
+                monitor_neuron_sample=args.monitor_neuron_sample,
+                monitor_edge_sample=args.monitor_edge_sample,
                 n_in=args.n_in,
                 n_hidden=args.n_hidden,
                 n_out=args.n_out,
@@ -90,6 +101,11 @@ def main() -> None:
                 dt=dt,
                 seed=args.seed,
                 device=device,
+                profile=args.profile,
+                profile_steps=args.profile_steps,
+                monitor_safe_defaults=bool(args.monitor_safe_defaults),
+                monitor_neuron_sample=args.monitor_neuron_sample,
+                monitor_edge_sample=args.monitor_edge_sample,
             )
         )
 
@@ -131,6 +147,46 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=["dashboard", "fast"],
         default="dashboard",
         help="run mode: dashboard (full artifacts) or fast (throughput-oriented)",
+    )
+    parser.add_argument(
+        "--monitor-safe-defaults",
+        dest="monitor_safe_defaults",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="enable safety rails for large CSV monitors (default: enabled)",
+    )
+    parser.add_argument(
+        "--monitor-neuron-sample",
+        type=int,
+        default=512,
+        help="sample size for neuron/spike monitors when safety rails are enabled",
+    )
+    parser.add_argument(
+        "--monitor-edge-sample",
+        type=int,
+        default=20000,
+        help="max edge sample for weight monitors when safety rails are enabled",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="run a short torch.profiler trace after the demo (writes profile.json)",
+    )
+    parser.add_argument("--profile-steps", type=int, default=20)
+    parser.add_argument(
+        "--torch-threads",
+        default="auto",
+        help="set torch.set_num_threads (int or 'auto')",
+    )
+    parser.add_argument(
+        "--torch-interop-threads",
+        default="auto",
+        help="set torch.set_num_interop_threads (int or 'auto')",
+    )
+    parser.add_argument(
+        "--set-omp-env",
+        action="store_true",
+        help="set OMP_NUM_THREADS and MKL_NUM_THREADS to match --torch-threads",
     )
     parser.add_argument("--steps", type=int, default=500)
     parser.add_argument("--n", type=int, default=100, help="number of neurons")
@@ -199,6 +255,35 @@ def _default_demo() -> str:
 
 def _should_launch_dashboard(mode: str) -> bool:
     return mode.lower().strip() != "fast"
+
+
+def _parse_thread_setting(value: str | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.lower().strip() == "auto":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid thread count: {value}") from exc
+    if parsed <= 0:
+        raise ValueError(f"Thread count must be positive: {parsed}")
+    return parsed
+
+
+def _apply_threading_env(threads: int | None, interop: int | None) -> None:
+    env_threads = threads if threads is not None else interop
+    if env_threads is None:
+        return
+    os.environ["OMP_NUM_THREADS"] = str(env_threads)
+    os.environ["MKL_NUM_THREADS"] = str(env_threads)
+
+
+def _apply_threading_torch(torch: Any, threads: int | None, interop: int | None) -> None:
+    if threads is not None and hasattr(torch, "set_num_threads"):
+        torch.set_num_threads(threads)
+    if interop is not None and hasattr(torch, "set_num_interop_threads"):
+        torch.set_num_interop_threads(interop)
 
 
 def _start_dashboard_server(repo_root: Path, port: int) -> None:

@@ -8,7 +8,7 @@ from typing import Any
 from biosnn.contracts.monitors import IMonitor, StepEvent
 from biosnn.contracts.tensor import Tensor
 from biosnn.core.torch_utils import require_torch
-from biosnn.io.sinks.csv_sink import CsvSink
+from biosnn.io.sinks import AsyncCsvSink, CsvSink
 from biosnn.monitors.metrics.scalar_utils import scalar_to_float
 
 
@@ -27,10 +27,15 @@ class SpikeEventsCSVMonitor(IMonitor):
         stride: int = 1,
         max_spikes_per_step: int | None = None,
         neuron_sample: int | None = None,
+        safe_neuron_sample: int | None = None,
         append: bool = False,
         flush_every: int = 1,
+        async_io: bool = False,
     ) -> None:
-        self._sink = CsvSink(
+        if neuron_sample is None and safe_neuron_sample:
+            neuron_sample = int(safe_neuron_sample)
+        sink_cls = AsyncCsvSink if async_io else CsvSink
+        self._sink = sink_cls(
             path,
             fieldnames=["step", "t", "pop", "neuron"],
             append=append,

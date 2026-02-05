@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, MutableMapping
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from biosnn.contracts.neurons import Compartment, StepContext, Tensor
 from biosnn.contracts.synapses import (
@@ -28,6 +28,7 @@ class DelayedSparseMatmulParams:
     clamp_min: float | None = None
     clamp_max: float | None = None
     receptor_scale: Mapping[ReceptorKind, float] | None = None
+    learning_update_target: Literal["both", "fused_only"] = "both"
 
 
 @dataclass(slots=True)
@@ -190,6 +191,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         active_edges: Tensor | None,
         d_weights: Tensor,
     ) -> None:
+        update_target = self.params.learning_update_target
         weights = topology.weights
         if weights is None:
             raise RuntimeError("DelayedSparseMatmulSynapse requires topology.weights for updates")
@@ -228,18 +230,32 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         pos_ids = edge_bucket_pos.index_select(0, edge_ids)
         scale_vals = edge_scale.index_select(0, edge_ids) if edge_scale is not None else None
 
-        _apply_sparse_value_updates(
-            values_by_comp=values_by_comp,
-            comp_ids=comp_ids,
-            delay_ids=delay_ids,
-            pos_ids=pos_ids,
-            delta=delta,
-            scale_vals=scale_vals,
-            fused_values_by_comp=fused_values_by_comp,
-            fused_pos_ids=edge_bucket_fused_pos.index_select(0, edge_ids)
-            if edge_bucket_fused_pos is not None
-            else None,
-        )
+        if update_target == "fused_only":
+            _apply_sparse_value_updates(
+                values_by_comp=None,
+                comp_ids=comp_ids,
+                delay_ids=delay_ids,
+                pos_ids=pos_ids,
+                delta=delta,
+                scale_vals=scale_vals,
+                fused_values_by_comp=fused_values_by_comp,
+                fused_pos_ids=edge_bucket_fused_pos.index_select(0, edge_ids)
+                if edge_bucket_fused_pos is not None
+                else None,
+            )
+        else:
+            _apply_sparse_value_updates(
+                values_by_comp=values_by_comp,
+                comp_ids=comp_ids,
+                delay_ids=delay_ids,
+                pos_ids=pos_ids,
+                delta=delta,
+                scale_vals=scale_vals,
+                fused_values_by_comp=fused_values_by_comp,
+                fused_pos_ids=edge_bucket_fused_pos.index_select(0, edge_ids)
+                if edge_bucket_fused_pos is not None
+                else None,
+            )
 
     def sync_sparse_values(self, topology: SynapseTopology) -> None:
         _sync_sparse_values(topology)
@@ -285,11 +301,16 @@ def _step_sparse_matmul(
             contrib = contrib_flat.view(int(delays.numel()), n_post_comp)
             ring_indices = torch.remainder(delays + cursor, depth)
             immediate_mask = delays == 0
-            if immediate_mask.any():
-                post_drive[comp].add_(contrib[immediate_mask].sum(dim=0))
-            delayed_mask = ~immediate_mask
-            if delayed_mask.any():
-                post_ring[comp].index_add_(0, ring_indices[delayed_mask], contrib[delayed_mask])
+            immediate_idx = immediate_mask.nonzero(as_tuple=False).flatten()
+            if immediate_idx.numel() > 0:
+                post_drive[comp].add_(contrib.index_select(0, immediate_idx).sum(dim=0))
+            delayed_idx = (~immediate_mask).nonzero(as_tuple=False).flatten()
+            if delayed_idx.numel() > 0:
+                post_ring[comp].index_add_(
+                    0,
+                    ring_indices.index_select(0, delayed_idx),
+                    contrib.index_select(0, delayed_idx),
+                )
     else:
         mats_by_comp = _nonempty_mats_by_comp(topology, device)
         for comp, mats in mats_by_comp.items():
@@ -347,11 +368,16 @@ def _step_sparse_matmul_into(
             contrib = contrib_flat.view(int(delays.numel()), n_post_comp)
             ring_indices = torch.remainder(delays + cursor, depth)
             immediate_mask = delays == 0
-            if immediate_mask.any():
-                out_drive[comp].add_(contrib[immediate_mask].sum(dim=0))
-            delayed_mask = ~immediate_mask
-            if delayed_mask.any():
-                post_ring[comp].index_add_(0, ring_indices[delayed_mask], contrib[delayed_mask])
+            immediate_idx = immediate_mask.nonzero(as_tuple=False).flatten()
+            if immediate_idx.numel() > 0:
+                out_drive[comp].add_(contrib.index_select(0, immediate_idx).sum(dim=0))
+            delayed_idx = (~immediate_mask).nonzero(as_tuple=False).flatten()
+            if delayed_idx.numel() > 0:
+                post_ring[comp].index_add_(
+                    0,
+                    ring_indices.index_select(0, delayed_idx),
+                    contrib.index_select(0, delayed_idx),
+                )
     else:
         mats_by_comp = _nonempty_mats_by_comp(topology, device)
         for comp, mats in mats_by_comp.items():
@@ -725,7 +751,7 @@ def _sync_sparse_values(topology: SynapseTopology) -> None:
 
 def _apply_sparse_value_updates(
     *,
-    values_by_comp: Mapping[Compartment, list[Tensor | None]],
+    values_by_comp: Mapping[Compartment, list[Tensor | None]] | None,
     comp_ids: Tensor,
     delay_ids: Tensor,
     pos_ids: Tensor,
@@ -736,25 +762,32 @@ def _apply_sparse_value_updates(
     fused_pos_ids: Tensor | None = None,
 ) -> None:
     comp_order = tuple(Compartment)
+    if fused_values_by_comp is not None and fused_pos_ids is not None:
+        for comp, fused_values in fused_values_by_comp.items():
+            if comp not in comp_order:
+                continue
+            comp_id = comp_order.index(comp)
+            comp_mask = comp_ids == comp_id
+            fused_mask = comp_mask & (fused_pos_ids >= 0)
+            selected = fused_mask.nonzero(as_tuple=False).flatten()
+            if selected.numel() == 0:
+                continue
+            pos = fused_pos_ids.index_select(0, selected)
+            vals = delta.index_select(0, selected)
+            if scale_vals is not None:
+                vals = vals * scale_vals.index_select(0, selected)
+            if replace:
+                fused_values.index_copy_(0, pos, vals)
+            else:
+                fused_values.index_add_(0, pos, vals)
+
+    if values_by_comp is None:
+        return
     for comp, values_by_delay in values_by_comp.items():
         if comp not in comp_order:
             continue
         comp_id = comp_order.index(comp)
         comp_mask = comp_ids == comp_id
-        if fused_values_by_comp is not None and fused_pos_ids is not None:
-            fused_values = fused_values_by_comp.get(comp)
-            if fused_values is not None:
-                fused_mask = comp_mask & (fused_pos_ids >= 0)
-                selected = fused_mask.nonzero(as_tuple=False).flatten()
-                if selected.numel() > 0:
-                    pos = fused_pos_ids.index_select(0, selected)
-                    vals = delta.index_select(0, selected)
-                    if scale_vals is not None:
-                        vals = vals * scale_vals.index_select(0, selected)
-                    if replace:
-                        fused_values.index_copy_(0, pos, vals)
-                    else:
-                        fused_values.index_add_(0, pos, vals)
         for delay, values in enumerate(values_by_delay):
             if values is None:
                 continue
@@ -775,7 +808,7 @@ def _apply_sparse_value_updates(
 def _require_sparse_update_meta(
     topology: SynapseTopology,
 ) -> tuple[
-    dict[Compartment, list[Tensor | None]],
+    Mapping[Compartment, list[Tensor | None]] | None,
     Tensor,
     Tensor,
     Tensor,
@@ -791,7 +824,9 @@ def _require_sparse_update_meta(
     edge_scale = meta.get("edge_scale")
     fused_by_comp = meta.get("fused_W_by_comp")
     edge_bucket_fused_pos = meta.get("edge_bucket_fused_pos")
-    if not isinstance(values_by_comp, dict):
+    has_values = isinstance(values_by_comp, dict)
+    has_fused = isinstance(fused_by_comp, dict) and edge_bucket_fused_pos is not None
+    if not has_values and not has_fused:
         raise RuntimeError(
             "values_by_comp missing; compile_topology(..., build_sparse_delay_mats=True) "
             "must be called before apply_weight_updates."
@@ -809,7 +844,7 @@ def _require_sparse_update_meta(
             if mat is not None
         }
     return (
-        cast(dict[Compartment, list[Tensor | None]], values_by_comp),
+        cast(Mapping[Compartment, list[Tensor | None]] | None, values_by_comp) if has_values else None,
         cast(Tensor, edge_bucket_comp),
         cast(Tensor, edge_bucket_delay),
         cast(Tensor, edge_bucket_pos),

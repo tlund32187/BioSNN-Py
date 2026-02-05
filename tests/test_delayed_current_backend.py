@@ -102,6 +102,51 @@ def test_delayed_current_ring_memory_shape():
     assert ring.shape == (depth, 2)
 
 
+def test_delayed_current_edge_buffer_reuses_delay_tmp():
+    ctx = StepContext(device="cpu", dtype="float32")
+    pre_idx = torch.tensor([0, 1, 2], dtype=torch.long)
+    post_idx = torch.tensor([0, 1, 0], dtype=torch.long)
+    delay_steps = torch.tensor([1, 2, 0], dtype=torch.int32)
+    topology = SynapseTopology(
+        pre_idx=pre_idx,
+        post_idx=post_idx,
+        delay_steps=delay_steps,
+        target_compartment=Compartment.SOMA,
+    )
+    topology = compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+    )
+
+    model = DelayedCurrentSynapse(DelayedCurrentParams(use_edge_buffer=True, init_weight=1.0))
+    state = model.init_state(pre_idx.numel(), ctx=ctx)
+    pre_spikes = torch.zeros((3,), dtype=state.weights.dtype)
+
+    state, _ = model.step(
+        state,
+        topology,
+        SynapseInputs(pre_spikes=pre_spikes),
+        dt=1e-3,
+        t=0.0,
+        ctx=ctx,
+    )
+    assert state.delay_tmp is not None
+    tmp_id = id(state.delay_tmp)
+
+    for step in range(3):
+        state, _ = model.step(
+            state,
+            topology,
+            SynapseInputs(pre_spikes=pre_spikes),
+            dt=1e-3,
+            t=(step + 1) * 1e-3,
+            ctx=ctx,
+        )
+    assert state.delay_tmp is not None
+    assert id(state.delay_tmp) == tmp_id
+
+
 def test_delayed_current_event_driven_matches_dense():
     ctx = StepContext(device="cpu", dtype="float32")
     pre_idx = torch.tensor([0, 1, 2, 0, 1, 3], dtype=torch.long)

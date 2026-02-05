@@ -39,6 +39,11 @@ class DemoMinimalConfig:
     dt: float = 1e-3
     seed: int | None = None
     device: str = "cuda"
+    profile: bool = False
+    profile_steps: int = 20
+    monitor_safe_defaults: bool = True
+    monitor_neuron_sample: int = 512
+    monitor_edge_sample: int = 20000
     neuron_model: str = "glif"
     synapse_model: str = "delayed_current"
     neuron_sample: int = 32
@@ -100,6 +105,7 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
     synapse_sample = _clamp_sample(cfg.synapse_sample, _edge_count(topology), cap=64)
     spike_stride = max(2, cfg.spike_stride)
     spike_cap = min(cfg.spike_cap, 5000)
+    safe_neuron_sample = cfg.monitor_neuron_sample if cfg.monitor_safe_defaults else None
 
     run_mode = cfg.mode.lower().strip()
     monitors: list[IMonitor]
@@ -118,6 +124,7 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
                 out_dir / "neuron.csv",
                 include_spikes=True,
                 sample_indices=list(range(neuron_sample)) if neuron_sample > 0 else None,
+                safe_sample=safe_neuron_sample,
                 flush_every=25,
             ),
             SynapseCSVMonitor(
@@ -130,6 +137,7 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
                 str(out_dir / "spikes.csv"),
                 stride=spike_stride,
                 max_spikes_per_step=spike_cap,
+                safe_neuron_sample=safe_neuron_sample,
                 append=False,
                 flush_every=25,
             ),
@@ -142,15 +150,24 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
         ]
 
     engine.attach_monitors(monitors)
-    engine.reset(
-        config=SimulationConfig(
-            dt=cfg.dt,
-            device=device,
-            dtype=dtype,
-            seed=cfg.seed,
-        )
+    sim_config = SimulationConfig(
+        dt=cfg.dt,
+        device=device,
+        dtype=dtype,
+        seed=cfg.seed,
     )
+    engine.reset(config=sim_config)
     engine.run(steps=cfg.steps)
+
+    if cfg.profile:
+        engine.attach_monitors([])
+        engine.reset(config=sim_config)
+        _run_profile(
+            engine=engine,
+            steps=cfg.profile_steps,
+            device=device,
+            out_path=out_dir / "profile.json",
+        )
 
     topology_path = out_dir / "topology.json"
     export_topology_json(topology, path=topology_path)
@@ -183,6 +200,26 @@ def _edge_count(topology: Any) -> int:
         return len(pre_idx)
     except TypeError:
         return 0
+
+
+def _run_profile(*, engine: TorchSimulationEngine, steps: int, device: str, out_path: Path) -> None:
+    torch = require_torch()
+    try:
+        from torch.profiler import ProfilerActivity, profile
+    except Exception:
+        print("Profiler unavailable; skipping profile run.")
+        return
+
+    activities = [ProfilerActivity.CPU]
+    if device == "cuda" and torch.cuda.is_available():
+        activities.append(ProfilerActivity.CUDA)
+
+    with profile(activities=activities) as prof:
+        for _ in range(max(1, steps)):
+            engine.step()
+        if device == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+    prof.export_chrome_trace(str(out_path))
 
 
 __all__ = ["DemoMinimalConfig", "run_demo_minimal"]

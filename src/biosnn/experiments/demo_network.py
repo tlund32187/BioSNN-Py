@@ -53,6 +53,11 @@ class DemoNetworkConfig:
     dt: float = 1e-3
     seed: int | None = None
     device: str = "cuda"
+    profile: bool = False
+    profile_steps: int = 20
+    monitor_safe_defaults: bool = True
+    monitor_neuron_sample: int = 512
+    monitor_edge_sample: int = 20000
     n_in: int = 16
     n_hidden: int = 64
     n_out: int = 10
@@ -532,6 +537,8 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
     spike_cap = min(cfg.spike_cap, 5000)
     weights_stride = max(cfg.weights_stride, 10)
     weights_cap = min(cfg.weights_cap, 20000)
+    safe_neuron_sample = cfg.monitor_neuron_sample if cfg.monitor_safe_defaults else None
+    safe_edge_sample = cfg.monitor_edge_sample if cfg.monitor_safe_defaults else None
 
     weight_keys = [f"proj/{proj.name}/weights" for proj in projections]
 
@@ -561,6 +568,7 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
                 tensor_keys=neuron_tensor_keys,
                 include_spikes=True,
                 sample_indices=list(range(neuron_sample)) if neuron_sample > 0 else None,
+                safe_sample=safe_neuron_sample,
                 flush_every=25,
             ),
             _AggregatedSynapseCSVMonitor(
@@ -574,6 +582,7 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
                 str(out_dir / "spikes.csv"),
                 stride=spike_stride,
                 max_spikes_per_step=spike_cap,
+                safe_neuron_sample=safe_neuron_sample,
                 append=False,
                 flush_every=25,
             ),
@@ -588,6 +597,7 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
                 projections=projections,
                 stride=weights_stride,
                 max_edges_sample=weights_cap,
+                safe_max_edges_sample=safe_edge_sample,
                 append=False,
                 flush_every=25,
             ),
@@ -604,15 +614,24 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
             )
 
     engine.attach_monitors(monitors)
-    engine.reset(
-        config=SimulationConfig(
-            dt=cfg.dt,
-            device=device,
-            dtype=dtype,
-            seed=cfg.seed,
-        )
+    sim_config = SimulationConfig(
+        dt=cfg.dt,
+        device=device,
+        dtype=dtype,
+        seed=cfg.seed,
     )
+    engine.reset(config=sim_config)
     engine.run(steps=cfg.steps)
+
+    if cfg.profile:
+        engine.attach_monitors([])
+        engine.reset(config=sim_config)
+        _run_profile(
+            engine=engine,
+            steps=cfg.profile_steps,
+            device=device,
+            out_path=out_dir / "profile.json",
+        )
 
     topology_path = out_dir / "topology.json"
     export_population_topology_json(
@@ -829,6 +848,26 @@ def _edge_count(topology: Any) -> int:
         return 0
 
 
+def _run_profile(*, engine: TorchNetworkEngine, steps: int, device: str, out_path: Path) -> None:
+    torch = require_torch()
+    try:
+        from torch.profiler import ProfilerActivity, profile
+    except Exception:
+        print("Profiler unavailable; skipping profile run.")
+        return
+
+    activities = [ProfilerActivity.CPU]
+    if device == "cuda" and torch.cuda.is_available():
+        activities.append(ProfilerActivity.CUDA)
+
+    with profile(activities=activities) as prof:
+        for _ in range(max(1, steps)):
+            engine.step()
+        if device == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+    prof.export_chrome_trace(str(out_path))
+
+
 def _split_counts(total: int, parts: int) -> list[int]:
     parts = max(1, int(parts))
     base = total // parts
@@ -868,9 +907,11 @@ def _apply_lateral_weights(
             generator = torch.Generator(device=device_obj) if device_obj is not None else torch.Generator()
             generator.manual_seed(seed)
         mask = torch.rand((e,), device=device_obj, generator=generator) < frac
-        if mask.any():
+        selected = mask.nonzero(as_tuple=False).flatten()
+        if selected.numel() > 0:
             weights = weights.clone()
-            weights[mask] *= -1.0
+            neg_vals = weights.index_select(0, selected) * -1.0
+            weights.index_copy_(0, selected, neg_vals)
     dist_mode = dist_weight_mode.lower()
     if dist_mode != "off" and getattr(topology, "edge_dist", None) is not None:
         dist = topology.edge_dist
@@ -978,7 +1019,11 @@ def _remove_self_edges(topology: Any) -> Any:
     if hasattr(pre_idx, "numel") and pre_idx.numel() == 0:
         return topology
     mask = pre_idx != post_idx
-    if hasattr(mask, "all") and bool(mask.all()):
+    if hasattr(mask, "numel"):
+        invalid = (~mask).nonzero(as_tuple=False).flatten()
+        if invalid.numel() == 0:
+            return topology
+    elif hasattr(mask, "all") and bool(mask.all()):
         return topology
     filtered = {
         "pre_idx": pre_idx[mask],

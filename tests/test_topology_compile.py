@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from biosnn.connectivity import topology_compile as tc
 from biosnn.connectivity.topology_compile import compile_topology
 from biosnn.contracts.neurons import Compartment, StepContext
 from biosnn.contracts.synapses import SynapseInputs, SynapseTopology
@@ -109,3 +110,75 @@ def test_compile_topology_skips_edges_by_delay_by_default():
     assert "edges_by_delay" not in compiled.meta
     assert "pre_ptr" not in compiled.meta
     assert "edge_idx" not in compiled.meta
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_edge_bucket_fused_pos_matches_reference(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    torch.manual_seed(42)
+    pre_idx = torch.randint(0, 6, (32,), dtype=torch.long, device=device)
+    post_idx = torch.randint(0, 5, (32,), dtype=torch.long, device=device)
+    delay_steps = torch.randint(0, 3, (32,), dtype=torch.int32, device=device)
+    comp_ids = torch.randint(0, 2, (32,), dtype=torch.long, device=device)
+    weights = torch.rand((32,), dtype=torch.float32, device=device)
+
+    topology = SynapseTopology(
+        pre_idx=pre_idx,
+        post_idx=post_idx,
+        delay_steps=delay_steps,
+        target_compartment=Compartment.SOMA,
+        target_compartments=comp_ids,
+        weights=weights,
+    )
+    compiled = compile_topology(
+        topology,
+        device=device,
+        dtype="float32",
+        build_sparse_delay_mats=True,
+        build_bucket_edge_mapping=True,
+        fuse_delay_buckets=True,
+    )
+
+    meta = compiled.meta
+    assert meta is not None
+    assert meta.get("edge_bucket_fused_pos") is not None
+
+    indices_by_comp = meta.get("indices_by_comp")
+    values_by_comp = meta.get("values_by_comp")
+    assert isinstance(indices_by_comp, dict)
+    assert isinstance(values_by_comp, dict)
+
+    _, _, _, fused_offsets_by_comp = tc._build_fused_sparse_by_comp(
+        indices_by_comp=indices_by_comp,
+        values_by_comp=values_by_comp,
+        n_post=int(meta["n_post"]),
+        n_pre=int(meta["n_pre"]),
+        device=compiled.pre_idx.device,
+        dtype=weights.dtype,
+    )
+
+    edge_bucket_comp = meta.get("edge_bucket_comp")
+    edge_bucket_delay = meta.get("edge_bucket_delay")
+    edge_bucket_pos = meta.get("edge_bucket_pos")
+    assert edge_bucket_comp is not None
+    assert edge_bucket_delay is not None
+    assert edge_bucket_pos is not None
+
+    ref = torch.full_like(edge_bucket_pos, -1)
+    comp_order = tuple(Compartment)
+    for comp, offsets in fused_offsets_by_comp.items():
+        if comp not in comp_order:
+            continue
+        comp_id = comp_order.index(comp)
+        comp_mask = edge_bucket_comp == comp_id
+        for delay, offset in offsets.items():
+            mask = comp_mask & (edge_bucket_delay == delay)
+            selected = mask.nonzero(as_tuple=False).flatten()
+            if selected.numel() == 0:
+                continue
+            pos = edge_bucket_pos.index_select(0, selected)
+            ref.index_copy_(0, selected, pos + int(offset))
+
+    torch.testing.assert_close(meta["edge_bucket_fused_pos"], ref)

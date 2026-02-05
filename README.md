@@ -62,6 +62,10 @@ If you already have a CUDA-enabled torch in another Python, re-installing inside
 ```powershell
 python scripts/bench_step.py --device cuda --steps 5000
 ```
+Scaling benchmark (compile time + steps/sec + monitor overhead):
+```powershell
+python scripts/bench_scale.py --device all --n-pre 2000 --n-post 2000 --p 0.01
+```
 
 ## Run modes (dashboard vs fast)
 The CLI supports two run modes that trade off artifacts vs throughput:
@@ -81,9 +85,24 @@ python -m biosnn.runners.cli --demo network --mode fast
 
 `MetricsCSVMonitor` is compatible, as are custom monitors that only consume per-population tensors.
 
+### Monitor safety rails
+By default the demos enable safe defaults to avoid huge CSV output on large networks:
+- `--monitor-safe-defaults` (enabled by default)
+- `--monitor-neuron-sample` (default 512)
+- `--monitor-edge-sample` (default 20000)
+
+You can disable or override these with the CLI flags above.
+
 ### CUDA-clean demos
 When `--device cuda` is selected (or CUDA is auto-detected), the demo defaults to the CUDA-friendly
 `DelayedSparseMatmulSynapse`. `DelayedCurrentSynapse` is kept as a CPU reference path.
+
+### Profiling (optional)
+Use `--profile` to capture a short `torch.profiler` trace after the demo run:
+```powershell
+python -m biosnn.runners.cli --demo network --device cuda --profile --profile-steps 50
+```
+The trace is written to `profile.json` in the run directory.
 
 ### Fused delay buckets (sparse backend)
 When compiling sparse delay mats, non-empty delay buckets are fused by default:

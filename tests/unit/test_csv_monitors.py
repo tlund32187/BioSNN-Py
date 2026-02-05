@@ -25,7 +25,7 @@ def _as_tensor(values: list[int] | list[float]) -> Tensor:
 
 def test_neuron_csv_monitor_writes_stats(artifact_dir: Path) -> None:
     path = artifact_dir / "neurons.csv"
-    monitor = NeuronCSVMonitor(path)
+    monitor = NeuronCSVMonitor(path, async_io=True)
 
     event = StepEvent(
         t=0.1,
