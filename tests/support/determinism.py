@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import warnings
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 
 from biosnn.core.torch_utils import require_torch
 
@@ -25,39 +24,16 @@ def set_deterministic_cpu(seed: int) -> Iterator[None]:
     try:
         torch.manual_seed(seed)
         torch.use_deterministic_algorithms(True)
-        try:
+        with suppress(RuntimeError):
             torch.set_num_threads(1)
-        except RuntimeError as exc:  # pragma: no cover - torch guardrails
-            warnings.warn(
-                f"Could not set torch num threads: {exc}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        try:
-            torch.set_num_interop_threads(1)
-        except RuntimeError as exc:  # pragma: no cover - torch guardrails
-            warnings.warn(
-                f"Could not set torch interop threads: {exc}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        if prev_num_interop_threads != 1:
+            with suppress(RuntimeError):
+                torch.set_num_interop_threads(1)
         yield
     finally:
         torch.set_rng_state(prev_rng_state)
         torch.use_deterministic_algorithms(prev_deterministic)
-        try:
+        with suppress(RuntimeError):
             torch.set_num_threads(prev_num_threads)
-        except RuntimeError as exc:  # pragma: no cover - torch guardrails
-            warnings.warn(
-                f"Could not restore torch num threads: {exc}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        try:
-            torch.set_num_interop_threads(prev_num_interop_threads)
-        except RuntimeError as exc:  # pragma: no cover - torch guardrails
-            warnings.warn(
-                f"Could not restore torch interop threads: {exc}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        # torch.set_num_interop_threads can only be called once per process.
+        # If we set it above, we intentionally leave it fixed at 1.
