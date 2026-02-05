@@ -27,11 +27,13 @@ ReleasesFn = Callable[[float, int, StepContext], Sequence[ModulatorRelease]]
 def build_prop_chain_engine(
     *,
     compiled_mode: bool,
+    device: str = "cpu",
+    dtype: object | None = None,
 ) -> tuple[TorchNetworkEngine, tuple[str, ...], ExternalDriveFn]:
     torch = require_torch()
     n = 2
-    dtype = torch.float64
-    positions = _zeros_positions(n, dtype=dtype)
+    dtype = dtype or torch.float64
+    positions = _zeros_positions(n, dtype=dtype, device=device)
 
     input_model = SpikeInputModel()
     relay_model = DeterministicLIFModel(leak=0.0, gain=1.0, thresh=0.5, reset=0.0)
@@ -84,7 +86,7 @@ def build_prop_chain_engine(
         fast_mode=True,
         compiled_mode=compiled_mode,
     )
-    _reset_engine(engine)
+    _reset_engine(engine, device=device, dtype=_dtype_to_str(dtype))
 
     tap_keys = (
         "pop/Input/spikes",
@@ -107,10 +109,12 @@ def build_delay_impulse_engine(
     delay_steps: int,
     *,
     compiled_mode: bool,
+    device: str = "cpu",
+    dtype: object | None = None,
 ) -> tuple[TorchNetworkEngine, str, ExternalDriveFn]:
     torch = require_torch()
-    dtype = torch.float64
-    positions = _zeros_positions(1, dtype=dtype)
+    dtype = dtype or torch.float64
+    positions = _zeros_positions(1, dtype=dtype, device=device)
 
     populations = [
         PopulationSpec(name="Input", model=SpikeInputModel(), n=1, positions=positions),
@@ -150,7 +154,7 @@ def build_delay_impulse_engine(
         fast_mode=True,
         compiled_mode=compiled_mode,
     )
-    _reset_engine(engine)
+    _reset_engine(engine, device=device, dtype=_dtype_to_str(dtype))
 
     return engine, proj_name, external_drive_fn
 
@@ -159,10 +163,12 @@ def build_learning_gate_engine(
     *,
     dopamine_on: bool,
     compiled_mode: bool,
+    device: str = "cpu",
+    dtype: object | None = None,
 ) -> tuple[TorchNetworkEngine, str, ReleasesFn, ExternalDriveFn]:
     torch = require_torch()
-    dtype = torch.float64
-    positions = _zeros_positions(1, dtype=dtype)
+    dtype = dtype or torch.float64
+    positions = _zeros_positions(1, dtype=dtype, device=device)
 
     populations = [
         PopulationSpec(name="Pre", model=SpikeInputModel(), n=1, positions=positions),
@@ -193,8 +199,8 @@ def build_learning_gate_engine(
         _ = (t, ctx)
         if not dopamine_on or step != 5:
             return []
-        positions_rel = _zeros_positions(1, dtype=dtype)
-        amount = torch.tensor([1.0], dtype=dtype)
+        positions_rel = _zeros_positions(1, dtype=dtype, device=device)
+        amount = torch.tensor([1.0], dtype=dtype, device=device)
         return [
             ModulatorRelease(
                 kind=ModulatorKind.DOPAMINE,
@@ -222,7 +228,7 @@ def build_learning_gate_engine(
         fast_mode=True,
         compiled_mode=compiled_mode,
     )
-    _reset_engine(engine)
+    _reset_engine(engine, device=device, dtype=_dtype_to_str(dtype))
 
     return engine, proj_name, releases_fn, external_drive_fn
 
@@ -249,9 +255,9 @@ def _identity_topology(
     )
 
 
-def _zeros_positions(n: int, *, dtype: object) -> Tensor:
+def _zeros_positions(n: int, *, dtype: object, device: str) -> Tensor:
     torch = require_torch()
-    return torch.zeros((n, 3), device="cpu", dtype=dtype)
+    return torch.zeros((n, 3), device=device, dtype=dtype)
 
 
 def _pulse(
@@ -270,5 +276,11 @@ def _pulse(
     return torch.full((n,), float(value), device=device, dtype=dtype)
 
 
-def _reset_engine(engine: TorchNetworkEngine) -> None:
-    engine.reset(config=SimulationConfig(dt=1e-3, device="cpu", dtype="float64"))
+def _reset_engine(engine: TorchNetworkEngine, *, device: str, dtype: str) -> None:
+    engine.reset(config=SimulationConfig(dt=1e-3, device=device, dtype=dtype))
+
+
+def _dtype_to_str(dtype: object) -> str:
+    if isinstance(dtype, str):
+        return dtype
+    return str(dtype)

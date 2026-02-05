@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
+pytestmark = pytest.mark.unit
+
 
 from biosnn.contracts.neurons import (
     Compartment,
@@ -12,14 +14,10 @@ from biosnn.contracts.neurons import (
     StepContext,
 )
 from biosnn.contracts.simulation import SimulationConfig
-from biosnn.contracts.synapses import SynapseTopology
 from biosnn.contracts.tensor import Tensor
 from biosnn.core.torch_utils import resolve_device_dtype
-from biosnn.simulation.engine import TorchSimulationEngine
-from biosnn.synapses.dynamics.delayed_current import (
-    DelayedCurrentParams,
-    DelayedCurrentSynapse,
-)
+from biosnn.simulation.engine import TorchNetworkEngine
+from biosnn.simulation.network import PopulationSpec
 
 torch = pytest.importorskip("torch")
 
@@ -29,8 +27,8 @@ class DummyState:
     dummy: Tensor
 
 
-class DummyNeuronModel(INeuronModel):
-    name = "dummy"
+class SilentNeuronModel(INeuronModel):
+    name = "silent"
     compartments = frozenset({Compartment.SOMA})
 
     def init_state(self, n: int, *, ctx: StepContext) -> DummyState:
@@ -63,40 +61,26 @@ class DummyNeuronModel(INeuronModel):
         return state, NeuronStepResult(spikes=spikes)
 
     def state_tensors(self, state: DummyState):
-        return {}
+        return {"dummy": state.dummy}
 
 
-def test_engine_delay_semantics():
-    pre_idx = torch.tensor([0], dtype=torch.long)
-    post_idx = torch.tensor([1], dtype=torch.long)
-    delay_steps = torch.tensor([3], dtype=torch.int32)
-    weights = torch.tensor([1.0], dtype=torch.float32)
+def test_cuda_step_no_item(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
 
-    topology = SynapseTopology(
-        pre_idx=pre_idx,
-        post_idx=post_idx,
-        delay_steps=delay_steps,
-        weights=weights,
-    )
+    calls = {"count": 0}
+    original_item = torch.Tensor.item
 
-    synapse = DelayedCurrentSynapse(DelayedCurrentParams(init_weight=1.0))
-    engine = TorchSimulationEngine(
-        neuron_model=DummyNeuronModel(),
-        synapse_model=synapse,
-        topology=topology,
-        n=2,
-    )
+    def _wrapped(self, *args, **kwargs):
+        calls["count"] += 1
+        return original_item(self, *args, **kwargs)
 
-    config = SimulationConfig(dt=1e-3, meta={"initial_spike_indices": [0]})
-    engine.reset(config=config)
+    monkeypatch.setattr(torch.Tensor, "item", _wrapped, raising=True)
 
-    for step in range(4):
+    pop = PopulationSpec(name="A", model=SilentNeuronModel(), n=4)
+    engine = TorchNetworkEngine(populations=[pop], projections=[], fast_mode=True)
+    engine.reset(config=SimulationConfig(dt=1e-3, device="cuda"))
+    for _ in range(3):
         engine.step()
-        post_drive = engine.last_post_drive
-        assert post_drive is not None
-        drive = post_drive[Compartment.DENDRITE]
-        value = float(drive[1].item())
-        if step < 3:
-            assert value == pytest.approx(0.0)
-        else:
-            assert value > 0.0
+
+    assert calls["count"] == 0

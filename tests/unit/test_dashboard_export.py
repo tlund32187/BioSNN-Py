@@ -1,4 +1,6 @@
 import pytest
+pytestmark = pytest.mark.unit
+
 
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.contracts.neurons import Compartment, NeuronInputs, StepContext

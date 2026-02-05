@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+pytestmark = pytest.mark.unit
+
 
 from biosnn.biophysics.models.adex_2c import AdEx2CompModel
 from biosnn.biophysics.models.glif import GLIFModel

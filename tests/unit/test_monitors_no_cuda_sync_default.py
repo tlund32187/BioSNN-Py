@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 
 import pytest
+pytestmark = pytest.mark.unit
+
 
 from biosnn.contracts.monitors import StepEvent
 from biosnn.experiments.demo_minimal import DemoMinimalConfig, run_demo_minimal

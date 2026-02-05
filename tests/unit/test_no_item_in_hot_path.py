@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+pytestmark = pytest.mark.unit
+
 
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.contracts.simulation import SimulationConfig

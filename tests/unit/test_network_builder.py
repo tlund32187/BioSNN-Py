@@ -1,4 +1,6 @@
 import pytest
+pytestmark = pytest.mark.unit
+
 
 from biosnn.api.builders.network_builder import ErdosRenyi, Init, NetworkBuilder
 from biosnn.biophysics.models.glif import GLIFModel

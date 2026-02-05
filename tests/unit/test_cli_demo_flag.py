@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+pytestmark = pytest.mark.unit
+
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 

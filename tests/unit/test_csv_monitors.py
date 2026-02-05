@@ -3,6 +3,8 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+pytestmark = pytest.mark.unit
+
 
 from biosnn.contracts.monitors import StepEvent
 from biosnn.contracts.tensor import Tensor

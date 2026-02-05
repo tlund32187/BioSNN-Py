@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.unit
+
 def test_import_and_version():
     import biosnn
     import biosnn.api as api

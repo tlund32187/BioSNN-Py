@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
+pytestmark = pytest.mark.acceptance
+
 
 from biosnn.contracts.modulators import ModulatorKind, ModulatorRelease
 from biosnn.contracts.neurons import (

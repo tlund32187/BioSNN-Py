@@ -1,6 +1,8 @@
 import sys
 
 import pytest
+pytestmark = pytest.mark.unit
+
 
 
 def test_api_import_does_not_eagerly_import_torch() -> None:

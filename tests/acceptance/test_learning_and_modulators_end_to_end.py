@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+pytestmark = pytest.mark.acceptance
+
 
 from biosnn.contracts.simulation import SimulationConfig
 from tests.support.determinism import set_deterministic_cpu

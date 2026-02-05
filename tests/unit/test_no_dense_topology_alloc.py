@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+pytestmark = pytest.mark.unit
+
 
 from biosnn.connectivity.builders import build_erdos_renyi_edges
 

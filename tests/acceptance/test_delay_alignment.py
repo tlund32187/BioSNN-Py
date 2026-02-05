@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+pytestmark = pytest.mark.acceptance
+
 
 from biosnn.contracts.neurons import Compartment
 from biosnn.contracts.simulation import SimulationConfig

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+pytestmark = pytest.mark.acceptance
+
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +17,7 @@ DT = 1e-3
 DTYPE = "float64"
 DEVICE = "cpu"
 
-GOLDEN_PATH = Path(__file__).resolve().parent / "golden" / "prop_chain_v1.npz"
+GOLDEN_PATH = Path(__file__).resolve().parents[1] / "golden" / "prop_chain_v1.npz"
 
 
 def test_prop_chain_matches_golden_cpu():

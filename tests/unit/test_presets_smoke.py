@@ -1,4 +1,6 @@
 import pytest
+pytestmark = pytest.mark.unit
+
 
 from biosnn.api import presets
 from biosnn.contracts.simulation import SimulationConfig

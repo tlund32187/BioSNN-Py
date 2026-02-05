@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+pytestmark = pytest.mark.acceptance
+
 
 from biosnn.experiments.demo_network import DemoNetworkConfig, run_demo_network
 

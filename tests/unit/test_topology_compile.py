@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+pytestmark = pytest.mark.unit
+
 
 from biosnn.connectivity import topology_compile as tc
 from biosnn.connectivity.topology_compile import compile_topology

@@ -1,4 +1,6 @@
 import pytest
+pytestmark = pytest.mark.unit
+
 
 from biosnn.connectivity import DelayParams, compute_delay_steps
 from biosnn.connectivity.topology_compile import compile_topology

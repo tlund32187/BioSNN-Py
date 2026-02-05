@@ -1,4 +1,6 @@
 import pytest
+pytestmark = pytest.mark.unit
+
 
 from biosnn.connectivity.topology_compile import (
     _build_compiled_artifacts,
