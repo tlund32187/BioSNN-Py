@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.connectivity.sparse_rebuild import rebuild_sparse_delay_mats
 from biosnn.connectivity.topology_compile import compile_topology
@@ -12,6 +10,8 @@ from biosnn.synapses.dynamics.delayed_sparse_matmul import (
     DelayedSparseMatmulParams,
     DelayedSparseMatmulSynapse,
 )
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

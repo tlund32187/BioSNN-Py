@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import pytest
-pytestmark = pytest.mark.acceptance
-
 
 from biosnn.experiments.demo_network import DemoNetworkConfig, run_demo_network
 
+pytestmark = pytest.mark.acceptance
 
 def test_demo_network_smoke(tmp_path):
     pytest.importorskip("torch")

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import pytest
-pytestmark = pytest.mark.unit
-
 import re
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.unit
 
 def test_no_tensor_any_branching_in_hot_paths():
     pattern = re.compile(r"^\s*if\s+.*\.any\(\)\s*:", re.MULTILINE)

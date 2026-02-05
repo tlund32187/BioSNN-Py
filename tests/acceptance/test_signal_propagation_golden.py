@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import pytest
-pytestmark = pytest.mark.acceptance
-
 from pathlib import Path
 
 import numpy as np
+import pytest
+
 from biosnn.contracts.simulation import SimulationConfig
 from tests.support.determinism import set_deterministic_cpu
 from tests.support.scenarios import build_prop_chain_engine
 from tests.support.tap_monitor import TapMonitor
+
+pytestmark = pytest.mark.acceptance
 
 STEPS = 20
 SEED = 123

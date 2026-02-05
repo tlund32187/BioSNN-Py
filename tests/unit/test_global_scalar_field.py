@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.contracts.modulators import ModulatorKind, ModulatorRelease
 from biosnn.neuromodulators import GlobalScalarField, GlobalScalarParams
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

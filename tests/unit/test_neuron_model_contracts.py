@@ -1,11 +1,11 @@
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.biophysics.models.adex_2c import AdEx2CompModel
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.biophysics.models.template_neuron import TemplateNeuronModel
 from biosnn.contracts.neurons import NeuronInputs, StepContext
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

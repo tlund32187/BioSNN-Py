@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import pytest
-pytestmark = pytest.mark.unit
-
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+
 from biosnn.runners import cli
 
+pytestmark = pytest.mark.unit
 
 def test_cli_demo_flag_defaults():
     args = cli._parse_args([])

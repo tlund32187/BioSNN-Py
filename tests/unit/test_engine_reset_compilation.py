@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.contracts.neurons import (
     Compartment,
@@ -19,6 +17,8 @@ from biosnn.contracts.tensor import Tensor
 from biosnn.simulation.engine import TorchNetworkEngine
 from biosnn.simulation.network import PopulationSpec, ProjectionSpec
 from biosnn.synapses.dynamics.delayed_current import DelayedCurrentParams, DelayedCurrentSynapse
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

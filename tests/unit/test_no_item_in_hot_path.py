@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.contracts.simulation import SimulationConfig
 from biosnn.simulation.engine import TorchNetworkEngine
 from biosnn.simulation.network import PopulationSpec
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

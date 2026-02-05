@@ -3,8 +3,6 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.contracts.monitors import StepEvent
 from biosnn.contracts.tensor import Tensor
@@ -15,6 +13,7 @@ from biosnn.monitors.csv import (
     SynapseCSVMonitor,
 )
 
+pytestmark = pytest.mark.unit
 
 def _read_rows(path: Path) -> list[dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as handle:

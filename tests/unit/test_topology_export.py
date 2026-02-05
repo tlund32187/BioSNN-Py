@@ -1,9 +1,9 @@
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.contracts.synapses import ReceptorKind, SynapseTopology
 from biosnn.io.dashboard_export import export_topology_json
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

@@ -1,11 +1,11 @@
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.api.builders.network_builder import ErdosRenyi, Init, NetworkBuilder
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.contracts.synapses import SynapseTopology
 from biosnn.synapses.dynamics.delayed_current import DelayedCurrentSynapse
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

@@ -1,12 +1,12 @@
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.connectivity import DelayParams, compute_delay_steps
 from biosnn.connectivity.topology_compile import compile_topology
 from biosnn.contracts.neurons import Compartment, StepContext
 from biosnn.contracts.synapses import ReceptorKind, SynapseInputs, SynapseTopology
 from biosnn.synapses.dynamics import DelayedCurrentParams, DelayedCurrentSynapse
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

@@ -1,6 +1,4 @@
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.connectivity.topology_compile import (
     _build_compiled_artifacts,
@@ -9,6 +7,8 @@ from biosnn.connectivity.topology_compile import (
 )
 from biosnn.contracts.neurons import Compartment
 from biosnn.contracts.synapses import SynapseTopology
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

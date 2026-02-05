@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 
 from biosnn.contracts.simulation import SimulationConfig
-
 from tests.support.determinism import set_deterministic_cpu
-from tests.support.tap_monitor import TapMonitor
 from tests.support.scenarios import (
     build_delay_impulse_engine,
     build_learning_gate_engine,
     build_prop_chain_engine,
 )
+from tests.support.tap_monitor import TapMonitor
 
 STEPS = 20
 SEED = 123

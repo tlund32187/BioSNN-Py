@@ -1,6 +1,4 @@
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.contracts.learning import ILearningRule, LearningBatch, LearningStepResult
@@ -11,6 +9,8 @@ from biosnn.simulation.engine import TorchNetworkEngine
 from biosnn.simulation.network import PopulationSpec, ProjectionSpec
 from biosnn.synapses.dynamics.delayed_current import DelayedCurrentSynapse
 from biosnn.synapses.dynamics.delayed_sparse_matmul import DelayedSparseMatmulSynapse
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

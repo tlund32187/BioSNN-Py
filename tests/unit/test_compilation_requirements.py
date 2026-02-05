@@ -3,8 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.contracts.learning import ILearningRule, LearningBatch, LearningStepResult
 from biosnn.contracts.neurons import (
@@ -24,6 +22,8 @@ from biosnn.synapses.dynamics.delayed_sparse_matmul import (
     DelayedSparseMatmulParams,
     DelayedSparseMatmulSynapse,
 )
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

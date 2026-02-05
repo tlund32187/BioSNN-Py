@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.contracts.monitors import StepEvent
 from biosnn.contracts.synapses import SynapseTopology
 from biosnn.monitors.csv import NeuronCSVMonitor
 from biosnn.monitors.raster.spike_events_csv import SpikeEventsCSVMonitor
 from biosnn.monitors.weights.projection_weights_csv import ProjectionWeightsCSVMonitor
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

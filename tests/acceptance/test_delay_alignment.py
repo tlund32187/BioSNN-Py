@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import pytest
-pytestmark = pytest.mark.acceptance
-
 
 from biosnn.contracts.neurons import Compartment
 from biosnn.contracts.simulation import SimulationConfig
 from tests.support.determinism import set_deterministic_cpu
 from tests.support.scenarios import build_delay_impulse_engine
+
+pytestmark = pytest.mark.acceptance
 
 STEPS = 20
 SEED = 123

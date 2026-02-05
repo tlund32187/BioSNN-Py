@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import pytest
-pytestmark = pytest.mark.unit
-
 import csv
+
+import pytest
 
 from biosnn.contracts.monitors import StepEvent
 from biosnn.monitors.metrics.metrics_csv import MetricsCSVMonitor
 
+pytestmark = pytest.mark.unit
 
 def test_metrics_csv_monitor(tmp_path):
     path = tmp_path / "metrics.csv"

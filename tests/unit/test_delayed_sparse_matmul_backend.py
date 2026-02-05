@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.connectivity.topology_compile import compile_topology
 from biosnn.contracts.neurons import Compartment, StepContext
@@ -13,6 +11,8 @@ from biosnn.synapses.dynamics.delayed_sparse_matmul import (
     DelayedSparseMatmulSynapse,
     _nonempty_mats_by_comp,
 )
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

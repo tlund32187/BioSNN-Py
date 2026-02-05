@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import pytest
-pytestmark = pytest.mark.acceptance
-
 
 from biosnn.contracts.simulation import SimulationConfig
 from tests.support.determinism import set_deterministic_cpu
 from tests.support.scenarios import build_learning_gate_engine
 from tests.support.tap_monitor import TapMonitor
+
+pytestmark = pytest.mark.acceptance
 
 STEPS = 15
 LEARNING_STEP = 5

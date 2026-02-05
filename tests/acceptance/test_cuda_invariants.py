@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import pytest
-pytestmark = [pytest.mark.acceptance, pytest.mark.cuda]
-
 
 from biosnn.contracts.simulation import SimulationConfig
 from tests.support.scenarios import (
@@ -14,6 +12,8 @@ from tests.support.scenarios import (
     build_prop_chain_engine,
 )
 from tests.support.tap_monitor import TapMonitor
+
+pytestmark = [pytest.mark.acceptance, pytest.mark.cuda]
 
 torch = pytest.importorskip("torch")
 
@@ -61,9 +61,7 @@ def test_cuda_prop_chain_invariants():
     hidden_spikes = data["pop/Hidden/spikes"]
     out_spikes = data["pop/Out/spikes"]
 
-    relay_drive = data["pop/Relay/last_drive_dendrite"]
     hidden_drive = data["pop/Hidden/last_drive_dendrite"]
-    out_drive = data["pop/Out/last_drive_dendrite"]
 
     expected_input_count = 3 * input_spikes.shape[1]
     assert int(input_spikes.sum()) == expected_input_count, (

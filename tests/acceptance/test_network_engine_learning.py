@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
-pytestmark = pytest.mark.acceptance
-
 
 from biosnn.contracts.modulators import ModulatorKind, ModulatorRelease
 from biosnn.contracts.neurons import (
@@ -23,6 +21,8 @@ from biosnn.neuromodulators import GlobalScalarField, GlobalScalarParams
 from biosnn.simulation.engine import TorchNetworkEngine
 from biosnn.simulation.network import ModulatorSpec, PopulationSpec, ProjectionSpec
 from biosnn.synapses.dynamics.delayed_current import DelayedCurrentParams, DelayedCurrentSynapse
+
+pytestmark = pytest.mark.acceptance
 
 torch = pytest.importorskip("torch")
 

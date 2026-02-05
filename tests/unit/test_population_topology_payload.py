@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.contracts.synapses import SynapseTopology
 from biosnn.io.graph.population_topology_json import build_population_topology_payload
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

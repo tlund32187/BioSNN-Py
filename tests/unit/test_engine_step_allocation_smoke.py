@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.connectivity.builders import build_erdos_renyi_topology
@@ -10,6 +8,8 @@ from biosnn.contracts.simulation import SimulationConfig
 from biosnn.simulation.engine import TorchNetworkEngine
 from biosnn.simulation.network import PopulationSpec, ProjectionSpec
 from biosnn.synapses.dynamics.delayed_current import DelayedCurrentParams, DelayedCurrentSynapse
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

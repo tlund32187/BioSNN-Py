@@ -3,11 +3,11 @@ from __future__ import annotations
 from typing import cast
 
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.connectivity.builders import build_bipartite_distance_topology
 from biosnn.contracts.tensor import Tensor
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

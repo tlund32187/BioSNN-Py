@@ -3,11 +3,11 @@ from __future__ import annotations
 import csv
 
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.contracts.monitors import StepEvent
 from biosnn.monitors.raster.spike_events_csv import SpikeEventsCSVMonitor
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

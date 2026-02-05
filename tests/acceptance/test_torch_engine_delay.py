@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
-pytestmark = pytest.mark.acceptance
-
 
 from biosnn.contracts.neurons import (
     Compartment,
@@ -22,6 +20,8 @@ from biosnn.synapses.dynamics.delayed_current import (
     DelayedCurrentParams,
     DelayedCurrentSynapse,
 )
+
+pytestmark = pytest.mark.acceptance
 
 torch = pytest.importorskip("torch")
 

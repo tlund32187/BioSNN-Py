@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import pytest
-pytestmark = pytest.mark.unit
-
 import csv
 import threading
 import time
 
+import pytest
+
 from biosnn.io.sinks import AsyncCsvSink
 
+pytestmark = pytest.mark.unit
 
 def test_async_csv_sink_writes_rows(tmp_path):
     path = tmp_path / "async.csv"

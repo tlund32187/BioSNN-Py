@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.contracts.monitors import StepEvent
 from biosnn.monitors.metrics.scalar_utils import scalar_to_float
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 

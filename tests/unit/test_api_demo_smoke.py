@@ -1,8 +1,8 @@
 import pytest
-pytestmark = pytest.mark.unit
-
 
 from biosnn.api import Trainer, presets
+
+pytestmark = pytest.mark.unit
 
 torch = pytest.importorskip("torch")
 
