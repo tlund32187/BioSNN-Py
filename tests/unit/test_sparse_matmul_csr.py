@@ -25,7 +25,7 @@ def test_sparse_mats_are_csr() -> None:
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -57,7 +57,7 @@ def test_sparse_csr_matches_coo(device: str) -> None:
         target_compartment=Compartment.SOMA,
         meta={"keep_sparse_coo": True},
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,

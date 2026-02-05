@@ -144,6 +144,7 @@ def test_learning_scratch_buffers_reused():
         id(scratch.edge_pre),
         id(scratch.edge_post),
         id(scratch.edge_weights),
+        id(scratch.arange_buf),
     )
     for _ in range(3):
         engine.step()
@@ -154,5 +155,18 @@ def test_learning_scratch_buffers_reused():
         id(scratch_after.edge_pre),
         id(scratch_after.edge_post),
         id(scratch_after.edge_weights),
+        id(scratch_after.arange_buf),
     )
     assert ids == ids_after
+
+
+def test_learning_scratch_arange_reused():
+    engine = _build_engine(use_scratch=True)
+    engine.reset(config=SimulationConfig(dt=1e-3, device="cpu"))
+    engine.step()
+    scratch = engine._learning_scratch["P"]
+    arange_id = id(scratch.arange_buf)
+    for _ in range(3):
+        engine.step()
+    scratch_after = engine._learning_scratch["P"]
+    assert id(scratch_after.arange_buf) == arange_id

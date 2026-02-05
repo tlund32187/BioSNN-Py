@@ -117,3 +117,88 @@ def test_synapse_csv_monitor_preset(artifact_dir: Path) -> None:
     row = _read_rows(path)[0]
     assert float(row["weights_mean"]) == pytest.approx(1.3333333333)
     assert float(row["edge_count"]) == pytest.approx(3.0)
+
+
+def test_neuron_csv_monitor_async_gpu_cuda(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from dataclasses import dataclass
+
+    from biosnn.contracts.neurons import (
+        Compartment,
+        INeuronModel,
+        NeuronInputs,
+        NeuronStepResult,
+        StepContext,
+    )
+    from biosnn.contracts.simulation import SimulationConfig
+    from biosnn.simulation.engine import TorchNetworkEngine
+    from biosnn.simulation.network import PopulationSpec
+
+    @dataclass(slots=True)
+    class DummyState:
+        v: Tensor
+
+    class DummyNeuron(INeuronModel):
+        name = "dummy"
+        compartments = frozenset({Compartment.SOMA})
+
+        def init_state(self, n: int, *, ctx: StepContext) -> DummyState:
+            return DummyState(v=torch.zeros((n,), device=ctx.device, dtype=torch.float32))
+
+        def reset_state(
+            self,
+            state: DummyState,
+            *,
+            ctx: StepContext,
+            indices: Tensor | None = None,
+        ) -> DummyState:
+            _ = (ctx, indices)
+            state.v.zero_()
+            return state
+
+        def step(
+            self,
+            state: DummyState,
+            inputs: NeuronInputs,
+            *,
+            dt: float,
+            t: float,
+            ctx: StepContext,
+        ) -> tuple[DummyState, NeuronStepResult]:
+            _ = (inputs, dt, t, ctx)
+            spikes = torch.zeros_like(state.v, dtype=torch.bool)
+            return state, NeuronStepResult(spikes=spikes)
+
+        def state_tensors(self, state: DummyState):
+            return {"v": state.v}
+
+    def _no_item(self, *args, **kwargs):
+        raise RuntimeError(".item() in hot path")
+
+    monkeypatch.setattr(torch.Tensor, "item", _no_item, raising=False)
+
+    pop = PopulationSpec(name="Pop", model=DummyNeuron(), n=8)
+    engine = TorchNetworkEngine(populations=[pop], projections=[], fast_mode=False)
+
+    out_path = tmp_path / "async_gpu.csv"
+    monitor = NeuronCSVMonitor(
+        out_path,
+        tensor_keys=("v",),
+        include_spikes=True,
+        include_scalars=True,
+        flush_every=10,
+        every_n_steps=1,
+        async_gpu=True,
+    )
+    engine.attach_monitors([monitor])
+    engine.reset(config=SimulationConfig(dt=1e-3, device="cuda"))
+    for _ in range(3):
+        engine.step()
+    monitor.close()
+
+    rows = _read_rows(out_path)
+    assert len(rows) == 3
+    assert "v_mean" in rows[0]

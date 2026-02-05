@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
-from biosnn.contracts.neurons import Compartment
+from biosnn.contracts.neurons import Compartment, StepContext
 from biosnn.contracts.tensor import Tensor
 
 
@@ -64,10 +64,10 @@ class ISynapseModel(Protocol):
 
     name: str
 
-    def init_state(self, e: int, *, ctx: Any) -> Any:
+    def init_state(self, e: int, *, ctx: StepContext) -> Any:
         ...
 
-    def reset_state(self, state: Any, *, ctx: Any, edge_indices: Tensor | None = None) -> Any:
+    def reset_state(self, state: Any, *, ctx: StepContext, edge_indices: Tensor | None = None) -> Any:
         ...
 
     def step(
@@ -78,7 +78,7 @@ class ISynapseModel(Protocol):
         *,
         dt: float,
         t: float,
-        ctx: Any,
+        ctx: StepContext,
     ) -> tuple[Any, SynapseStepResult]:
         ...
 

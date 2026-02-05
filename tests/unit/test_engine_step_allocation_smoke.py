@@ -53,3 +53,12 @@ def test_compiled_mode_reuses_global_buffers():
         engine.step()
         assert id(engine._spikes_global) == spikes_id
         assert {comp: id(tensor) for comp, tensor in engine._drive_global.items()} == drive_ids
+
+
+def test_projection_runtime_list_built():
+    engine = _build_engine(fast_mode=False)
+    engine.reset(config=SimulationConfig(dt=1e-3, device="cpu"))
+
+    assert hasattr(engine, "_proj_runtime_list")
+    assert len(engine._proj_runtime_list) == 1
+    assert engine._proj_runtime_list[0].name == "Pop->Pop"

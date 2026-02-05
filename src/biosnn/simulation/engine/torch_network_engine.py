@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, SupportsInt, cast
 
 from biosnn.connectivity.topology_compile import compile_topology
@@ -41,6 +41,26 @@ class _LearningScratch:
     edge_post: Tensor
     edge_weights: Tensor
     size: int
+    arange_buf: Tensor
+    arange_size: int
+
+
+@dataclass(slots=True)
+class _ProjectionRuntime:
+    name: str
+    pre: str
+    post: str
+    synapse: Any
+    topology: SynapseTopology
+    state: _ProjectionState
+    learning: Any | None
+    learn_every: int
+    use_sparse_learning: bool
+    has_step_into: bool
+    spec: ProjectionSpec
+    pre_state: _PopulationState
+    post_state: _PopulationState
+    drive_target: dict[Compartment, Tensor]
 
 
 class TorchNetworkEngine(ISimulationEngine):
@@ -99,6 +119,7 @@ class TorchNetworkEngine(ISimulationEngine):
         self.last_projection_drive: dict[str, Mapping[Compartment, Tensor]] = {}
         self.last_d_weights: dict[str, Tensor] = {}
         self._learning_scratch: dict[str, _LearningScratch] = {}
+        self._proj_runtime_list: list[_ProjectionRuntime] = []
 
         self._pop_order = [spec.name for spec in self._pop_specs]
         self._pop_map = {spec.name: spec for spec in self._pop_specs}
@@ -133,6 +154,9 @@ class TorchNetworkEngine(ISimulationEngine):
             self._pop_states[spec.name] = _PopulationState(state=state, spikes=spikes)
 
         self._proj_states.clear()
+        pop_map = {spec.name: spec for spec in self._pop_specs}
+        compiled_specs: list[ProjectionSpec] = []
+
         for proj in self._proj_specs:
             edge_count = _edge_count(proj.topology)
             syn_state = proj.synapse.init_state(edge_count, ctx=self._ctx)
@@ -140,34 +164,40 @@ class TorchNetworkEngine(ISimulationEngine):
             if proj.learning is not None:
                 learn_state = proj.learning.init_state(edge_count, ctx=self._ctx)
             self._proj_states[proj.name] = _ProjectionState(state=syn_state, learning_state=learn_state)
-            if proj.topology.weights is None and getattr(syn_state, "bind_weights_to_topology", False):
-                object.__setattr__(proj.topology, "weights", syn_state.weights)
-            _copy_topology_weights(syn_state, proj.topology.weights)
 
-        pop_map = {spec.name: spec for spec in self._pop_specs}
-        for proj in self._proj_specs:
-            _ensure_topology_meta(
-                proj.topology,
+            topology = proj.topology
+            if topology.weights is None and getattr(syn_state, "bind_weights_to_topology", False):
+                topology = replace(topology, weights=syn_state.weights)
+            _copy_topology_weights(syn_state, topology.weights)
+
+            topology = _ensure_topology_meta(
+                topology,
                 n_pre=pop_map[proj.pre].n,
                 n_post=pop_map[proj.post].n,
             )
+
             build_edges, build_adj, build_sparse, build_bucket_mapping = _compile_flags_for_projection(proj)
             if build_sparse and hasattr(proj.synapse, "params"):
                 params = getattr(proj.synapse, "params", None)
                 receptor_scale = getattr(params, "receptor_scale", None) if params is not None else None
                 if receptor_scale is not None:
-                    meta = dict(proj.topology.meta) if proj.topology.meta else {}
+                    meta = dict(topology.meta) if topology.meta else {}
                     meta.setdefault("receptor_scale", receptor_scale)
-                    object.__setattr__(proj.topology, "meta", meta)
-            compile_topology(
-                proj.topology,
+                    topology = replace(topology, meta=meta)
+
+            topology = compile_topology(
+                topology,
                 device=self._device,
                 dtype=self._dtype,
                 build_edges_by_delay=build_edges,
                 build_pre_adjacency=build_adj,
                 build_sparse_delay_mats=build_sparse,
                 build_bucket_edge_mapping=build_bucket_mapping,
+                fuse_delay_buckets=build_sparse,
             )
+            compiled_specs.append(replace(proj, topology=topology))
+
+        self._proj_specs = compiled_specs
 
         self._mod_states.clear()
         for mod in self._mod_specs:
@@ -198,6 +228,34 @@ class TorchNetworkEngine(ISimulationEngine):
 
         _apply_initial_spikes(self._pop_states, self._pop_order, config.meta)
         self._learning_scratch.clear()
+        self._proj_runtime_list = self._build_proj_runtime()
+
+    def _build_proj_runtime(self) -> list[_ProjectionRuntime]:
+        runtimes: list[_ProjectionRuntime] = []
+        for proj in self._proj_specs:
+            proj_state = self._proj_states[proj.name]
+            learning = proj.learning
+            supports_sparse = bool(getattr(learning, "supports_sparse", False)) if learning is not None else False
+            use_sparse = bool(proj.sparse_learning and supports_sparse)
+            runtimes.append(
+                _ProjectionRuntime(
+                    name=proj.name,
+                    pre=proj.pre,
+                    post=proj.post,
+                    synapse=proj.synapse,
+                    topology=proj.topology,
+                    state=proj_state,
+                    learning=learning,
+                    learn_every=proj.learn_every,
+                    use_sparse_learning=use_sparse,
+                    has_step_into=hasattr(proj.synapse, "step_into"),
+                    spec=proj,
+                    pre_state=self._pop_states[proj.pre],
+                    post_state=self._pop_states[proj.post],
+                    drive_target=self._drive_buffers[proj.post],
+                )
+            )
+        return runtimes
 
     def attach_monitors(self, monitors: Sequence[IMonitor]) -> None:
         monitor_list = list(monitors)
@@ -235,32 +293,31 @@ class TorchNetworkEngine(ISimulationEngine):
                 buffer.zero_()
 
         self.last_projection_drive = {}
-        for proj in self._proj_specs:
-            proj_state = self._proj_states[proj.name]
-            pre_spikes = self._pop_states[proj.pre].spikes
-            if hasattr(proj.synapse, "step_into"):
-                proj.synapse.step_into(
-                    proj_state.state,
+        for runtime in self._proj_runtime_list:
+            pre_spikes = runtime.pre_state.spikes
+            if runtime.has_step_into:
+                runtime.synapse.step_into(
+                    runtime.state.state,
                     pre_spikes,
-                    drive_acc[proj.post],
+                    runtime.drive_target,
                     t=self._t,
-                    topology=proj.topology,
+                    topology=runtime.topology,
                     dt=self._dt,
                     ctx=self._ctx,
                 )
-                self.last_projection_drive[proj.name] = drive_acc[proj.post]
+                self.last_projection_drive[runtime.name] = runtime.drive_target
             else:
-                proj_state.state, syn_result = proj.synapse.step(
-                    proj_state.state,
-                    proj.topology,
+                runtime.state.state, syn_result = runtime.synapse.step(
+                    runtime.state.state,
+                    runtime.topology,
                     SynapseInputs(pre_spikes=pre_spikes),
                     dt=self._dt,
                     t=self._t,
                     ctx=self._ctx,
                 )
-                self.last_projection_drive[proj.name] = syn_result.post_drive
+                self.last_projection_drive[runtime.name] = syn_result.post_drive
                 _accumulate_drive(
-                    drive_acc[proj.post],
+                    runtime.drive_target,
                     syn_result.post_drive,
                 )
 
@@ -311,44 +368,42 @@ class TorchNetworkEngine(ISimulationEngine):
                 neuron_tensors_by_pop[spec.name] = spec.model.state_tensors(pop_state.state)
 
         self.last_d_weights = {}
-        for proj in self._proj_specs:
-            if proj.learning is None:
+        for runtime in self._proj_runtime_list:
+            proj = runtime.spec
+            if runtime.learning is None:
                 continue
-            if proj.learn_every <= 0 or (self._step % proj.learn_every) != 0:
+            if runtime.learn_every <= 0 or (self._step % runtime.learn_every) != 0:
                 continue
-            proj_state = self._proj_states[proj.name]
-            learn_state = proj_state.learning_state
+            learn_state = runtime.state.learning_state
             if learn_state is None:
                 continue
 
-            weights = _require_weights(proj_state.state, proj.name)
-            supports_sparse = bool(getattr(proj.learning, "supports_sparse", False))
-            use_sparse = bool(proj.sparse_learning and supports_sparse)
+            weights = _require_weights(runtime.state.state, proj.name)
             batch, active_edges = _build_learning_batch(
                 proj=proj,
-                pre_spikes=self._pop_states[proj.pre].spikes,
-                post_spikes=self._pop_states[proj.post].spikes,
+                pre_spikes=runtime.pre_state.spikes,
+                post_spikes=runtime.post_state.spikes,
                 weights=weights,
-                edge_mods=edge_mods_by_proj.get(proj.name),
+                edge_mods=edge_mods_by_proj.get(runtime.name),
                 device=self._device,
-                use_sparse=use_sparse,
+                use_sparse=runtime.use_sparse_learning,
                 scratch=self._get_learning_scratch(proj.name) if self._learning_use_scratch else None,
             )
-            new_state, res = proj.learning.step(
+            new_state, res = runtime.learning.step(
                 learn_state,
                 batch,
                 dt=self._dt,
                 t=self._t,
                 ctx=self._ctx,
             )
-            proj_state.learning_state = new_state
+            runtime.state.learning_state = new_state
             _apply_learning_update(
                 weights=weights,
                 result=res,
                 active_edges=active_edges,
                 proj_name=proj.name,
-                synapse=proj.synapse,
-                topology=proj.topology,
+                synapse=runtime.synapse,
+                topology=runtime.topology,
             )
             _apply_weight_clamp(weights, proj)
             self.last_d_weights[proj.name] = res.d_weights
@@ -456,31 +511,30 @@ class TorchNetworkEngine(ISimulationEngine):
                     buffer.zero_()
 
         self.last_projection_drive = {}
-        for proj in self._proj_specs:
-            proj_state = self._proj_states[proj.name]
-            pre_spikes = self._pop_states[proj.pre].spikes
-            if hasattr(proj.synapse, "step_into"):
-                proj.synapse.step_into(
-                    proj_state.state,
+        for runtime in self._proj_runtime_list:
+            pre_spikes = runtime.pre_state.spikes
+            if runtime.has_step_into:
+                runtime.synapse.step_into(
+                    runtime.state.state,
                     pre_spikes,
-                    self._drive_buffers[proj.post],
+                    runtime.drive_target,
                     t=self._t,
-                    topology=proj.topology,
+                    topology=runtime.topology,
                     dt=self._dt,
                     ctx=self._ctx,
                 )
-                self.last_projection_drive[proj.name] = self._drive_buffers[proj.post]
+                self.last_projection_drive[runtime.name] = runtime.drive_target
             else:
-                proj_state.state, syn_result = proj.synapse.step(
-                    proj_state.state,
-                    proj.topology,
+                runtime.state.state, syn_result = runtime.synapse.step(
+                    runtime.state.state,
+                    runtime.topology,
                     SynapseInputs(pre_spikes=pre_spikes),
                     dt=self._dt,
                     t=self._t,
                     ctx=self._ctx,
                 )
-                self.last_projection_drive[proj.name] = syn_result.post_drive
-                _accumulate_drive(self._drive_buffers[proj.post], syn_result.post_drive)
+                self.last_projection_drive[runtime.name] = syn_result.post_drive
+                _accumulate_drive(runtime.drive_target, syn_result.post_drive)
 
         if self._external_drive_fn is not None:
             for spec in self._pop_specs:
@@ -762,6 +816,8 @@ class TorchNetworkEngine(ISimulationEngine):
                 edge_post=torch.empty((0,), device=device, dtype=torch.bool),
                 edge_weights=torch.empty((0,), device=device, dtype=torch.float32),
                 size=0,
+                arange_buf=torch.empty((0,), device=device, dtype=torch.long),
+                arange_size=0,
             )
             self._learning_scratch[proj_name] = scratch
         return scratch
@@ -1250,6 +1306,7 @@ def _build_learning_batch(
             proj.topology,
             device=device,
             max_edges=_sparse_edge_cap(proj),
+            scratch=scratch,
         )
         if scratch is not None:
             n_active = active_edges.numel()
@@ -1334,18 +1391,37 @@ def _require_pre_adjacency(topology: SynapseTopology, device: Any) -> tuple[Tens
     return cast(Tensor, pre_ptr), cast(Tensor, edge_idx)
 
 
-def _gather_active_edges(active_pre: Tensor, pre_ptr: Tensor, edge_idx: Tensor) -> Tensor:
+def _get_arange(scratch: _LearningScratch, needed: int, *, device: Any) -> Tensor:
+    if scratch.arange_size < needed or scratch.arange_buf.device != device:
+        torch = require_torch()
+        scratch.arange_buf = torch.arange(needed, device=device, dtype=torch.long)
+        scratch.arange_size = needed
+    return scratch.arange_buf
+
+
+def _gather_active_edges(
+    active_pre: Tensor,
+    pre_ptr: Tensor,
+    edge_idx: Tensor,
+    *,
+    scratch: _LearningScratch | None = None,
+) -> Tensor:
     torch = require_torch()
     starts = pre_ptr.index_select(0, active_pre)
     ends = pre_ptr.index_select(0, active_pre + 1)
     counts = ends - starts
     if counts.numel() == 0:
         return cast(Tensor, torch.empty((0,), device=edge_idx.device, dtype=torch.long))
-    total = counts.sum()
     base = torch.repeat_interleave(starts, counts)
+    total = base.numel()
+    if total == 0:
+        return cast(Tensor, torch.empty((0,), device=edge_idx.device, dtype=torch.long))
     prefix = torch.cumsum(counts, 0)
     group_start = torch.repeat_interleave(prefix - counts, counts)
-    intra = torch.arange(total, device=edge_idx.device) - group_start
+    if scratch is not None:
+        intra = _get_arange(scratch, total, device=edge_idx.device)[:total] - group_start
+    else:
+        intra = torch.arange(total, device=edge_idx.device) - group_start
     edge_pos = base + intra
     return cast(Tensor, edge_idx.index_select(0, edge_pos))
 
@@ -1356,13 +1432,14 @@ def _active_edges_from_spikes(
     *,
     device: Any,
     max_edges: int | None = None,
+    scratch: _LearningScratch | None = None,
 ) -> Tensor:
     torch = require_torch()
     pre_ptr, edge_idx = _require_pre_adjacency(topology, device)
     active_pre = pre_spikes.nonzero(as_tuple=False).flatten()
     if active_pre.numel() == 0:
         return cast(Tensor, torch.empty((0,), device=edge_idx.device, dtype=torch.long))
-    edges = _gather_active_edges(active_pre, pre_ptr, edge_idx)
+    edges = _gather_active_edges(active_pre, pre_ptr, edge_idx, scratch=scratch)
     if max_edges is not None and edges.numel() > max_edges:
         return edges[:max_edges]
     return edges
@@ -1416,7 +1493,7 @@ def _ensure_topology_meta(
     *,
     n_pre: int | None = None,
     n_post: int | None = None,
-) -> None:
+) -> SynapseTopology:
     meta = dict(topology.meta) if topology.meta else {}
     updated = False
 
@@ -1449,7 +1526,8 @@ def _ensure_topology_meta(
         updated = True
 
     if updated:
-        object.__setattr__(topology, "meta", meta)
+        return replace(topology, meta=meta)
+    return topology
 
 
 __all__ = ["TorchNetworkEngine"]

@@ -9,6 +9,7 @@ from typing import Any
 from biosnn.biophysics.models.adex_2c import AdEx2CompModel
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.connectivity.builders import build_erdos_renyi_topology
+from biosnn.contracts.monitors import IMonitor
 from biosnn.contracts.neurons import INeuronModel
 from biosnn.contracts.simulation import SimulationConfig
 from biosnn.core.torch_utils import require_torch
@@ -31,6 +32,7 @@ from biosnn.synapses.dynamics.delayed_current import (
 @dataclass(slots=True)
 class DemoMinimalConfig:
     out_dir: Path
+    mode: str = "dashboard"
     n_neurons: int = 100
     p_connect: float = 0.05
     steps: int = 500
@@ -99,33 +101,45 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
     spike_stride = max(2, cfg.spike_stride)
     spike_cap = min(cfg.spike_cap, 5000)
 
-    monitors = [
-        neuron_monitor_cls(
-            out_dir / "neuron.csv",
-            include_spikes=True,
-            sample_indices=list(range(neuron_sample)) if neuron_sample > 0 else None,
-            flush_every=25,
-        ),
-        SynapseCSVMonitor(
-            out_dir / "synapse.csv",
-            sample_indices=list(range(synapse_sample)) if synapse_sample > 0 else None,
-            stats=("mean", "std"),
-            flush_every=25,
-        ),
-        SpikeEventsCSVMonitor(
-            str(out_dir / "spikes.csv"),
-            stride=spike_stride,
-            max_spikes_per_step=spike_cap,
-            append=False,
-            flush_every=25,
-        ),
-        MetricsCSVMonitor(
-            str(out_dir / "metrics.csv"),
-            stride=1,
-            append=False,
-            flush_every=25,
-        ),
-    ]
+    run_mode = cfg.mode.lower().strip()
+    monitors: list[IMonitor]
+    if run_mode == "fast":
+        monitors = [
+            MetricsCSVMonitor(
+                str(out_dir / "metrics.csv"),
+                stride=10,
+                append=False,
+                flush_every=25,
+            ),
+        ]
+    else:
+        monitors = [
+            neuron_monitor_cls(
+                out_dir / "neuron.csv",
+                include_spikes=True,
+                sample_indices=list(range(neuron_sample)) if neuron_sample > 0 else None,
+                flush_every=25,
+            ),
+            SynapseCSVMonitor(
+                out_dir / "synapse.csv",
+                sample_indices=list(range(synapse_sample)) if synapse_sample > 0 else None,
+                stats=("mean", "std"),
+                flush_every=25,
+            ),
+            SpikeEventsCSVMonitor(
+                str(out_dir / "spikes.csv"),
+                stride=spike_stride,
+                max_spikes_per_step=spike_cap,
+                append=False,
+                flush_every=25,
+            ),
+            MetricsCSVMonitor(
+                str(out_dir / "metrics.csv"),
+                stride=1,
+                append=False,
+                flush_every=25,
+            ),
+        ]
 
     engine.attach_monitors(monitors)
     engine.reset(

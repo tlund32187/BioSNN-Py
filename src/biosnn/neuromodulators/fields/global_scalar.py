@@ -33,6 +33,7 @@ class GlobalScalarField(IModulatorField):
         params: GlobalScalarParams | None = None,
     ) -> None:
         self.kinds = kinds
+        self._kind_to_idx = {kind: idx for idx, kind in enumerate(self.kinds)}
         self.params = params or GlobalScalarParams()
 
     def init_state(self, *, ctx: Any) -> GlobalScalarState:
@@ -56,9 +57,9 @@ class GlobalScalarField(IModulatorField):
             state.levels.mul_(decay)
 
         for release in releases:
-            if release.kind not in self.kinds:
+            idx = self._kind_to_idx.get(release.kind)
+            if idx is None:
                 continue
-            idx = self.kinds.index(release.kind)
             amount = release.amount
             if hasattr(amount, "sum"):
                 delta = amount.sum().to(device=state.levels.device, dtype=state.levels.dtype)
@@ -77,10 +78,10 @@ class GlobalScalarField(IModulatorField):
         ctx: Any,
     ) -> Tensor:
         torch = require_torch()
-        if kind not in self.kinds:
+        idx = self._kind_to_idx.get(kind)
+        if idx is None:
             zeros = torch.zeros((positions.shape[0],), device=positions.device, dtype=positions.dtype)
             return cast(Tensor, zeros)
-        idx = self.kinds.index(kind)
         level = state.levels[idx].to(device=positions.device, dtype=positions.dtype)
         expanded = level.expand(positions.shape[0])
         return cast(Tensor, expanded)

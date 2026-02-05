@@ -9,6 +9,7 @@ from biosnn.synapses.dynamics.delayed_current import DelayedCurrentParams, Delay
 from biosnn.synapses.dynamics.delayed_sparse_matmul import (
     DelayedSparseMatmulParams,
     DelayedSparseMatmulSynapse,
+    _nonempty_mats_by_comp,
 )
 
 torch = pytest.importorskip("torch")
@@ -44,7 +45,7 @@ def test_sparse_matmul_matches_ring_backend():
         target_compartment=Compartment.SOMA,
         weights=weights,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -92,7 +93,7 @@ def test_sparse_matmul_multi_comp_receptor_matches_ring():
         weights=weights,
         meta={"receptor_scale": receptor_scale},
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -131,7 +132,7 @@ def test_sparse_matmul_cuda_no_item_hot_path(monkeypatch):
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -154,3 +155,62 @@ def test_sparse_matmul_cuda_no_item_hot_path(monkeypatch):
         t=0.0,
         ctx=ctx,
     )
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_sparse_matmul_fused_matches_per_delay(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    ctx = StepContext(device=device, dtype="float32")
+    pre_idx = torch.tensor([0, 1, 2, 3, 0, 2], dtype=torch.long, device=device)
+    post_idx = torch.tensor([0, 1, 1, 2, 2, 0], dtype=torch.long, device=device)
+    delay_steps = torch.tensor([0, 1, 2, 0, 1, 2], dtype=torch.int32, device=device)
+    weights = torch.linspace(0.1, 1.0, steps=pre_idx.numel(), dtype=torch.float32, device=device)
+    topology = SynapseTopology(
+        pre_idx=pre_idx,
+        post_idx=post_idx,
+        delay_steps=delay_steps,
+        target_compartment=Compartment.SOMA,
+        weights=weights,
+    )
+    topology = compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_sparse_delay_mats=True,
+        build_bucket_edge_mapping=True,
+    )
+
+    model = DelayedSparseMatmulSynapse(DelayedSparseMatmulParams(init_weight=1.0))
+    state = model.init_state(pre_idx.numel(), ctx=ctx)
+    state.weights.copy_(weights)
+    pre_spikes = torch.tensor([1.0, 0.0, 1.0, 1.0], dtype=torch.float32, device=device)
+
+    state, result = model.step(
+        state,
+        topology,
+        SynapseInputs(pre_spikes=pre_spikes),
+        dt=1e-3,
+        t=0.0,
+        ctx=ctx,
+    )
+
+    meta = topology.meta
+    assert meta is not None
+    depth = int(meta["max_delay_steps"]) + 1
+    n_post = int(meta["n_post"])
+    expected_drive = {Compartment.SOMA: torch.zeros((n_post,), device=device)}
+    expected_ring = {Compartment.SOMA: torch.zeros((depth, n_post), device=device)}
+    mats_by_comp = _nonempty_mats_by_comp(topology, pre_idx.device)
+    for comp, mats in mats_by_comp.items():
+        for delay, mat in mats:
+            contrib = torch.sparse.mm(mat, pre_spikes.unsqueeze(1)).squeeze(1)
+            if delay == 0:
+                expected_drive[comp].add_(contrib)
+            else:
+                expected_ring[comp][delay].add_(contrib)
+
+    torch.testing.assert_close(result.post_drive[Compartment.SOMA], expected_drive[Compartment.SOMA])
+    assert state.post_ring is not None
+    torch.testing.assert_close(state.post_ring[Compartment.SOMA], expected_ring[Compartment.SOMA])

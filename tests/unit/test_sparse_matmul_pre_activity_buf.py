@@ -28,7 +28,7 @@ def _build_topology() -> SynapseTopology:
 def test_pre_activity_buf_reused() -> None:
     ctx = StepContext(device="cpu", dtype="float32")
     topology = _build_topology()
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -59,7 +59,7 @@ def test_pre_activity_buf_reused() -> None:
 def test_pre_activity_buf_correctness() -> None:
     ctx = StepContext(device="cpu", dtype="float32")
     topology = _build_topology()
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,

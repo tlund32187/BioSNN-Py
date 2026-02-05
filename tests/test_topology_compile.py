@@ -30,6 +30,19 @@ def test_compile_topology_casts_and_meta():
 
     compiled = compile_topology(topology, device="cpu", dtype="float32")
 
+    assert compiled is not topology
+    assert topology.pre_idx.dtype == torch.int32
+    assert topology.post_idx.dtype == torch.int32
+    assert topology.delay_steps is not None
+    assert topology.delay_steps.dtype == torch.int16
+    assert topology.receptor is not None
+    assert topology.receptor.dtype == torch.int8
+    assert topology.target_compartments is not None
+    assert topology.target_compartments.dtype == torch.int8
+    assert topology.weights is not None
+    assert topology.weights.dtype == torch.float64
+    assert topology.meta is None
+
     assert compiled.pre_idx.dtype == torch.long
     assert compiled.post_idx.dtype == torch.long
     assert compiled.pre_idx.device.type == "cpu"
@@ -61,7 +74,7 @@ def test_synapse_step_no_device_transfers(monkeypatch):
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,

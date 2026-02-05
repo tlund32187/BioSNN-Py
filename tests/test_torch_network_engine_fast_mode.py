@@ -14,6 +14,7 @@ from biosnn.contracts.neurons import (
 from biosnn.contracts.simulation import SimulationConfig
 from biosnn.contracts.tensor import Tensor
 from biosnn.core.torch_utils import resolve_device_dtype
+from biosnn.monitors.csv import NeuronCSVMonitor
 from biosnn.simulation.engine import TorchNetworkEngine
 from biosnn.simulation.network import PopulationSpec
 
@@ -121,3 +122,11 @@ def test_fast_mode_false_uses_merge(monkeypatch):
     assert called["count"] == 1
     assert monitor.event is not None
     assert monitor.event.spikes is not None
+
+
+def test_fast_mode_rejects_csv_monitors(tmp_path):
+    pop = PopulationSpec(name="A", model=SilentNeuronModel(), n=2)
+    engine = TorchNetworkEngine(populations=[pop], projections=[], fast_mode=True)
+    monitor = NeuronCSVMonitor(tmp_path / "neuron.csv")
+    with pytest.raises(RuntimeError):
+        engine.attach_monitors([monitor])

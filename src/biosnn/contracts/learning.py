@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from biosnn.contracts.neurons import StepContext
 
 from biosnn.contracts.modulators import ModulatorKind
 from biosnn.contracts.tensor import Tensor
@@ -45,7 +48,7 @@ class ILearningRule(Protocol):
     name: str
     supports_sparse: bool
 
-    def init_state(self, e: int, *, ctx: Any) -> Any:
+    def init_state(self, e: int, *, ctx: StepContext) -> Any:
         ...
 
     def step(
@@ -55,7 +58,7 @@ class ILearningRule(Protocol):
         *,
         dt: float,
         t: float,
-        ctx: Any,
+        ctx: StepContext,
     ) -> tuple[Any, LearningStepResult]:
         ...
 

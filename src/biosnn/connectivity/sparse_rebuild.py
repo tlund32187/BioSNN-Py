@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from biosnn.connectivity.topology_compile import compile_topology
@@ -44,10 +45,10 @@ def rebuild_sparse_delay_mats(
         for key in ("edge_scale", "edge_bucket_comp", "edge_bucket_delay", "edge_bucket_pos"):
             meta.pop(key, None)
 
-    object.__setattr__(topology, "meta", meta)
+    cleaned = replace(topology, meta=meta)
 
     return compile_topology(
-        topology,
+        cleaned,
         device=device,
         dtype=dtype,
         build_sparse_delay_mats=True,

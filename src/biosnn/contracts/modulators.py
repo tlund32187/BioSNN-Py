@@ -9,7 +9,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from biosnn.contracts.neurons import StepContext
 
 from biosnn.contracts.tensor import Tensor
 
@@ -50,7 +53,7 @@ class IModulatorField(Protocol):
 
     name: str
 
-    def init_state(self, *, ctx: Any) -> Any:
+    def init_state(self, *, ctx: StepContext) -> Any:
         """Create internal field state (grids, particles, caches, etc.)."""
         ...
 
@@ -61,7 +64,7 @@ class IModulatorField(Protocol):
         releases: Sequence[ModulatorRelease],
         dt: float,
         t: float,
-        ctx: Any,
+        ctx: StepContext,
     ) -> Any:
         """Advance field dynamics by one timestep."""
         ...
@@ -72,7 +75,7 @@ class IModulatorField(Protocol):
         *,
         positions: Tensor,
         kind: ModulatorKind,
-        ctx: Any,
+        ctx: StepContext,
     ) -> Tensor:
         """Sample the modulator value at given xyz positions."""
         ...

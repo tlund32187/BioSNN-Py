@@ -63,6 +63,36 @@ If you already have a CUDA-enabled torch in another Python, re-installing inside
 python scripts/bench_step.py --device cuda --steps 5000
 ```
 
+## Run modes (dashboard vs fast)
+The CLI supports two run modes that trade off artifacts vs throughput:
+- `dashboard` (default): full CSV artifacts for the dashboard (neuron/synapse/spikes/weights), best for visualization.
+- `fast`: throughput-oriented, uses `fast_mode=True` and `compiled_mode=True`, minimal monitors (metrics only), and skips launching the dashboard server.
+
+Use:
+```powershell
+python -m biosnn.runners.cli --demo network --mode fast
+```
+
+### Fast mode monitor compatibility
+`fast_mode=True` does not support monitors that require merged tensors or global spikes:
+- `NeuronCSVMonitor`
+- `SynapseCSVMonitor`
+- `SpikeEventsCSVMonitor`
+
+`MetricsCSVMonitor` is compatible, as are custom monitors that only consume per-population tensors.
+
+### CUDA-clean demos
+When `--device cuda` is selected (or CUDA is auto-detected), the demo defaults to the CUDA-friendly
+`DelayedSparseMatmulSynapse`. `DelayedCurrentSynapse` is kept as a CPU reference path.
+
+### Fused delay buckets (sparse backend)
+When compiling sparse delay mats, non-empty delay buckets are fused by default:
+- Buckets are stacked into a single sparse matrix per compartment.
+- Runtime performs one sparse matmul and a vectorized scatter into the delay ring buffer.
+
+This removes the Python loop over delays and is the intended high-performance path. The legacy per-delay
+loop remains as a fallback if fused artifacts are absent.
+
 3) Run checks:
 ```powershell
 ruff check .
@@ -79,6 +109,7 @@ pip install -e ".[dev]"
 - Everything else may change freely.
 
 See: `docs/public_api.md` and `docs/architecture/decisions/0001-library-first.md`
+and `docs/architecture/decisions/0002-run-modes-and-fused-delays.md`
 
 ## Model docs
 - `docs/models/adex_2c.md`

@@ -914,30 +914,6 @@ def _gather_active_edges(
     if active_pre.numel() == 0:
         return cast(Tensor, torch.empty((0,), device=edge_idx.device, dtype=torch.long))
 
-    if edge_idx.device.type == "cuda":
-        meta = dict(topology.meta) if topology.meta else {}
-        pre_ptr_cpu = meta.get("pre_ptr_cpu")
-        edge_idx_cpu = meta.get("edge_idx_cpu")
-        if pre_ptr_cpu is None:
-            pre_ptr_cpu = pre_ptr.cpu()
-            meta["pre_ptr_cpu"] = pre_ptr_cpu
-        if edge_idx_cpu is None:
-            edge_idx_cpu = edge_idx.cpu()
-            meta["edge_idx_cpu"] = edge_idx_cpu
-        object.__setattr__(topology, "meta", meta)
-
-        active_cpu = active_pre.cpu().tolist()
-        slices: list[Tensor] = []
-        for idx in active_cpu:
-            start = int(pre_ptr_cpu[idx])
-            end = int(pre_ptr_cpu[idx + 1])
-            if end > start:
-                slices.append(edge_idx_cpu[start:end])
-        if not slices:
-            return cast(Tensor, torch.empty((0,), device=edge_idx.device, dtype=torch.long))
-        edges_cpu = torch.cat(slices)
-        return cast(Tensor, edges_cpu.to(device=edge_idx.device))
-
     starts = pre_ptr.index_select(0, active_pre)
     ends = pre_ptr.index_select(0, active_pre + 1)
     counts = ends - starts
@@ -946,8 +922,7 @@ def _gather_active_edges(
     base = torch.repeat_interleave(starts, counts)
     prefix = torch.cumsum(counts, 0)
     group_start = torch.repeat_interleave(prefix - counts, counts)
-    total = int(counts.sum())
-    intra = torch.arange(total, device=edge_idx.device) - group_start
+    intra = torch.arange(group_start.numel(), device=edge_idx.device) - group_start
     edge_pos = base + intra
     return cast(Tensor, edge_idx.index_select(0, edge_pos))
 

@@ -5,7 +5,12 @@ import pytest
 from biosnn.connectivity.topology_compile import compile_topology
 from biosnn.contracts.neurons import Compartment, StepContext
 from biosnn.contracts.synapses import SynapseInputs, SynapseTopology
-from biosnn.synapses.dynamics.delayed_current import DelayedCurrentParams, DelayedCurrentSynapse
+from biosnn.synapses.dynamics.delayed_current import (
+    DelayedCurrentParams,
+    DelayedCurrentSynapse,
+    _gather_active_edges,
+    _require_pre_adjacency,
+)
 
 torch = pytest.importorskip("torch")
 
@@ -38,7 +43,7 @@ def test_delayed_current_ring_matches_edge_buffer():
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -70,7 +75,7 @@ def test_delayed_current_ring_memory_shape():
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -108,7 +113,7 @@ def test_delayed_current_event_driven_matches_dense():
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -140,7 +145,7 @@ def test_delayed_current_event_driven_processes_fewer_edges():
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -168,6 +173,64 @@ def test_delayed_current_event_driven_processes_fewer_edges():
     assert processed < pre_idx.numel()
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_delayed_current_event_driven_gather_edges(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    pre_idx = torch.tensor([2, 0, 1, 2, 3, 0], dtype=torch.long, device=device)
+    post_idx = torch.tensor([0, 0, 1, 2, 1, 2], dtype=torch.long, device=device)
+    topology = SynapseTopology(
+        pre_idx=pre_idx,
+        post_idx=post_idx,
+        target_compartment=Compartment.SOMA,
+    )
+    topology = compile_topology(
+        topology,
+        device=device,
+        dtype="float32",
+        build_pre_adjacency=True,
+    )
+
+    weights = torch.tensor([0.5, 1.0, 0.2, 0.8, 1.5, 0.3], dtype=torch.float32, device=device)
+    pre_spikes = torch.tensor([1.0, 0.0, 1.0, 1.0], dtype=torch.float32, device=device)
+
+    active_pre = pre_spikes.nonzero(as_tuple=False).flatten()
+    pre_ptr, edge_idx = _require_pre_adjacency(topology, pre_idx.device)
+    edges = _gather_active_edges(active_pre, pre_ptr, edge_idx, topology)
+
+    pre_ptr_cpu = pre_ptr.detach().cpu().tolist()
+    edge_idx_cpu = edge_idx.detach().cpu().tolist()
+    active_cpu = active_pre.detach().cpu().tolist()
+    expected_edges: list[int] = []
+    for idx in active_cpu:
+        start = int(pre_ptr_cpu[idx])
+        end = int(pre_ptr_cpu[idx + 1])
+        expected_edges.extend(edge_idx_cpu[start:end])
+    assert edges.numel() == len(expected_edges)
+    assert edges.detach().cpu().tolist() == expected_edges
+
+    expected_out = torch.zeros((3,), dtype=torch.float32)
+    pre_idx_cpu = pre_idx.detach().cpu().tolist()
+    post_idx_cpu = post_idx.detach().cpu().tolist()
+    pre_spikes_cpu = pre_spikes.detach().cpu().tolist()
+    weights_cpu = weights.detach().cpu().tolist()
+    for edge in expected_edges:
+        pre = pre_idx_cpu[edge]
+        post = post_idx_cpu[edge]
+        expected_out[post] += pre_spikes_cpu[pre] * weights_cpu[edge]
+
+    edge_pre = pre_idx.index_select(0, edges)
+    edge_post = post_idx.index_select(0, edges)
+    edge_spikes = pre_spikes.index_select(0, edge_pre)
+    edge_weights = weights.index_select(0, edges)
+    edge_current = edge_spikes * edge_weights
+    actual_out = torch.zeros((3,), device=device, dtype=edge_current.dtype)
+    actual_out.index_add_(0, edge_post, edge_current)
+
+    torch.testing.assert_close(actual_out.detach().cpu(), expected_out)
+
+
 def test_delayed_current_adaptive_uses_event_driven_for_sparse(monkeypatch):
     ctx = StepContext(device="cpu", dtype="float32")
     pre_idx = torch.tensor([0, 1, 2, 3, 0, 2], dtype=torch.long)
@@ -179,7 +242,7 @@ def test_delayed_current_adaptive_uses_event_driven_for_sparse(monkeypatch):
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -237,7 +300,7 @@ def test_delayed_current_adaptive_uses_dense_for_dense(monkeypatch):
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -294,7 +357,7 @@ def test_delayed_current_adaptive_matches_event_driven_for_sparse():
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -331,7 +394,7 @@ def test_delayed_current_adaptive_matches_dense_for_dense():
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -368,7 +431,7 @@ def test_delayed_current_ring_cuda_device():
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -404,7 +467,7 @@ def test_delayed_current_event_driven_cuda_no_item(monkeypatch):
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,

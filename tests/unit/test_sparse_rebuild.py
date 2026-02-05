@@ -46,7 +46,7 @@ def test_sparse_rebuild_matches_updated_values() -> None:
         meta={"receptor_scale": receptor_scale},
     )
 
-    compile_topology(
+    topology = compile_topology(
         topology,
         device="cpu",
         dtype=weights.dtype,
@@ -64,7 +64,7 @@ def test_sparse_rebuild_matches_updated_values() -> None:
     meta_before = topology.meta or {}
     values_before = _clone_values(meta_before["values_by_comp"])
 
-    rebuild_sparse_delay_mats(
+    topology = rebuild_sparse_delay_mats(
         topology,
         device="cpu",
         dtype=weights.dtype,

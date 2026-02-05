@@ -36,7 +36,7 @@ def test_synapse_ring_buffer_delay():
     post_idx = torch.tensor([0], dtype=torch.long)
     delay_steps = torch.tensor([2], dtype=torch.int32)
     topology = _topology(pre_idx, post_idx, delay_steps=delay_steps, target_compartment=Compartment.SOMA)
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -79,7 +79,7 @@ def test_synapse_receptor_scale_per_edge():
         receptor_kinds=(ReceptorKind.AMPA, ReceptorKind.GABA),
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -114,7 +114,7 @@ def test_synapse_target_compartments_per_edge():
         post_idx,
         target_compartments=target_compartments,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -142,7 +142,7 @@ def test_synapse_input_shape_validation():
     pre_idx = torch.tensor([0], dtype=torch.long)
     post_idx = torch.tensor([0], dtype=torch.long)
     topology = _topology(pre_idx, post_idx)
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,

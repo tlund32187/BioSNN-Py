@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import Any, SupportsInt, cast
 
 from biosnn.connectivity.topology_compile import compile_topology
@@ -80,10 +81,11 @@ class TorchSimulationEngine(ISimulationEngine):
         self._spikes = torch.zeros((self._n,), device=self._device, dtype=torch.bool)
         _apply_initial_spikes(self._spikes, config.meta)
 
-        if self._topology.weights is None and getattr(self._synapse_state, "bind_weights_to_topology", False):
-            object.__setattr__(self._topology, "weights", self._synapse_state.weights)
-        _copy_topology_weights(self._synapse_state, self._topology.weights)
-        _ensure_topology_meta(self._topology, n_pre=self._n, n_post=self._n)
+        topology = self._topology
+        if topology.weights is None and getattr(self._synapse_state, "bind_weights_to_topology", False):
+            topology = replace(topology, weights=self._synapse_state.weights)
+        _copy_topology_weights(self._synapse_state, topology.weights)
+        topology = _ensure_topology_meta(topology, n_pre=self._n, n_post=self._n)
         build_edges_by_delay = False
         build_pre_adjacency = False
         build_sparse_delay_mats = False
@@ -104,19 +106,21 @@ class TorchSimulationEngine(ISimulationEngine):
             params = getattr(self._synapse_model, "params", None)
             receptor_scale = getattr(params, "receptor_scale", None) if params is not None else None
             if receptor_scale is not None:
-                meta = dict(self._topology.meta) if self._topology.meta else {}
+                meta = dict(topology.meta) if topology.meta else {}
                 meta.setdefault("receptor_scale", receptor_scale)
-                object.__setattr__(self._topology, "meta", meta)
+                topology = replace(topology, meta=meta)
 
-        compile_topology(
-            self._topology,
+        topology = compile_topology(
+            topology,
             device=self._device,
             dtype=self._dtype,
             build_edges_by_delay=build_edges_by_delay,
             build_pre_adjacency=build_pre_adjacency,
             build_sparse_delay_mats=build_sparse_delay_mats,
             build_bucket_edge_mapping=build_bucket_edge_mapping,
+            fuse_delay_buckets=build_sparse_delay_mats,
         )
+        self._topology = topology
         self._n_pre = _infer_n_pre(self._topology)
 
     def attach_monitors(self, monitors: Sequence[IMonitor]) -> None:
@@ -367,7 +371,7 @@ def _ensure_topology_meta(
     *,
     n_pre: int | None = None,
     n_post: int | None = None,
-) -> None:
+) -> SynapseTopology:
     meta = dict(topology.meta) if topology.meta else {}
     updated = False
     if n_pre is not None and "n_pre" not in meta:
@@ -399,4 +403,5 @@ def _ensure_topology_meta(
         updated = True
 
     if updated:
-        object.__setattr__(topology, "meta", meta)
+        return replace(topology, meta=meta)
+    return topology

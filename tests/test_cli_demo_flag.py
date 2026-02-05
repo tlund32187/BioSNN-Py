@@ -9,12 +9,21 @@ from biosnn.runners import cli
 def test_cli_demo_flag_defaults():
     args = cli._parse_args([])
     assert args.demo == cli._default_demo()
+    assert args.mode == "dashboard"
 
     args = cli._parse_args(["--demo", "minimal"])
     assert args.demo == "minimal"
 
     args = cli._parse_args(["--demo", "network"])
     assert args.demo == "network"
+
+    args = cli._parse_args(["--mode", "fast"])
+    assert args.mode == "fast"
+
+
+def test_cli_dashboard_mode_gate():
+    assert cli._should_launch_dashboard("dashboard") is True
+    assert cli._should_launch_dashboard("fast") is False
 
 
 def test_cli_dashboard_url_params(tmp_path: Path):

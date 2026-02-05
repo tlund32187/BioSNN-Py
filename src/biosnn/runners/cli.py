@@ -32,6 +32,8 @@ def main() -> None:
     print(f"Device: {device}")
     print(f"Demo: {args.demo}")
 
+    mode = args.mode
+
     if args.demo == "network":
         input_to_relay_p = args.input_to_relay_p
         relay_to_hidden_p = args.relay_to_hidden_p
@@ -44,6 +46,7 @@ def main() -> None:
         run_demo_network(
             DemoNetworkConfig(
                 out_dir=run_dir,
+                mode=mode,
                 steps=steps,
                 dt=dt,
                 seed=args.seed,
@@ -80,6 +83,7 @@ def main() -> None:
         run_demo_minimal(
             DemoMinimalConfig(
                 out_dir=run_dir,
+                mode=mode,
                 n_neurons=args.n,
                 p_connect=args.p,
                 steps=steps,
@@ -88,6 +92,10 @@ def main() -> None:
                 device=device,
             )
         )
+
+    if not _should_launch_dashboard(mode):
+        print("Fast mode selected; skipping dashboard server.")
+        return
 
     port = _find_port(args.port)
     _start_dashboard_server(repo_root, port)
@@ -112,7 +120,18 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=_default_demo(),
         help="which demo to run",
     )
-    parser.add_argument("--device", choices=["cpu", "cuda"], default=None)
+    parser.add_argument(
+        "--device",
+        choices=["cpu", "cuda"],
+        default=None,
+        help="run device; CUDA defaults to DelayedSparseMatmulSynapse in the demo",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["dashboard", "fast"],
+        default="dashboard",
+        help="run mode: dashboard (full artifacts) or fast (throughput-oriented)",
+    )
     parser.add_argument("--steps", type=int, default=500)
     parser.add_argument("--n", type=int, default=100, help="number of neurons")
     parser.add_argument("--p", type=float, default=0.05, help="connection probability")
@@ -176,6 +195,10 @@ def _default_demo() -> str:
         return "network"
     except Exception:
         return "minimal"
+
+
+def _should_launch_dashboard(mode: str) -> bool:
+    return mode.lower().strip() != "fast"
 
 
 def _start_dashboard_server(repo_root: Path, port: int) -> None:

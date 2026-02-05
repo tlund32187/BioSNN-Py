@@ -214,9 +214,15 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
             _sync_sparse_values(topology)
             return
 
-        values_by_comp, edge_bucket_comp, edge_bucket_delay, edge_bucket_pos, edge_scale = (
-            _require_sparse_update_meta(topology)
-        )
+        (
+            values_by_comp,
+            edge_bucket_comp,
+            edge_bucket_delay,
+            edge_bucket_pos,
+            edge_scale,
+            fused_values_by_comp,
+            edge_bucket_fused_pos,
+        ) = _require_sparse_update_meta(topology)
         comp_ids = edge_bucket_comp.index_select(0, edge_ids)
         delay_ids = edge_bucket_delay.index_select(0, edge_ids)
         pos_ids = edge_bucket_pos.index_select(0, edge_ids)
@@ -229,6 +235,10 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
             pos_ids=pos_ids,
             delta=delta,
             scale_vals=scale_vals,
+            fused_values_by_comp=fused_values_by_comp,
+            fused_pos_ids=edge_bucket_fused_pos.index_select(0, edge_ids)
+            if edge_bucket_fused_pos is not None
+            else None,
         )
 
     def sync_sparse_values(self, topology: SynapseTopology) -> None:
@@ -261,15 +271,35 @@ def _step_sparse_matmul(
     weights = _maybe_clamp_weights(model, state, topology, weights)
     pre_activity = _fill_pre_activity_buf(state, pre_spikes, weights, device)
 
-    mats_by_comp = _nonempty_mats_by_comp(topology, device)
-    for comp, mats in mats_by_comp.items():
-        for delay, mat in mats:
-            contrib = torch.sparse.mm(mat, pre_activity.unsqueeze(1)).squeeze(1)
-            target_row = (cursor + delay) % depth
-            if delay == 0:
-                post_drive[comp].add_(contrib)
-            else:
-                post_ring[comp][target_row].add_(contrib)
+    # Preferred path: fused delay buckets (single sparse matmul per compartment).
+    fused_mats, fused_delays, fused_n_post = _fused_sparse_by_comp(topology, device)
+    if fused_mats:
+        for comp, fused in fused_mats.items():
+            delays = fused_delays.get(comp)
+            if delays is None or delays.numel() == 0:
+                continue
+            n_post_comp = fused_n_post.get(comp, n_post)
+            contrib_flat = torch.sparse.mm(fused, pre_activity.unsqueeze(1)).squeeze(1)
+            if contrib_flat.numel() == 0:
+                continue
+            contrib = contrib_flat.view(int(delays.numel()), n_post_comp)
+            ring_indices = torch.remainder(delays + cursor, depth)
+            immediate_mask = delays == 0
+            if immediate_mask.any():
+                post_drive[comp].add_(contrib[immediate_mask].sum(dim=0))
+            delayed_mask = ~immediate_mask
+            if delayed_mask.any():
+                post_ring[comp].index_add_(0, ring_indices[delayed_mask], contrib[delayed_mask])
+    else:
+        mats_by_comp = _nonempty_mats_by_comp(topology, device)
+        for comp, mats in mats_by_comp.items():
+            for delay, mat in mats:
+                contrib = torch.sparse.mm(mat, pre_activity.unsqueeze(1)).squeeze(1)
+                target_row = (cursor + delay) % depth
+                if delay == 0:
+                    post_drive[comp].add_(contrib)
+                else:
+                    post_ring[comp][target_row].add_(contrib)
 
     state.cursor = (cursor + 1) % depth
     return post_drive
@@ -301,17 +331,39 @@ def _step_sparse_matmul_into(
     weights = _maybe_clamp_weights(model, state, topology, weights)
     pre_activity = _fill_pre_activity_buf(state, pre_spikes, weights, device)
 
-    mats_by_comp = _nonempty_mats_by_comp(topology, device)
-    for comp, mats in mats_by_comp.items():
-        if comp not in out_drive:
-            raise KeyError(f"Drive accumulator missing compartment {comp}")
-        for delay, mat in mats:
-            contrib = torch.sparse.mm(mat, pre_activity.unsqueeze(1)).squeeze(1)
-            target_row = (cursor + delay) % depth
-            if delay == 0:
-                out_drive[comp].add_(contrib)
-            else:
-                post_ring[comp][target_row].add_(contrib)
+    # Preferred path: fused delay buckets (single sparse matmul per compartment).
+    fused_mats, fused_delays, fused_n_post = _fused_sparse_by_comp(topology, device)
+    if fused_mats:
+        for comp, fused in fused_mats.items():
+            if comp not in out_drive:
+                raise KeyError(f"Drive accumulator missing compartment {comp}")
+            delays = fused_delays.get(comp)
+            if delays is None or delays.numel() == 0:
+                continue
+            n_post_comp = fused_n_post.get(comp, n_post)
+            contrib_flat = torch.sparse.mm(fused, pre_activity.unsqueeze(1)).squeeze(1)
+            if contrib_flat.numel() == 0:
+                continue
+            contrib = contrib_flat.view(int(delays.numel()), n_post_comp)
+            ring_indices = torch.remainder(delays + cursor, depth)
+            immediate_mask = delays == 0
+            if immediate_mask.any():
+                out_drive[comp].add_(contrib[immediate_mask].sum(dim=0))
+            delayed_mask = ~immediate_mask
+            if delayed_mask.any():
+                post_ring[comp].index_add_(0, ring_indices[delayed_mask], contrib[delayed_mask])
+    else:
+        mats_by_comp = _nonempty_mats_by_comp(topology, device)
+        for comp, mats in mats_by_comp.items():
+            if comp not in out_drive:
+                raise KeyError(f"Drive accumulator missing compartment {comp}")
+            for delay, mat in mats:
+                contrib = torch.sparse.mm(mat, pre_activity.unsqueeze(1)).squeeze(1)
+                target_row = (cursor + delay) % depth
+                if delay == 0:
+                    out_drive[comp].add_(contrib)
+                else:
+                    post_ring[comp][target_row].add_(contrib)
 
     state.cursor = (cursor + 1) % depth
 
@@ -434,6 +486,46 @@ def _nonempty_mats_by_comp(
         comp: [(delay, mat) for delay, mat in enumerate(mats) if mat is not None]
         for comp, mats in mats_by_comp.items()
     }
+
+
+def _fused_sparse_by_comp(
+    topology: SynapseTopology, device: Any
+) -> tuple[dict[Compartment, Tensor], dict[Compartment, Tensor], dict[Compartment, int]]:
+    meta = topology.meta or {}
+    fused = meta.get("fused_W_by_comp")
+    delays = meta.get("fused_W_delays_by_comp")
+    n_post_by_comp = meta.get("fused_W_n_post_by_comp")
+    if not isinstance(fused, dict) or not isinstance(delays, dict) or not isinstance(n_post_by_comp, dict):
+        return {}, {}, {}
+    out_fused: dict[Compartment, Tensor] = {}
+    out_delays: dict[Compartment, Tensor] = {}
+    out_n_post: dict[Compartment, int] = {}
+    for comp, mat in fused.items():
+        if mat is None:
+            continue
+        if hasattr(mat, "device") and device is not None and mat.device != device:
+            raise RuntimeError(
+                "fused_W_by_comp is on a different device; "
+                "compile_topology(..., build_sparse_delay_mats=True) with the synapse device."
+            )
+        delay_vec = delays.get(comp)
+        if delay_vec is None:
+            continue
+        if hasattr(delay_vec, "device") and device is not None and delay_vec.device != device:
+            raise RuntimeError(
+                "fused_W_delays_by_comp is on a different device; "
+                "compile_topology(..., build_sparse_delay_mats=True) with the synapse device."
+            )
+        out_fused[cast(Compartment, comp)] = cast(Tensor, mat)
+        out_delays[cast(Compartment, comp)] = cast(Tensor, delay_vec)
+        n_post_val = n_post_by_comp.get(comp)
+        if n_post_val is None:
+            continue
+        try:
+            out_n_post[cast(Compartment, comp)] = int(n_post_val)
+        except Exception:
+            continue
+    return out_fused, out_delays, out_n_post
 
 
 def _validate_sparse_mats_by_comp(
@@ -566,7 +658,6 @@ def _resolve_weights(
     weights = topology.weights
     if weights is None:
         weights = state.weights
-        object.__setattr__(topology, "weights", weights)
     elif weights is not state.weights:
         state.weights = weights
     return weights
@@ -602,9 +693,15 @@ def _fill_pre_activity_buf(
 
 
 def _sync_sparse_values(topology: SynapseTopology) -> None:
-    values_by_comp, edge_bucket_comp, edge_bucket_delay, edge_bucket_pos, edge_scale = (
-        _require_sparse_update_meta(topology)
-    )
+    (
+        values_by_comp,
+        edge_bucket_comp,
+        edge_bucket_delay,
+        edge_bucket_pos,
+        edge_scale,
+        fused_values_by_comp,
+        edge_bucket_fused_pos,
+    ) = _require_sparse_update_meta(topology)
     weights = topology.weights
     if weights is None:
         raise RuntimeError("Topology weights missing; cannot sync sparse values.")
@@ -621,6 +718,8 @@ def _sync_sparse_values(topology: SynapseTopology) -> None:
         delta=weights,
         scale_vals=scale_vals,
         replace=True,
+        fused_values_by_comp=fused_values_by_comp,
+        fused_pos_ids=edge_bucket_fused_pos,
     )
 
 
@@ -633,6 +732,8 @@ def _apply_sparse_value_updates(
     delta: Tensor,
     scale_vals: Tensor | None,
     replace: bool = False,
+    fused_values_by_comp: Mapping[Compartment, Tensor] | None = None,
+    fused_pos_ids: Tensor | None = None,
 ) -> None:
     comp_order = tuple(Compartment)
     for comp, values_by_delay in values_by_comp.items():
@@ -640,6 +741,20 @@ def _apply_sparse_value_updates(
             continue
         comp_id = comp_order.index(comp)
         comp_mask = comp_ids == comp_id
+        if fused_values_by_comp is not None and fused_pos_ids is not None:
+            fused_values = fused_values_by_comp.get(comp)
+            if fused_values is not None:
+                fused_mask = comp_mask & (fused_pos_ids >= 0)
+                selected = fused_mask.nonzero(as_tuple=False).flatten()
+                if selected.numel() > 0:
+                    pos = fused_pos_ids.index_select(0, selected)
+                    vals = delta.index_select(0, selected)
+                    if scale_vals is not None:
+                        vals = vals * scale_vals.index_select(0, selected)
+                    if replace:
+                        fused_values.index_copy_(0, pos, vals)
+                    else:
+                        fused_values.index_add_(0, pos, vals)
         for delay, values in enumerate(values_by_delay):
             if values is None:
                 continue
@@ -665,6 +780,8 @@ def _require_sparse_update_meta(
     Tensor,
     Tensor,
     Tensor | None,
+    dict[Compartment, Tensor] | None,
+    Tensor | None,
 ]:
     meta = topology.meta or {}
     values_by_comp = meta.get("values_by_comp")
@@ -672,6 +789,8 @@ def _require_sparse_update_meta(
     edge_bucket_delay = meta.get("edge_bucket_delay")
     edge_bucket_pos = meta.get("edge_bucket_pos")
     edge_scale = meta.get("edge_scale")
+    fused_by_comp = meta.get("fused_W_by_comp")
+    edge_bucket_fused_pos = meta.get("edge_bucket_fused_pos")
     if not isinstance(values_by_comp, dict):
         raise RuntimeError(
             "values_by_comp missing; compile_topology(..., build_sparse_delay_mats=True) "
@@ -682,12 +801,21 @@ def _require_sparse_update_meta(
             "Edge bucket mappings missing; compile_topology(..., build_bucket_edge_mapping=True) "
             "must be called before apply_weight_updates."
         )
+    fused_values_by_comp = None
+    if isinstance(fused_by_comp, dict) and edge_bucket_fused_pos is not None:
+        fused_values_by_comp = {
+            cast(Compartment, comp): cast(Tensor, mat).values()
+            for comp, mat in fused_by_comp.items()
+            if mat is not None
+        }
     return (
         cast(dict[Compartment, list[Tensor | None]], values_by_comp),
         cast(Tensor, edge_bucket_comp),
         cast(Tensor, edge_bucket_delay),
         cast(Tensor, edge_bucket_pos),
         cast(Tensor | None, edge_scale),
+        fused_values_by_comp,
+        cast(Tensor | None, edge_bucket_fused_pos),
     )
 
 

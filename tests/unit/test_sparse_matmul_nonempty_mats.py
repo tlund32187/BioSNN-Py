@@ -20,7 +20,7 @@ def test_nonempty_mats_by_comp_delays() -> None:
         delay_steps=delay_steps,
         target_compartment=Compartment.SOMA,
     )
-    compile_topology(
+    topology = compile_topology(
         topology,
         device=ctx.device,
         dtype=ctx.dtype,
@@ -32,3 +32,17 @@ def test_nonempty_mats_by_comp_delays() -> None:
     nonempty = nonempty[Compartment.SOMA]
     delays = [delay for delay, _ in nonempty]
     assert delays == [0, 2]
+
+    fused_by_comp = meta.get("fused_W_by_comp")
+    fused_delays_by_comp = meta.get("fused_W_delays_by_comp")
+    fused_n_post_by_comp = meta.get("fused_W_n_post_by_comp")
+    assert isinstance(fused_by_comp, dict)
+    assert isinstance(fused_delays_by_comp, dict)
+    assert isinstance(fused_n_post_by_comp, dict)
+
+    fused = fused_by_comp[Compartment.SOMA]
+    fused_delays = fused_delays_by_comp[Compartment.SOMA].tolist()
+    assert fused_delays == delays
+    n_post = int(meta["n_post"])
+    n_pre = int(meta["n_pre"])
+    assert fused.shape == (len(delays) * n_post, n_pre)

@@ -13,24 +13,26 @@ def reduce_tensor(
     tensor: Tensor,
     reductions: Sequence[str],
     sample_indices: Sequence[int] | Tensor | None = None,
-) -> dict[str, float]:
+    *,
+    as_tensor: bool = False,
+) -> dict[str, Any]:
     """Reduce a tensor into a row mapping of statistics and samples."""
 
-    row: dict[str, float] = {}
+    row: dict[str, Any] = {}
     if tensor is None:
         return row
 
     for stat in reductions:
-        row[f"{name}_{stat}"] = reduce_stat(tensor, stat)
+        row[f"{name}_{stat}"] = reduce_stat(tensor, stat, as_tensor=as_tensor)
 
     if sample_indices is not None:
-        for idx, value in sample_tensor(tensor, sample_indices):
+        for idx, value in sample_tensor(tensor, sample_indices, as_tensor=as_tensor):
             row[f"{name}_i{idx}"] = value
 
     return row
 
 
-def reduce_stat(values: Any, stat: str) -> float:
+def reduce_stat(values: Any, stat: str, *, as_tensor: bool = False) -> Any:
     """Compute a scalar reduction without moving full tensors to CPU."""
 
     if values is None:
@@ -54,7 +56,10 @@ def reduce_stat(values: Any, stat: str) -> float:
         reducer = getattr(flat, stat, None)
         if callable(reducer):
             try:
-                return _to_scalar(reducer())
+                result = reducer()
+                if as_tensor and hasattr(result, "detach"):
+                    return result.detach()
+                return _to_scalar(result)
             except Exception:
                 pass
 
@@ -71,10 +76,14 @@ def reduce_stat(values: Any, stat: str) -> float:
         if stat == "max":
             return float(max(flat_list))
 
+    if as_tensor and hasattr(candidate, "detach"):
+        return candidate.detach()
     return _to_scalar(candidate)
 
 
-def sample_tensor(values: Any, indices: Sequence[int] | Tensor) -> list[tuple[int, float]]:
+def sample_tensor(
+    values: Any, indices: Sequence[int] | Tensor, *, as_tensor: bool = False
+) -> list[tuple[int, Any]]:
     """Sample values from a tensor or sequence by index."""
 
     if values is None:
@@ -89,8 +98,22 @@ def sample_tensor(values: Any, indices: Sequence[int] | Tensor) -> list[tuple[in
             sampled = _index_values(flat, indices)
         except Exception:
             sampled = [flat[idx] for idx in index_list]
-        return [(int(idx), _to_scalar(val)) for idx, val in zip(index_list, _to_list(sampled), strict=False)]
+        if as_tensor:
+            if hasattr(sampled, "__len__") and not isinstance(sampled, (str, bytes)):
+                sampled_list = [sampled[i] for i in range(len(index_list))]
+            else:
+                sampled_list = [sampled]
+            return [
+                (int(idx), val.detach() if hasattr(val, "detach") else val)
+                for idx, val in zip(index_list, sampled_list, strict=False)
+            ]
+        return [
+            (int(idx), _to_scalar(val))
+            for idx, val in zip(index_list, _to_list(sampled), strict=False)
+        ]
 
+    if as_tensor:
+        return [(int(idx), values[idx]) for idx in index_list]
     return [(int(idx), _to_scalar(values[idx])) for idx in index_list]
 
 

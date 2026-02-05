@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -19,6 +19,7 @@ from biosnn.connectivity.delays import DelayParams, compute_delay_steps
 from biosnn.contracts.monitors import IMonitor, StepEvent
 from biosnn.contracts.neurons import Compartment
 from biosnn.contracts.simulation import SimulationConfig
+from biosnn.contracts.synapses import ISynapseModel
 from biosnn.core.torch_utils import require_torch
 from biosnn.io.dashboard_export import export_population_topology_json
 from biosnn.io.sinks import CsvSink
@@ -38,11 +39,16 @@ from biosnn.synapses.dynamics.delayed_current import (
     DelayedCurrentParams,
     DelayedCurrentSynapse,
 )
+from biosnn.synapses.dynamics.delayed_sparse_matmul import (
+    DelayedSparseMatmulParams,
+    DelayedSparseMatmulSynapse,
+)
 
 
 @dataclass(slots=True)
 class DemoNetworkConfig:
     out_dir: Path
+    mode: Literal["dashboard", "fast"] = "dashboard"
     steps: int = 800
     dt: float = 1e-3
     seed: int | None = None
@@ -124,6 +130,9 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
     device = cfg.device
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
+
+    run_mode = cfg.mode.lower().strip()
+    fast_mode = run_mode == "fast"
 
     dtype = "float32"
     out_dir = Path(cfg.out_dir)
@@ -218,7 +227,20 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
         output_layer.append(pop)
     layers.append(output_layer)
 
-    syn_params = DelayedCurrentParams(init_weight=cfg.weight_init)
+    use_sparse_synapse = device == "cuda"
+    make_synapse: Callable[[], ISynapseModel]
+    if use_sparse_synapse:
+        # CUDA default: use sparse matmul backend to avoid CPU fallback paths.
+        syn_params_sparse = DelayedSparseMatmulParams(init_weight=cfg.weight_init)
+
+        def make_synapse() -> ISynapseModel:
+            return DelayedSparseMatmulSynapse(syn_params_sparse)
+
+    else:
+        syn_params_current = DelayedCurrentParams(init_weight=cfg.weight_init)
+
+        def make_synapse() -> ISynapseModel:
+            return DelayedCurrentSynapse(syn_params_current)
     projections: list[ProjectionSpec] = []
     topologies: list[Any] = []
 
@@ -259,7 +281,7 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
             )
         proj = ProjectionSpec(
             name=f"{pre.name}->{post.name}",
-            synapse=DelayedCurrentSynapse(syn_params),
+            synapse=make_synapse(),
             topology=topo,
             pre=pre.name,
             post=post.name,
@@ -415,7 +437,7 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
             )
             proj = ProjectionSpec(
                 name=f"{pop.name}->{pop.name}",
-                synapse=DelayedCurrentSynapse(syn_params),
+                synapse=make_synapse(),
                 topology=topo,
                 pre=pop.name,
                 post=pop.name,
@@ -467,7 +489,7 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
                 )
                 proj = ProjectionSpec(
                     name=f"{pop.name}->{pop.name}",
-                    synapse=DelayedCurrentSynapse(syn_params),
+                    synapse=make_synapse(),
                     topology=topo,
                     pre=pop.name,
                     post=pop.name,
@@ -497,6 +519,9 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
         populations=populations,
         projections=projections,
         external_drive_fn=external_drive_fn,
+        fast_mode=fast_mode,
+        compiled_mode=fast_mode,
+        learning_use_scratch=fast_mode,
     )
 
     total_neurons = sum(pop.n for pop in populations)
@@ -519,53 +544,64 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
         "theta",
     )
 
-    monitors: list[IMonitor] = [
-        NeuronCSVMonitor(
-            out_dir / "neuron.csv",
-            tensor_keys=neuron_tensor_keys,
-            include_spikes=True,
-            sample_indices=list(range(neuron_sample)) if neuron_sample > 0 else None,
-            flush_every=25,
-        ),
-        _AggregatedSynapseCSVMonitor(
-            out_dir / "synapse.csv",
-            weight_keys=weight_keys,
-            sample_n=synapse_sample,
-            stats=("mean", "std"),
-            flush_every=25,
-        ),
-        SpikeEventsCSVMonitor(
-            str(out_dir / "spikes.csv"),
-            stride=spike_stride,
-            max_spikes_per_step=spike_cap,
-            append=False,
-            flush_every=25,
-        ),
-        MetricsCSVMonitor(
-            str(out_dir / "metrics.csv"),
-            stride=1,
-            append=False,
-            flush_every=25,
-        ),
-        ProjectionWeightsCSVMonitor(
-            str(out_dir / "weights.csv"),
-            projections=projections,
-            stride=weights_stride,
-            max_edges_sample=weights_cap,
-            append=False,
-            flush_every=25,
-        ),
-    ]
-    if cfg.drive_monitor:
-        monitors.append(
-            _PopDriveCSVMonitor(
-                out_dir / "drive.csv",
-                engine=engine,
-                pop_names=[pop.name for pop in populations],
-                every_n_steps=1,
+    monitors: list[IMonitor]
+    if fast_mode:
+        monitors = [
+            MetricsCSVMonitor(
+                str(out_dir / "metrics.csv"),
+                stride=10,
+                append=False,
                 flush_every=25,
+            ),
+        ]
+    else:
+        monitors = [
+            NeuronCSVMonitor(
+                out_dir / "neuron.csv",
+                tensor_keys=neuron_tensor_keys,
+                include_spikes=True,
+                sample_indices=list(range(neuron_sample)) if neuron_sample > 0 else None,
+                flush_every=25,
+            ),
+            _AggregatedSynapseCSVMonitor(
+                out_dir / "synapse.csv",
+                weight_keys=weight_keys,
+                sample_n=synapse_sample,
+                stats=("mean", "std"),
+                flush_every=25,
+            ),
+            SpikeEventsCSVMonitor(
+                str(out_dir / "spikes.csv"),
+                stride=spike_stride,
+                max_spikes_per_step=spike_cap,
+                append=False,
+                flush_every=25,
+            ),
+            MetricsCSVMonitor(
+                str(out_dir / "metrics.csv"),
+                stride=1,
+                append=False,
+                flush_every=25,
+            ),
+            ProjectionWeightsCSVMonitor(
+                str(out_dir / "weights.csv"),
+                projections=projections,
+                stride=weights_stride,
+                max_edges_sample=weights_cap,
+                append=False,
+                flush_every=25,
+            ),
+        ]
+        if cfg.drive_monitor:
+            monitors.append(
+                _PopDriveCSVMonitor(
+                    out_dir / "drive.csv",
+                    engine=engine,
+                    pop_names=[pop.name for pop in populations],
+                    every_n_steps=1,
+                    flush_every=25,
+                )
             )
-        )
 
     engine.attach_monitors(monitors)
     engine.reset(

@@ -90,6 +90,10 @@ def test_compilation_flags_for_sparse_matmul():
     assert "edge_bucket_comp" in meta
     assert "edge_bucket_delay" in meta
     assert "edge_bucket_pos" in meta
+    assert "fused_W_by_comp" in meta
+    assert "fused_W_delays_by_comp" in meta
+    assert "fused_W_n_post_by_comp" in meta
+    assert "edge_bucket_fused_pos" in meta
 
 
 def test_engine_has_no_concrete_synapse_imports():
