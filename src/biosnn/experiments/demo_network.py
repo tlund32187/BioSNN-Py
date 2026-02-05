@@ -55,7 +55,7 @@ class DemoNetworkConfig:
     device: str = "cuda"
     profile: bool = False
     profile_steps: int = 20
-    allow_cuda_monitor_sync: bool = False
+    allow_cuda_monitor_sync: bool | None = None
     parallel_compile: Literal["auto", "on", "off"] = "auto"
     parallel_compile_workers: int | None = None
     parallel_compile_torch_threads: int = 1
@@ -144,7 +144,10 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
     run_mode = cfg.mode.lower().strip()
     fast_mode = run_mode == "fast"
     cuda_device = device == "cuda"
-    allow_cuda_sync = bool(cfg.allow_cuda_monitor_sync)
+    allow_cuda_sync = cfg.allow_cuda_monitor_sync
+    if allow_cuda_sync is None:
+        allow_cuda_sync = run_mode == "dashboard"
+    allow_cuda_sync = bool(allow_cuda_sync)
     monitor_async_gpu = cuda_device and not allow_cuda_sync
 
     dtype = "float32"

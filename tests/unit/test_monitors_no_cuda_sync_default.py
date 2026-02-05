@@ -40,6 +40,7 @@ def test_default_monitors_no_cuda_sync(tmp_path, monkeypatch):
         steps=2,
         dt=1e-3,
         device="cuda",
+        allow_cuda_monitor_sync=False,
     )
     run_demo_minimal(cfg)
 

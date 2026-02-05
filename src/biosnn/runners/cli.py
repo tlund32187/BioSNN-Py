@@ -59,7 +59,7 @@ def main() -> None:
                 device=device,
                 profile=args.profile,
                 profile_steps=args.profile_steps,
-                allow_cuda_monitor_sync=bool(args.allow_cuda_monitor_sync),
+                allow_cuda_monitor_sync=args.allow_cuda_monitor_sync,
                 parallel_compile=args.parallel_compile,
                 parallel_compile_workers=_parse_thread_setting(args.parallel_compile_workers),
                 parallel_compile_torch_threads=int(args.parallel_compile_torch_threads),
@@ -116,7 +116,7 @@ def main() -> None:
                 device=device,
                 profile=args.profile,
                 profile_steps=args.profile_steps,
-                allow_cuda_monitor_sync=bool(args.allow_cuda_monitor_sync),
+                allow_cuda_monitor_sync=args.allow_cuda_monitor_sync,
                 monitor_safe_defaults=bool(args.monitor_safe_defaults),
                 monitor_neuron_sample=args.monitor_neuron_sample,
                 monitor_edge_sample=args.monitor_edge_sample,
@@ -184,7 +184,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--allow-cuda-monitor-sync",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=None,
         help="allow CUDA monitors that require CPU sync (e.g., spike events)",
     )
     parser.add_argument(
@@ -389,17 +389,21 @@ def _start_dashboard_server(repo_root: Path, port: int) -> None:
 
 def _build_dashboard_url(port: int, run_dir: Path, repo_root: Path, refresh_ms: int) -> str:
     base = f"http://localhost:{port}/docs/dashboard/"
+    def param_or_none(filename: str) -> str:
+        path = run_dir / filename
+        if not path.exists():
+            return "none"
+        return _dashboard_param(repo_root, run_dir, filename)
+
     query = {
-        "topology": _dashboard_param(repo_root, run_dir, "topology.json"),
-        "neuron": _dashboard_param(repo_root, run_dir, "neuron.csv"),
-        "synapse": _dashboard_param(repo_root, run_dir, "synapse.csv"),
-        "spikes": _dashboard_param(repo_root, run_dir, "spikes.csv"),
-        "metrics": _dashboard_param(repo_root, run_dir, "metrics.csv"),
+        "topology": param_or_none("topology.json"),
+        "neuron": param_or_none("neuron.csv"),
+        "synapse": param_or_none("synapse.csv"),
+        "spikes": param_or_none("spikes.csv"),
+        "metrics": param_or_none("metrics.csv"),
+        "weights": param_or_none("weights.csv"),
         "refresh": str(refresh_ms),
     }
-    weights_path = run_dir / "weights.csv"
-    if weights_path.exists():
-        query["weights"] = _dashboard_param(repo_root, run_dir, "weights.csv")
 
     query_str = "&".join(f"{key}={quote(value, safe='/:')}" for key, value in query.items())
     return f"{base}?{query_str}"

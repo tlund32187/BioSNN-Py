@@ -91,13 +91,22 @@ function inferRoleFromPopName(name) {
 
 const dataConfig = (() => {
   const params = new URLSearchParams(window.location.search);
+  const readParam = (key, fallback) => {
+    const raw = params.get(key);
+    if (raw === null || raw === undefined) return fallback;
+    const value = String(raw).trim();
+    if (!value || value.toLowerCase() === "none" || value.toLowerCase() === "disabled") {
+      return null;
+    }
+    return value;
+  };
   return {
-    neuronCsv: params.get("neuron") || "data/neuron.csv",
-    synapseCsv: params.get("synapse") || "data/synapse.csv",
-    spikesCsv: params.get("spikes") || "data/spikes.csv",
-    metricsCsv: params.get("metrics") || "data/metrics.csv",
-    weightsCsv: params.get("weights") || "data/weights.csv",
-    topologyJson: params.get("topology") || "data/topology.json",
+    neuronCsv: readParam("neuron", "data/neuron.csv"),
+    synapseCsv: readParam("synapse", "data/synapse.csv"),
+    spikesCsv: readParam("spikes", "data/spikes.csv"),
+    metricsCsv: readParam("metrics", "data/metrics.csv"),
+    weightsCsv: readParam("weights", "data/weights.csv"),
+    topologyJson: readParam("topology", "data/topology.json"),
     refreshMs: Number(params.get("refresh") || 1200),
     totalSteps: Number(params.get("total_steps") || params.get("steps") || 0),
   };
@@ -1474,13 +1483,25 @@ function drawStateSpace() {
 }
 
 async function refreshData() {
+  const loadCsvMaybe = (path) => {
+    if (!path) {
+      return Promise.resolve({ data: null, error: null, url: "(disabled)", disabled: true });
+    }
+    return loadCsv(path);
+  };
+  const loadJsonMaybe = (path) => {
+    if (!path) {
+      return Promise.resolve({ data: null, error: null, url: "(disabled)", disabled: true });
+    }
+    return loadJson(path);
+  };
   const [neuronRes, synapseRes, spikesRes, metricsRes, weightsRes, topologyRes] = await Promise.all([
-    loadCsv(dataConfig.neuronCsv),
-    loadCsv(dataConfig.synapseCsv),
-    loadCsv(dataConfig.spikesCsv),
-    loadCsv(dataConfig.metricsCsv),
-    loadCsv(dataConfig.weightsCsv),
-    loadJson(dataConfig.topologyJson),
+    loadCsvMaybe(dataConfig.neuronCsv),
+    loadCsvMaybe(dataConfig.synapseCsv),
+    loadCsvMaybe(dataConfig.spikesCsv),
+    loadCsvMaybe(dataConfig.metricsCsv),
+    loadCsvMaybe(dataConfig.weightsCsv),
+    loadJsonMaybe(dataConfig.topologyJson),
   ]);
 
   const neuronRows = neuronRes.data;
@@ -1575,18 +1596,24 @@ async function loadJson(path) {
 function updateDataStatus(results) {
   if (!metricNodes.status || !metricNodes.statusDot) return;
   const failures = results.filter((res) => !res.data && res.error);
+  const disabled = results.filter((res) => res?.disabled);
   if (failures.length > 0) {
-    metricNodes.status.textContent = `Missing data (${failures.length})`;
+    const suffix = disabled.length ? `, disabled ${disabled.length}` : "";
+    metricNodes.status.textContent = `Missing data (${failures.length}${suffix})`;
+    const disabledLines = disabled.map((res) => `${res.url}: disabled`);
     metricNodes.status.title = failures
       .map((res) => `${res.url}: ${res.error}`)
+      .concat(disabledLines)
       .join("\n");
     metricNodes.statusDot.parentElement?.classList.remove("live");
     return;
   }
 
   if (dataState.live) {
-    metricNodes.status.textContent = "Live data";
-    metricNodes.status.title = "";
+    metricNodes.status.textContent = disabled.length ? "Live data (some disabled)" : "Live data";
+    metricNodes.status.title = disabled.length
+      ? disabled.map((res) => `${res.url}: disabled`).join("\n")
+      : "";
     metricNodes.statusDot.parentElement?.classList.add("live");
   } else {
     metricNodes.status.textContent = "Demo data";

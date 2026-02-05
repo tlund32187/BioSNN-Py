@@ -16,7 +16,7 @@ def test_cli_demo_flag_defaults():
     assert args.monitor_safe_defaults is True
     assert args.monitor_neuron_sample == 512
     assert args.monitor_edge_sample == 20000
-    assert args.allow_cuda_monitor_sync is False
+    assert args.allow_cuda_monitor_sync is None
     assert args.parallel_compile == "auto"
     assert args.parallel_compile_workers == "auto"
     assert args.parallel_compile_torch_threads == 1
@@ -135,4 +135,5 @@ def test_cli_dashboard_url_params(tmp_path: Path):
     assert "synapse" in params
     assert "spikes" in params
     assert "metrics" in params
-    assert "weights" not in params
+    assert "weights" in params
+    assert params["weights"] == ["none"]

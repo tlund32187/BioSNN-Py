@@ -41,7 +41,7 @@ class DemoMinimalConfig:
     device: str = "cuda"
     profile: bool = False
     profile_steps: int = 20
-    allow_cuda_monitor_sync: bool = False
+    allow_cuda_monitor_sync: bool | None = None
     monitor_safe_defaults: bool = True
     monitor_neuron_sample: int = 512
     monitor_edge_sample: int = 20000
@@ -63,7 +63,11 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
     cuda_device = device == "cuda"
-    allow_cuda_sync = bool(cfg.allow_cuda_monitor_sync)
+    run_mode = cfg.mode.lower().strip()
+    allow_cuda_sync = cfg.allow_cuda_monitor_sync
+    if allow_cuda_sync is None:
+        allow_cuda_sync = run_mode == "dashboard"
+    allow_cuda_sync = bool(allow_cuda_sync)
     monitor_async_gpu = cuda_device and not allow_cuda_sync
 
     dtype = "float32"
@@ -111,7 +115,6 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
     spike_cap = min(cfg.spike_cap, 5000)
     safe_neuron_sample = cfg.monitor_neuron_sample if cfg.monitor_safe_defaults else None
 
-    run_mode = cfg.mode.lower().strip()
     monitors: list[IMonitor]
     if run_mode == "fast":
         monitors = [
