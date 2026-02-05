@@ -33,6 +33,14 @@ def main() -> None:
     print(f"Demo: {args.demo}")
 
     if args.demo == "network":
+        input_to_relay_p = args.input_to_relay_p
+        relay_to_hidden_p = args.relay_to_hidden_p
+        hidden_to_output_p = args.hidden_to_output_p
+        if args.p_in_hidden is not None:
+            input_to_relay_p = args.p_in_hidden
+            relay_to_hidden_p = args.p_in_hidden
+        if args.p_hidden_out is not None:
+            hidden_to_output_p = args.p_hidden_out
         run_demo_network(
             DemoNetworkConfig(
                 out_dir=run_dir,
@@ -43,10 +51,29 @@ def main() -> None:
                 n_in=args.n_in,
                 n_hidden=args.n_hidden,
                 n_out=args.n_out,
-                p_in_hidden=args.p_in_hidden,
-                p_hidden_out=args.p_hidden_out,
+                input_pops=args.input_pops,
+                input_depth=args.input_depth,
+                hidden_layers=args.hidden_layers,
+                hidden_pops_per_layer=args.hidden_pops_per_layer,
+                output_pops=args.output_pops,
+                input_cross=args.input_cross,
+                input_to_relay_p=input_to_relay_p,
+                input_to_relay_weight_scale=args.input_to_relay_weight_scale,
+                relay_to_hidden_p=relay_to_hidden_p,
+                relay_to_hidden_weight_scale=args.relay_to_hidden_weight_scale,
+                hidden_to_output_p=hidden_to_output_p,
+                hidden_to_output_weight_scale=args.hidden_to_output_weight_scale,
+                input_skip_to_hidden=args.input_skip_to_hidden,
+                input_skip_p=args.input_skip_p,
+                input_skip_weight_scale=args.input_skip_weight_scale,
+                relay_cross=args.relay_cross,
+                relay_cross_p=args.relay_cross_p,
+                relay_cross_weight_scale=args.relay_cross_weight_scale,
+                relay_lateral=args.relay_lateral,
+                hidden_lateral=args.hidden_lateral,
                 weight_init=args.weight_init,
                 input_drive=args.input_drive,
+                drive_monitor=args.drive_monitor,
             )
         )
     else:
@@ -94,10 +121,31 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--n-in", type=int, default=16)
     parser.add_argument("--n-hidden", type=int, default=64)
     parser.add_argument("--n-out", type=int, default=10)
-    parser.add_argument("--p-in-hidden", type=float, default=0.25)
-    parser.add_argument("--p-hidden-out", type=float, default=0.25)
+    parser.add_argument("--input-pops", type=int, default=2)
+    parser.add_argument("--input-depth", type=int, default=2)
+    parser.add_argument("--hidden-layers", type=int, default=1)
+    parser.add_argument("--hidden-pops-per-layer", type=int, default=1)
+    parser.add_argument("--output-pops", type=int, default=1)
+    parser.add_argument("--input-cross", action="store_true")
+    parser.add_argument("--p-in-hidden", type=float, default=None, help="legacy: use --relay-to-hidden-p")
+    parser.add_argument("--p-hidden-out", type=float, default=None, help="legacy: use --hidden-to-output-p")
+    parser.add_argument("--input-to-relay-p", type=float, default=0.35)
+    parser.add_argument("--input-to-relay-weight-scale", type=float, default=1.5)
+    parser.add_argument("--relay-to-hidden-p", type=float, default=0.20)
+    parser.add_argument("--relay-to-hidden-weight-scale", type=float, default=1.0)
+    parser.add_argument("--hidden-to-output-p", type=float, default=0.20)
+    parser.add_argument("--hidden-to-output-weight-scale", type=float, default=1.0)
+    parser.add_argument("--input-skip-to-hidden", action="store_true")
+    parser.add_argument("--input-skip-p", type=float, default=0.03)
+    parser.add_argument("--input-skip-weight-scale", type=float, default=0.5)
+    parser.add_argument("--relay-cross", action="store_true")
+    parser.add_argument("--relay-cross-p", type=float, default=0.05)
+    parser.add_argument("--relay-cross-weight-scale", type=float, default=0.2)
+    parser.add_argument("--relay-lateral", action="store_true")
+    parser.add_argument("--hidden-lateral", action="store_true")
     parser.add_argument("--weight-init", type=float, default=0.05)
     parser.add_argument("--input-drive", type=float, default=1.0)
+    parser.add_argument("--drive-monitor", action="store_true", help="write drive.csv diagnostics")
     parser.add_argument("--port", type=int)
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--refresh-ms", type=int, default=1200)

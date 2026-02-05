@@ -205,6 +205,13 @@ h1 {
   width: 70px;
 }
 
+.control-row input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  accent-color: var(--accent-2);
+}
+
 .control-row select {
   width: 140px;
 }
@@ -379,6 +386,14 @@ h1 {
 
 .dot-unknown {
   background: #94a3b8;
+}
+
+.dot-locality {
+  background: #a78bfa;
+}
+
+.dot-delay {
+  background: #5ddcff;
 }
 
 .empty-state {

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from biosnn.contracts.learning import ILearningRule
 from biosnn.contracts.modulators import IModulatorField, ModulatorKind
@@ -14,10 +14,26 @@ from biosnn.contracts.tensor import Tensor
 
 
 @dataclass(frozen=True, slots=True)
+class PopulationFrame:
+    origin: tuple[float, float, float]
+    extent: tuple[float, float, float]
+    layout: Literal["grid", "random", "ring", "line"]
+    seed: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NeuronPosition:
+    x: float
+    y: float
+    z: float
+
+
+@dataclass(frozen=True, slots=True)
 class PopulationSpec:
     name: str
     model: INeuronModel
     n: int
+    frame: PopulationFrame | Mapping[str, Any] | None = None
     positions: Tensor | None = None
     meta: Mapping[str, Any] | None = None
 
@@ -43,4 +59,10 @@ class ModulatorSpec:
     meta: Mapping[str, Any] | None = None
 
 
-__all__ = ["PopulationSpec", "ProjectionSpec", "ModulatorSpec"]
+__all__ = [
+    "PopulationFrame",
+    "NeuronPosition",
+    "PopulationSpec",
+    "ProjectionSpec",
+    "ModulatorSpec",
+]

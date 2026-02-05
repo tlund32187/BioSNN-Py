@@ -17,8 +17,8 @@ def test_demo_network_smoke(tmp_path):
         n_in=4,
         n_hidden=8,
         n_out=3,
-        p_in_hidden=0.5,
-        p_hidden_out=0.5,
+        relay_to_hidden_p=0.5,
+        hidden_to_output_p=0.5,
         input_drive=1.0,
     )
 

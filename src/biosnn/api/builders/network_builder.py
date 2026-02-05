@@ -462,6 +462,7 @@ def _replace_topology(topology: SynapseTopology, **kwargs: Any) -> SynapseTopolo
         "pre_idx": topology.pre_idx,
         "post_idx": topology.post_idx,
         "delay_steps": topology.delay_steps,
+        "edge_dist": topology.edge_dist,
         "target_compartment": topology.target_compartment,
         "target_compartments": topology.target_compartments,
         "receptor": topology.receptor,

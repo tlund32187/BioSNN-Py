@@ -80,6 +80,14 @@
                     <option value="spatial">Spatial</option>
                   </select>
                 </label>
+                <label>
+                  <input id="edgeOpacityByDistance" type="checkbox" checked />
+                  Edge opacity by distance
+                </label>
+                <label>
+                  <input id="showDelayTooltip" type="checkbox" checked />
+                  Show delay in tooltip
+                </label>
                 <span id="neuronClampBadge" class="chip warn hidden">Clamped to 512</span>
               </div>
               <span class="chip">Topology + weights</span>
@@ -96,6 +104,8 @@
             <span><i class="dot dot-glif"></i> GLIF</span>
             <span><i class="dot dot-adex"></i> AdEx</span>
             <span><i class="dot dot-unknown"></i> Other</span>
+            <span id="legendLocality"><i class="dot dot-locality"></i> Opacity ~ locality (short = bright)</span>
+            <span id="legendDelay"><i class="dot dot-delay"></i> delay shown in tooltip</span>
           </div>
           <div id="neuronSampleInfo" class="neuron-sample-info"></div>
         </section>
@@ -150,18 +160,26 @@
           <canvas id="heatmapInput"></canvas>
         </section>
 
-        <section class="card card-heatmap" data-title="Hidden ? Output">
+        <section class="card card-heatmap" data-title="Weight Matrix (Secondary)">
           <div class="card-header">
-            <h2>Hidden ? Output</h2>
-            <span class="chip">Weights</span>
+            <div>
+              <h2>Weight Matrix (Secondary)</h2>
+              <p class="subhead" id="weightProjectionLabel2">--</p>
+            </div>
+            <div class="header-actions">
+              <div class="control-row">
+                <label>Proj <select id="weightProjectionSelect2"></select></label>
+              </div>
+              <span class="chip">Weights</span>
+            </div>
           </div>
           <canvas id="heatmapOutput"></canvas>
         </section>
 
         <section class="card card-bars">
           <div class="card-header">
-            <h2>Spike Rates (Hidden)</h2>
-            <span class="chip">Target 40 Hz</span>
+            <h2>Spike Rates (Per-pop)</h2>
+            <span class="chip">Per population</span>
           </div>
           <canvas id="rateCanvas"></canvas>
         </section>

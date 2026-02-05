@@ -36,6 +36,7 @@ def compile_topology(
     pre_idx = cast(Tensor, pre_idx)
     post_idx = cast(Tensor, post_idx)
     delay_steps = _to_long(topology.delay_steps, device_obj, name="delay_steps")
+    edge_dist = _to_float(topology.edge_dist, device_obj, name="edge_dist")
     receptor = _to_long(topology.receptor, device_obj, name="receptor")
     target_compartments = _to_long(
         topology.target_compartments, device_obj, name="target_compartments"
@@ -222,6 +223,7 @@ def compile_topology(
     object.__setattr__(topology, "pre_idx", pre_idx)
     object.__setattr__(topology, "post_idx", post_idx)
     object.__setattr__(topology, "delay_steps", delay_steps)
+    object.__setattr__(topology, "edge_dist", edge_dist)
     object.__setattr__(topology, "receptor", receptor)
     object.__setattr__(topology, "target_compartments", target_compartments)
     object.__setattr__(topology, "weights", weights)
@@ -261,6 +263,19 @@ def _to_long(tensor: Tensor | None, device: Any, *, name: str) -> Tensor | None:
             return cast(Tensor, tensor.to(device=device, dtype=torch.long))
         return cast(Tensor, tensor.to(dtype=torch.long))
     return cast(Tensor, torch.tensor(tensor, device=device, dtype=torch.long))
+
+
+def _to_float(tensor: Tensor | None, device: Any, *, name: str) -> Tensor | None:
+    if tensor is None:
+        return None
+    torch = require_torch()
+    if hasattr(tensor, "dim") and tensor.dim() != 1:
+        raise ValueError(f"{name} must be 1D, got {tuple(tensor.shape)}")
+    if hasattr(tensor, "to"):
+        if device is not None:
+            return cast(Tensor, tensor.to(device=device, dtype=torch.float32))
+        return cast(Tensor, tensor.to(dtype=torch.float32))
+    return cast(Tensor, torch.tensor(tensor, device=device, dtype=torch.float32))
 
 
 def _infer_size(indices: Tensor | None) -> int:

@@ -23,12 +23,14 @@ class SynapseTopology:
 
     pre_idx/post_idx are edge-indexed arrays mapping edges to neuron indices.
     delay_steps is optional and can be used by the simulation engine's delay buffer.
+    edge_dist optionally stores per-edge distances aligned with pre/post indices.
     target_compartments/receptor are optional per-edge annotations (int-coded).
     """
 
     pre_idx: Tensor      # shape [E] (int64)
     post_idx: Tensor     # shape [E] (int64)
     delay_steps: Tensor | None = None  # shape [E] (int32)
+    edge_dist: Tensor | None = None  # shape [E] (float)
     target_compartment: Compartment = Compartment.DENDRITE
     target_compartments: Tensor | None = None  # shape [E] (int64; encoded Compartment ids)
     receptor: Tensor | None = None  # shape [E] (int64; receptor id per edge)

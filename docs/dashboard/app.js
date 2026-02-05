@@ -23,10 +23,16 @@ const uiControls = {
   neuronViewMode: document.getElementById("neuronViewMode"),
   neuronSampleMode: document.getElementById("neuronSampleMode"),
   neuronLayoutMode: document.getElementById("neuronLayoutMode"),
+  edgeOpacityByDistance: document.getElementById("edgeOpacityByDistance"),
+  showDelayTooltip: document.getElementById("showDelayTooltip"),
   neuronSampleInfo: document.getElementById("neuronSampleInfo"),
   neuronClampBadge: document.getElementById("neuronClampBadge"),
   neuronControls: document.getElementById("neuronControls"),
+  legendLocality: document.getElementById("legendLocality"),
+  legendDelay: document.getElementById("legendDelay"),
   weightProjection: document.getElementById("weightProjectionSelect"),
+  weightProjection2: document.getElementById("weightProjectionSelect2"),
+  weightProjectionLabel2: document.getElementById("weightProjectionLabel2"),
   weightStep: document.getElementById("weightStepSelect"),
   weightClampMin: document.getElementById("weightClampMin"),
   weightClampMax: document.getElementById("weightClampMax"),
@@ -55,6 +61,8 @@ const theme = {
   input: "#60a5fa",
   hidden: "#6ee7b7",
   output: "#f97316",
+  inputRelay: "#7da0d4",
+  relay: "#93c5fd",
   excit: "#38bdf8",
   inhib: "#fb7185",
   accent: "#5ddcff",
@@ -63,6 +71,23 @@ const theme = {
   modelUnknown: "#94a3b8",
   heat: ["#13172b", "#334155", "#7c3aed", "#22d3ee", "#facc15"],
 };
+
+function inferRoleFromPopName(name) {
+  const lowered = String(name || "").toLowerCase();
+  if (lowered.startsWith("inputrelay") || lowered.includes("relay")) {
+    return "input_relay";
+  }
+  if (lowered.startsWith("input")) {
+    return "input";
+  }
+  if (lowered.startsWith("hidden")) {
+    return "hidden";
+  }
+  if (lowered.startsWith("output")) {
+    return "output";
+  }
+  return "unknown";
+}
 
 const dataConfig = (() => {
   const params = new URLSearchParams(window.location.search);
@@ -199,6 +224,8 @@ function buildPopulationIndexMap(popTopology) {
   popTopology.nodes.forEach((node) => {
     const n = Number(node.nNeurons ?? 0);
     const name = node.id ?? node.label ?? `pop_${pops.length}`;
+    const role = node.role ?? inferRoleFromPopName(name);
+    const group = node.group ?? null;
     const pop = {
       name,
       n,
@@ -207,6 +234,8 @@ function buildPopulationIndexMap(popTopology) {
       layer: Number(node.layer ?? 0),
       x: clamp01(node.x ?? Math.random()),
       y: clamp01(node.y ?? Math.random()),
+      role,
+      group,
     };
     pops.push(pop);
     offset += n;
@@ -388,6 +417,8 @@ function updateNeuronControlsEnabled() {
     uiControls.neuronViewMode,
     uiControls.neuronSampleMode,
     uiControls.neuronLayoutMode,
+    uiControls.edgeOpacityByDistance,
+    uiControls.showDelayTooltip,
   ].forEach((control) => {
     if (control) control.disabled = !enabled;
   });
@@ -402,6 +433,23 @@ function readNeuronViewSettings() {
   const sampleMode = uiControls.neuronSampleMode?.value || "evenlySpaced";
   const layoutMode = uiControls.neuronLayoutMode?.value || "layered";
   return { maxPerPop, mode, sampleMode, layoutMode };
+}
+
+function readEdgeViewSettings() {
+  return {
+    edgeOpacityByDistance: Boolean(uiControls.edgeOpacityByDistance?.checked),
+    showDelayTooltip: Boolean(uiControls.showDelayTooltip?.checked),
+  };
+}
+
+function updateLegendNotes() {
+  const settings = readEdgeViewSettings();
+  if (uiControls.legendLocality) {
+    uiControls.legendLocality.classList.toggle("hidden", !settings.edgeOpacityByDistance);
+  }
+  if (uiControls.legendDelay) {
+    uiControls.legendDelay.classList.toggle("hidden", !settings.showDelayTooltip);
+  }
 }
 
 function applyNeuronViewSettings() {
@@ -528,7 +576,10 @@ function buildNeuronTopologyFromPopulations(popTopology, popIndex, neuronView) {
         globalIdx,
         x,
         y,
+        pos: null,
         layer: pop.layer,
+        role: pop.role || "unknown",
+        group: pop.group ?? null,
       });
       nodeIndexByGlobal.set(globalIdx, nodes.length - 1);
     });
@@ -614,6 +665,8 @@ function buildNeuronTopologyFromPayload(neuronPayload, popIndex, neuronView) {
     const popInfo = popIndex.popFromGlobalIndex(globalIdx);
     const popName = node.pop ?? popInfo?.popName ?? "pop";
     const localIdx = node.local_idx ?? node.localIdx ?? popInfo?.localIdx ?? 0;
+    const pop = popIndex.byName.get(popName);
+    const pos = parseNodePos(node.pos);
     nodes.push({
       index: globalIdx,
       pop: popName,
@@ -621,7 +674,10 @@ function buildNeuronTopologyFromPayload(neuronPayload, popIndex, neuronView) {
       globalIdx,
       x: clamp01(node.x ?? Math.random()),
       y: clamp01(node.y ?? Math.random()),
-      layer: Number(node.layer ?? 0),
+      pos,
+      layer: Number(node.layer ?? pop?.layer ?? 0),
+      role: pop?.role ?? inferRoleFromPopName(popName),
+      group: pop?.group ?? null,
     });
     nodeIndexByGlobal.set(globalIdx, nodes.length - 1);
   });
@@ -635,11 +691,18 @@ function buildNeuronTopologyFromPayload(neuronPayload, popIndex, neuronView) {
       const fromIdx = nodeIndexByGlobal.get(fromGlobal);
       const toIdx = nodeIndexByGlobal.get(toGlobal);
       if (fromIdx === undefined || toIdx === undefined) return;
+      const delaySteps =
+        edge.delay_steps !== undefined
+          ? Number(edge.delay_steps)
+          : edge.delaySteps !== undefined
+            ? Number(edge.delaySteps)
+            : null;
       edges.push({
         from: fromIdx,
         to: toIdx,
         weight: Number(edge.weight ?? 0),
         receptor: edge.receptor || "ampa",
+        delaySteps: Number.isFinite(delaySteps) ? delaySteps : null,
       });
     });
   }
@@ -651,7 +714,7 @@ function applyNeuronLayout(nodes, popIndex, layoutMode) {
   const marginX = 0.08;
   const marginY = 0.08;
   if (layoutMode === "spatial") {
-    normalizeNodePositions(nodes, marginX, marginY);
+    normalizeNodePositions(nodes, marginX, marginY, true);
     return;
   }
   if (popIndex) {
@@ -666,41 +729,68 @@ function applyNeuronLayout(nodes, popIndex, layoutMode) {
     if (groups.size > 0) {
       const orderedPops = [...popIndex.pops].sort((a, b) => a.layer - b.layer);
       const activePops = orderedPops.filter((pop) => groups.has(pop.name));
-      const count = activePops.length || groups.size;
-      const step = count > 1 ? (1 - 2 * marginX) / (count - 1) : 0;
-      activePops.forEach((pop, idx) => {
-        const group = groups.get(pop.name) || [];
-        group.sort((a, b) => (a.localIdx ?? 0) - (b.localIdx ?? 0));
-        const x = marginX + step * idx;
-        const n = group.length;
-        group.forEach((node, i) => {
-          const y = marginY + ((i + 1) / (n + 1)) * (1 - 2 * marginY);
-          node.x = clamp01(x + jitterForIndex(node.localIdx ?? i, 0.015));
-          node.y = clamp01(y);
+      const byLayer = new Map();
+      activePops.forEach((pop) => {
+        if (!byLayer.has(pop.layer)) {
+          byLayer.set(pop.layer, []);
+        }
+        byLayer.get(pop.layer).push(pop);
+      });
+      const layers = [...byLayer.keys()].sort((a, b) => a - b);
+      const layerCount = layers.length || 1;
+      const layerStep = layerCount > 1 ? (1 - 2 * marginX) / (layerCount - 1) : 0;
+      layers.forEach((layerVal, layerIdx) => {
+        const popsInLayer = byLayer.get(layerVal) || [];
+        popsInLayer.sort((a, b) => {
+          const ga = a.group ?? a.name;
+          const gb = b.group ?? b.name;
+          if (ga < gb) return -1;
+          if (ga > gb) return 1;
+          return a.name.localeCompare(b.name);
+        });
+        const band = Math.min(0.10, layerStep * 0.65);
+        const k = popsInLayer.length || 1;
+        popsInLayer.forEach((pop, idx) => {
+          const offset = k === 1 ? 0 : -band / 2 + (idx / (k - 1)) * band;
+          const x = marginX + layerStep * layerIdx + offset;
+          const group = groups.get(pop.name) || [];
+          group.sort((a, b) => (a.localIdx ?? 0) - (b.localIdx ?? 0));
+          const n = group.length;
+          group.forEach((node, i) => {
+            const y = marginY + ((i + 1) / (n + 1)) * (1 - 2 * marginY);
+            node.x = clamp01(x + jitterForIndex(node.localIdx ?? i, 0.015));
+            node.y = clamp01(y);
+          });
         });
       });
       return;
     }
   }
-  normalizeNodePositions(nodes, marginX, marginY);
+  normalizeNodePositions(nodes, marginX, marginY, false);
 }
 
-function normalizeNodePositions(nodes, marginX, marginY) {
+function normalizeNodePositions(nodes, marginX, marginY, usePos) {
   let minX = Infinity;
   let maxX = -Infinity;
   let minY = Infinity;
   let maxY = -Infinity;
   nodes.forEach((node) => {
-    minX = Math.min(minX, node.x ?? 0);
-    maxX = Math.max(maxX, node.x ?? 0);
-    minY = Math.min(minY, node.y ?? 0);
-    maxY = Math.max(maxY, node.y ?? 0);
+    const pos = usePos ? parseNodePos(node.pos) : null;
+    const rawX = pos ? pos[0] : node.x ?? 0;
+    const rawY = pos ? pos[1] : node.y ?? 0;
+    minX = Math.min(minX, rawX);
+    maxX = Math.max(maxX, rawX);
+    minY = Math.min(minY, rawY);
+    maxY = Math.max(maxY, rawY);
   });
   const rangeX = Math.max(maxX - minX, 1e-6);
   const rangeY = Math.max(maxY - minY, 1e-6);
   nodes.forEach((node) => {
-    const nx = (node.x - minX) / rangeX;
-    const ny = (node.y - minY) / rangeY;
+    const pos = usePos ? parseNodePos(node.pos) : null;
+    const rawX = pos ? pos[0] : node.x ?? 0;
+    const rawY = pos ? pos[1] : node.y ?? 0;
+    const nx = (rawX - minX) / rangeX;
+    const ny = (rawY - minY) / rangeY;
     node.x = marginX + nx * (1 - 2 * marginX);
     node.y = marginY + ny * (1 - 2 * marginY);
   });
@@ -718,6 +808,8 @@ function normalizePopulationTopology(topology) {
     layer: Number(node.layer ?? 0),
     nNeurons: Number(node.n_neurons ?? node.n ?? 0),
     model: String(node.model ?? "unknown").toLowerCase(),
+    role: node.role ?? node.meta?.role ?? inferRoleFromPopName(node.id ?? node.label ?? ""),
+    group: node.group ?? node.meta?.group ?? null,
     x: clamp01(node.x ?? Math.random()),
     y: clamp01(node.y ?? Math.random()),
   }));
@@ -757,6 +849,53 @@ function resolveNetworkView() {
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, Number(value)));
+}
+
+function parseNodePos(raw) {
+  if (!raw) return null;
+  if (Array.isArray(raw)) {
+    if (raw.length >= 2) {
+      return [
+        Number(raw[0]) || 0,
+        Number(raw[1]) || 0,
+        Number(raw[2] ?? 0) || 0,
+      ];
+    }
+    return null;
+  }
+  if (typeof raw === "object") {
+    if ("x" in raw && "y" in raw) {
+      return [
+        Number(raw.x) || 0,
+        Number(raw.y) || 0,
+        Number(raw.z ?? 0) || 0,
+      ];
+    }
+  }
+  return null;
+}
+
+function buildPosByNodeId(nodes) {
+  if (!nodes) return null;
+  const posById = new Array(nodes.length).fill(null);
+  nodes.forEach((node, idx) => {
+    const pos = parseNodePos(node.pos);
+    if (pos) {
+      posById[idx] = pos;
+    }
+  });
+  return posById;
+}
+
+function distanceForEdge(posById, edge) {
+  if (!posById) return null;
+  const a = posById[edge.from];
+  const b = posById[edge.to];
+  if (!a || !b) return null;
+  const dx = a[0] - b[0];
+  const dy = a[1] - b[1];
+  const dz = a[2] - b[2];
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
 function buildRaster(rows, cols) {
@@ -905,26 +1044,86 @@ function drawNeuronNetwork() {
   ctx.fillStyle = theme.background;
   ctx.fillRect(0, 0, width, height);
 
+  const edgeSettings = readEdgeViewSettings();
+  const useEdgeDistance =
+    edgeSettings.edgeOpacityByDistance || edgeSettings.showDelayTooltip;
+  const posById = useEdgeDistance ? buildPosByNodeId(network.nodes) : null;
+  let edgeDistances = null;
+  let dMin = Infinity;
+  let dMax = -Infinity;
+  if (useEdgeDistance) {
+    edgeDistances = new Array(network.edges.length).fill(null);
+    network.edges.forEach((edge, idx) => {
+      const dist = distanceForEdge(posById, edge);
+      edgeDistances[idx] = dist;
+      if (edgeSettings.edgeOpacityByDistance && dist !== null) {
+        dMin = Math.min(dMin, dist);
+        dMax = Math.max(dMax, dist);
+      }
+    });
+    if (!Number.isFinite(dMin) || !Number.isFinite(dMax)) {
+      dMin = 0;
+      dMax = 0;
+    }
+  }
+
+  const screenEdges = [];
   ctx.lineWidth = 1;
-  network.edges.forEach((edge) => {
+  network.edges.forEach((edge, idx) => {
     const from = network.nodes[edge.from];
     const to = network.nodes[edge.to];
     if (!from || !to) return;
     const weight = edge.weight || 0;
     const color = weight >= 0 ? theme.excit : theme.inhib;
+    const distance = edgeDistances ? edgeDistances[idx] : null;
+    let alpha = Math.min(0.6, Math.abs(weight)) + 0.1;
+    if (edgeSettings.edgeOpacityByDistance && distance !== null && dMax > dMin) {
+      const t = (distance - dMin) / (dMax - dMin + 1e-9);
+      const localityAlpha = 0.10 + 0.90 * Math.pow(1 - clamp01(t), 2);
+      alpha *= localityAlpha;
+    }
     ctx.strokeStyle = color;
-    ctx.globalAlpha = Math.min(0.6, Math.abs(weight)) + 0.1;
+    ctx.globalAlpha = alpha;
+    const x1 = from.x * width;
+    const y1 = from.y * height;
+    const x2 = to.x * width;
+    const y2 = to.y * height;
     ctx.beginPath();
-    ctx.moveTo(from.x * width, from.y * height);
-    ctx.lineTo(to.x * width, to.y * height);
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
     ctx.stroke();
+    screenEdges.push({
+      edge,
+      from,
+      to,
+      x1,
+      y1,
+      x2,
+      y2,
+      thickness: 1,
+      distance,
+    });
   });
   ctx.globalAlpha = 1;
 
   const screenNodes = [];
   network.nodes.forEach((node) => {
-    const radius = node.layer === 1 ? 4.5 : 4;
-    const fill = node.layer === 0 ? theme.input : node.layer === 1 ? theme.hidden : theme.output;
+    const role = node.role || "unknown";
+    const radius = role === "hidden" ? 4.5 : 4;
+    let fill = theme.output;
+    if (role === "input") {
+      fill = theme.input;
+    } else if (role === "input_relay") {
+      fill = theme.relay;
+    } else if (role === "hidden") {
+      fill = theme.hidden;
+    } else if (role === "output") {
+      fill = theme.output;
+    } else if (node.layer === 0) {
+      fill = theme.input;
+    } else if (node.layer === 1) {
+      fill = theme.hidden;
+    }
     ctx.fillStyle = fill;
     ctx.beginPath();
     ctx.arc(node.x * width, node.y * height, radius, 0, Math.PI * 2);
@@ -938,8 +1137,9 @@ function drawNeuronNetwork() {
   });
 
   if (networkNeuron) {
-    networkNeuron._screen = { nodes: screenNodes };
+    networkNeuron._screen = { nodes: screenNodes, edges: screenEdges };
   }
+  drawNeuronLegend(ctx, width, height);
 }
 
 
@@ -1002,7 +1202,16 @@ function drawPopulationNetwork() {
     const y = node.y * height;
     const radius = radiusFor(node.nNeurons);
     let fill = theme.modelUnknown;
-    if (node.model.includes("glif")) {
+    const role = String(node.role || "").toLowerCase();
+    if (role === "input") {
+      fill = theme.input;
+    } else if (role === "input_relay") {
+      fill = theme.inputRelay;
+    } else if (role === "hidden") {
+      fill = theme.hidden;
+    } else if (role === "output") {
+      fill = theme.output;
+    } else if (node.model.includes("glif")) {
       fill = theme.modelGlif;
     } else if (node.model.includes("adex")) {
       fill = theme.modelAdex;
@@ -1021,6 +1230,71 @@ function drawPopulationNetwork() {
   });
 
   networkPopulation._screen = { nodes: screenNodes, edges: screenEdges };
+}
+
+function drawNeuronLegend(ctx, width, height) {
+  const x = 12;
+  const y = 12;
+  const boxW = 160;
+  const boxH = 96;
+  ctx.save();
+  ctx.globalAlpha = 0.9;
+  ctx.fillStyle = "rgba(12, 18, 34, 0.85)";
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.2)";
+  ctx.lineWidth = 1;
+  _roundedRect(ctx, x, y, boxW, boxH, 10);
+  ctx.fill();
+  ctx.stroke();
+
+  const items = [
+    { label: "Input", color: theme.input },
+    { label: "Input relay", color: theme.relay },
+    { label: "Hidden", color: theme.hidden },
+    { label: "Output", color: theme.output },
+  ];
+  ctx.font = "10px 'Space Grotesk'";
+  ctx.fillStyle = theme.text;
+  let offsetY = y + 18;
+  items.forEach((item) => {
+    ctx.fillStyle = item.color;
+    ctx.beginPath();
+    ctx.arc(x + 12, offsetY - 4, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = theme.text;
+    ctx.fillText(item.label, x + 24, offsetY);
+    offsetY += 14;
+  });
+
+  ctx.strokeStyle = theme.excit;
+  ctx.beginPath();
+  ctx.moveTo(x + 12, y + boxH - 18);
+  ctx.lineTo(x + 40, y + boxH - 18);
+  ctx.stroke();
+  ctx.fillStyle = theme.text;
+  ctx.fillText("Excitatory", x + 46, y + boxH - 14);
+
+  ctx.strokeStyle = theme.inhib;
+  ctx.beginPath();
+  ctx.moveTo(x + 12, y + boxH - 6);
+  ctx.lineTo(x + 40, y + boxH - 6);
+  ctx.stroke();
+  ctx.fillStyle = theme.text;
+  ctx.fillText("Inhibitory", x + 46, y + boxH - 2);
+  ctx.restore();
+}
+
+function _roundedRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
 }
 
 function drawRaster() {
@@ -1098,6 +1372,47 @@ function drawBars(canvas, count, color, values) {
   ctx.lineTo(width, height * 0.45);
   ctx.stroke();
   ctx.setLineDash([]);
+}
+
+function drawBarsWithLabels(canvas, labels, values, color) {
+  const ctx = setupCanvas(canvas);
+  if (!ctx) return;
+  const { width, height } = canvas.getBoundingClientRect();
+  ctx.fillStyle = theme.background;
+  ctx.fillRect(0, 0, width, height);
+
+  const count = Math.max(1, labels.length);
+  const gap = 3;
+  const barWidth = (width - gap * (count - 1)) / count;
+  const maxVal = Math.max(...values, 1e-6);
+  for (let i = 0; i < count; i += 1) {
+    const value = values[i % values.length] || 0;
+    const norm = Math.min(1, value / maxVal);
+    const barHeight = norm * (height - 20) + 6;
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.55 + norm * 0.45;
+    ctx.fillRect(i * (barWidth + gap), height - barHeight - 12, barWidth, barHeight);
+  }
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = theme.accent;
+  ctx.setLineDash([4, 6]);
+  ctx.beginPath();
+  ctx.moveTo(0, height * 0.45);
+  ctx.lineTo(width, height * 0.45);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = theme.muted;
+  ctx.font = "10px 'Space Grotesk'";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  const maxLabels = Math.max(1, Math.floor(width / 60));
+  const labelEvery = Math.max(1, Math.ceil(labels.length / maxLabels));
+  labels.forEach((label, idx) => {
+    if (idx % labelEvery !== 0) return;
+    const x = idx * (barWidth + gap) + barWidth / 2;
+    ctx.fillText(label, x, height);
+  });
 }
 
 function drawHistogram(canvas, values) {
@@ -1379,6 +1694,7 @@ function hideNetworkTooltip() {
 }
 
 function onNetworkHover(event) {
+  const edgeSettings = readEdgeViewSettings();
   if (networkView === "neurons" && networkNeuron?._screen) {
     const rect = canvases.network.getBoundingClientRect();
     const mx = event.clientX - rect.left;
@@ -1402,6 +1718,33 @@ function onNetworkHover(event) {
           mx,
           my
         );
+        return;
+      }
+    }
+    if (edgeSettings.showDelayTooltip && Array.isArray(screen.edges)) {
+      let best = null;
+      let bestDist = Infinity;
+      for (const item of screen.edges) {
+        const dist = pointLineDistance(mx, my, item.x1, item.y1, item.x2, item.y2);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = item;
+        }
+      }
+      if (best && bestDist <= Math.max(6, best.thickness + 3)) {
+        const fromNode = best.from;
+        const toNode = best.to;
+        const fromLabel = `${fromNode.pop || "pop"}[${fromNode.localIdx ?? fromNode.index ?? 0}]`;
+        const toLabel = `${toNode.pop || "pop"}[${toNode.localIdx ?? toNode.index ?? 0}]`;
+        let html = `<strong>${fromLabel} -> ${toLabel}</strong><br/>` +
+          `Weight: ${(best.edge.weight ?? 0).toFixed(3)}`;
+        if (best.distance !== null && best.distance !== undefined) {
+          html += `<br/>Dist: ${best.distance.toFixed(3)}`;
+        }
+        if (edgeSettings.showDelayTooltip && best.edge.delaySteps !== null && best.edge.delaySteps !== undefined) {
+          html += `<br/>Delay: ${best.edge.delaySteps} steps`;
+        }
+        showNetworkTooltip(html, mx, my);
         return;
       }
     }
@@ -1439,14 +1782,14 @@ function onNetworkHover(event) {
     if (dist <= Math.max(6, item.thickness + 3)) {
       const edge = item.edge;
       const delayText = edge.meanDelay === null ? "n/a" : edge.meanDelay.toFixed(2);
-      showNetworkTooltip(
+      let html =
         `<strong>${edge.from} -> ${edge.to}</strong><br/>` +
-          `Synapses: ${edge.nSynapses}<br/>` +
-          `Weight: ${edge.meanWeight.toFixed(3)} +/- ${edge.stdWeight.toFixed(3)}<br/>` +
-          `Delay steps: ${delayText}`,
-        mx,
-        my
-      );
+        `Synapses: ${edge.nSynapses}<br/>` +
+        `Weight: ${edge.meanWeight.toFixed(3)} +/- ${edge.stdWeight.toFixed(3)}`;
+      if (edgeSettings.showDelayTooltip) {
+        html += `<br/>Delay steps: ${delayText}`;
+      }
+      showNetworkTooltip(html, mx, my);
       return;
     }
   }
@@ -1508,6 +1851,22 @@ function refreshWeightSelectors() {
       .map((step) => `<option value="${step}">${step}</option>`)
       .join("");
     uiControls.weightStep.value = steps.includes(currentStep) ? currentStep : steps[steps.length - 1];
+  }
+
+  if (uiControls.weightProjection2) {
+    const primary = uiControls.weightProjection.value;
+    const defaultSecondary =
+      projections.find((proj) => proj.toLowerCase().includes("hidden->output")) ||
+      projections.find((proj) => proj !== primary) ||
+      projections[0];
+    const currentSecondary = uiControls.weightProjection2.value;
+    uiControls.weightProjection2.innerHTML = projections
+      .map((proj) => `<option value="${proj}">${proj}</option>`)
+      .join("");
+    uiControls.weightProjection2.value =
+      projections.includes(currentSecondary) && currentSecondary !== primary
+        ? currentSecondary
+        : defaultSecondary;
   }
 }
 
@@ -1581,6 +1940,12 @@ function drawSpikeRasterFromEvents(rows) {
   });
   totalRows = Math.max(totalRows, 1);
 
+  const activePops = new Set();
+  filtered.forEach((row) => {
+    const pop = row.pop || "pop0";
+    activePops.add(pop);
+  });
+
   filtered.forEach((row) => {
     const pop = row.pop || "pop0";
     const offset = offsets[pop] ?? 0;
@@ -1598,6 +1963,46 @@ function drawSpikeRasterFromEvents(rows) {
     ctx.fillStyle = color;
     ctx.fillRect(x, y, 2, 2);
   });
+
+  const fontSize = 10;
+  ctx.font = `${fontSize}px 'Space Grotesk'`;
+  ctx.fillStyle = theme.muted;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+
+  const maxLabels = Math.floor(height / 28);
+  const labelEvery = Math.max(1, Math.ceil(popInfo.order.length / Math.max(1, maxLabels)));
+
+  popInfo.order.forEach((pop, idx) => {
+    const start = offsets[pop] ?? 0;
+    const size = popInfo.sizes[pop] || 0;
+    const bandCenter = (start + size * 0.5) / totalRows * height;
+
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.25)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, (start / totalRows) * height);
+    ctx.lineTo(width, (start / totalRows) * height);
+    ctx.stroke();
+
+    if (idx % labelEvery === 0 && size > 0) {
+      ctx.fillText(pop, 6, bandCenter);
+    }
+  });
+
+  if (activePops.size > 0) {
+    const nonInputActive = Array.from(activePops).some(
+      (pop) => !String(pop).toLowerCase().includes("input")
+    );
+    if (!nonInputActive) {
+      ctx.fillStyle = theme.output;
+      ctx.fillText(
+        "Only input spikes in this window (no hidden/output events).",
+        12,
+        height - 12
+      );
+    }
+  }
 }
 
 function drawAccuracyChart() {
@@ -1686,7 +2091,7 @@ function smoothSeries(values, window) {
 
 function buildWeightMatrix(edges, nPre, nPost, maxDim) {
   if (!edges || edges.length === 0) {
-    return { matrix: [[0]], nPre: 1, nPost: 1 };
+    return { matrix: [[0]], counts: [[0]], nPre: 1, nPost: 1 };
   }
   let preDim = nPre || 0;
   let postDim = nPost || 0;
@@ -1718,10 +2123,10 @@ function buildWeightMatrix(edges, nPre, nPost, maxDim) {
     }
   }
 
-  return { matrix, nPre: preDim, nPost: postDim };
+  return { matrix, counts, nPre: preDim, nPost: postDim };
 }
 
-function drawHeatmapMatrix(canvas, matrix, clampMin, clampMax) {
+function drawHeatmapMatrix(canvas, matrix, clampMin, clampMax, counts) {
   const ctx = setupCanvas(canvas);
   if (!ctx) return;
   const { width, height } = canvas.getBoundingClientRect();
@@ -1735,16 +2140,20 @@ function drawHeatmapMatrix(canvas, matrix, clampMin, clampMax) {
 
   const minVal = clampMin ?? -1;
   const maxVal = clampMax ?? 1;
-  const span = maxVal - minVal || 1;
+  const maxAbs = Math.max(Math.abs(minVal), Math.abs(maxVal), 1e-6);
 
   for (let r = 0; r < rows; r += 1) {
     for (let c = 0; c < cols; c += 1) {
       const value = matrix[r][c];
-      const norm = (value - minVal) / span;
-      const clamped = Math.max(0, Math.min(1, norm));
+      const count = counts ? counts[r][c] : 1;
+      if (count <= 0) {
+        continue;
+      }
+      const mag = Math.min(Math.abs(value), maxAbs);
+      const clamped = mag / maxAbs;
       const color = value >= 0 ? theme.excit : theme.inhib;
       ctx.fillStyle = color;
-      ctx.globalAlpha = 0.2 + clamped * 0.8;
+      ctx.globalAlpha = 0.15 + clamped * 0.85;
       ctx.fillRect(c * cellW, r * cellH, cellW, cellH);
     }
   }
@@ -1771,17 +2180,20 @@ function renderWeightHeatmaps() {
   const clampMax = uiControls.weightClampMax ? Number(uiControls.weightClampMax.value) : 1;
   const maxDim = uiControls.weightMaxDim ? Number(uiControls.weightMaxDim.value) : 64;
 
-  const { matrix } = buildWeightMatrix(edges, 0, 0, maxDim);
-  drawHeatmapMatrix(canvases.heatmapInput, matrix, clampMin, clampMax);
+  const { matrix, counts } = buildWeightMatrix(edges, 0, 0, maxDim);
+  drawHeatmapMatrix(canvases.heatmapInput, matrix, clampMin, clampMax, counts);
 
-  if (projections.length > 1) {
-    const secondary = projections.find((proj) => proj !== selectedProj) || projections[0];
-    const sEdges = dataState.weightsIndex[secondary]?.byStep[selectedStep] || [];
-    const sMatrix = buildWeightMatrix(sEdges, 0, 0, maxDim).matrix;
-    drawHeatmapMatrix(canvases.heatmapOutput, sMatrix, clampMin, clampMax);
-  } else {
-    drawHeatmapMatrix(canvases.heatmapOutput, matrix, clampMin, clampMax);
+  const secondary =
+    uiControls.weightProjection2?.value ||
+    projections.find((proj) => proj.toLowerCase().includes("hidden->output")) ||
+    projections.find((proj) => proj !== selectedProj) ||
+    projections[0];
+  if (uiControls.weightProjectionLabel2) {
+    uiControls.weightProjectionLabel2.textContent = secondary || "--";
   }
+  const sEdges = dataState.weightsIndex[secondary]?.byStep[selectedStep] || [];
+  const { matrix: sMatrix, counts: sCounts } = buildWeightMatrix(sEdges, 0, 0, maxDim);
+  drawHeatmapMatrix(canvases.heatmapOutput, sMatrix, clampMin, clampMax, sCounts);
 }
 
 function getSelectedWeightsEdges() {
@@ -1804,7 +2216,7 @@ function extractWeightSamples() {
   return edges.map((edge) => edge.w);
 }
 
-function computeSpikeRates() {
+function computePerPopSpikeRates() {
   if (!dataState.spikesRows || dataState.spikesRows.length === 0) return null;
   const lastRow = dataState.spikesRows[dataState.spikesRows.length - 1];
   const maxStep = Number(lastRow.step || 0);
@@ -1812,6 +2224,7 @@ function computeSpikeRates() {
   const minStep = Math.max(0, maxStep - windowSteps + 1);
   const popInfo = getPopulationInfo();
   const counts = {};
+
   dataState.spikesRows.forEach((row) => {
     const step = Number(row.step || 0);
     if (step < minStep) return;
@@ -1828,6 +2241,21 @@ function computeSpikeRates() {
   return { rates, labels: popInfo.order };
 }
 
+function drawSpikeRatesPanel() {
+  const rates = computePerPopSpikeRates();
+  if (rates && rates.rates.length) {
+    drawBarsWithLabels(canvases.rate, rates.labels, rates.rates, theme.accent);
+    return;
+  }
+  const ctx = setupCanvas(canvases.rate);
+  if (!ctx) return;
+  const { width, height } = canvases.rate.getBoundingClientRect();
+  ctx.fillStyle = theme.background;
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = theme.muted;
+  ctx.fillText("Spike rates unavailable", 12, 20);
+}
+
 function tick(now) {
   const delta = now - lastFrame;
   lastFrame = now;
@@ -1842,13 +2270,7 @@ function tick(now) {
   renderWeightHeatmaps();
   drawAccuracyChart();
 
-  const rates = computeSpikeRates();
-  if (rates) {
-    drawBars(canvases.rate, rates.rates.length, theme.danger, rates.rates);
-  } else {
-    const rateSamples = extractSampleValues(dataState.neuronRows, "spike_i", 32);
-    drawBars(canvases.rate, 32, theme.danger, rateSamples);
-  }
+  drawSpikeRatesPanel();
 
   const weightSamples = extractWeightSamples();
   drawHistogram(canvases.weight, weightSamples);
@@ -1886,6 +2308,16 @@ if (uiControls.neuronSampleMode) {
 if (uiControls.neuronLayoutMode) {
   uiControls.neuronLayoutMode.addEventListener("change", onNeuronViewChange);
 }
+if (uiControls.edgeOpacityByDistance) {
+  uiControls.edgeOpacityByDistance.addEventListener("change", () => {
+    updateLegendNotes();
+  });
+}
+if (uiControls.showDelayTooltip) {
+  uiControls.showDelayTooltip.addEventListener("change", () => {
+    updateLegendNotes();
+  });
+}
 if (canvases.network) {
   canvases.network.addEventListener("mousemove", onNetworkHover);
   canvases.network.addEventListener("mouseleave", hideNetworkTooltip);
@@ -1894,6 +2326,7 @@ resizeAll();
 syncNeuronViewControls();
 updateNeuronControlsEnabled();
 updateNeuronViewInfo();
+updateLegendNotes();
 if (uiControls.neuronSampleInfo) {
   uiControls.neuronSampleInfo.addEventListener("click", async () => {
     const text = uiControls.neuronSampleInfo.dataset.copyText;
@@ -1909,6 +2342,9 @@ if (uiControls.weightProjection) {
   uiControls.weightProjection.addEventListener("change", () => {
     refreshWeightSelectors();
   });
+}
+if (uiControls.weightProjection2) {
+  uiControls.weightProjection2.addEventListener("change", () => {});
 }
 if (uiControls.weightStep) {
   uiControls.weightStep.addEventListener("change", () => {});
