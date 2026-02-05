@@ -139,6 +139,11 @@ def _index_values(values: Any, indices: Sequence[int] | Tensor) -> Any:
 
 
 def _indices_to_list(indices: Sequence[int] | Tensor) -> list[int]:
+    if hasattr(indices, "device") and getattr(indices.device, "type", None) == "cuda":
+        if hasattr(indices, "detach"):
+            indices = indices.detach()
+        if hasattr(indices, "cpu"):
+            indices = indices.cpu()
     if hasattr(indices, "tolist"):
         raw = indices.tolist()
         return [int(value) for value in raw]
@@ -154,6 +159,11 @@ def _flatten(values: Any) -> Iterable[float]:
 
 
 def _to_list(values: Any) -> list[Any]:
+    if hasattr(values, "device") and getattr(values.device, "type", None) == "cuda":
+        if hasattr(values, "detach"):
+            values = values.detach()
+        if hasattr(values, "cpu"):
+            values = values.cpu()
     if hasattr(values, "tolist"):
         return cast(list[Any], values.tolist())
     if isinstance(values, Iterable) and not isinstance(values, (str, bytes)):

@@ -23,6 +23,7 @@ class DelayParams:
 
     base_velocity: float = 1.0  # meters/second
     myelin_scale: float = 1.0
+    distance_scale: float = 1.0
     min_delay: float = 0.0
     max_delay: float | None = None
     use_ceil: bool = True
@@ -58,6 +59,10 @@ def compute_delay_steps(
     pre = pre_pos.index_select(0, pre_idx.to(device=pre_pos.device, dtype=torch.long))
     post = post_pos.index_select(0, post_idx.to(device=post_pos.device, dtype=torch.long))
     dist = torch.linalg.norm(post - pre, dim=1)
+    if p.distance_scale <= 0:
+        raise ValueError("distance_scale must be positive")
+    if p.distance_scale != 1.0:
+        dist = dist * float(p.distance_scale)
 
     velocity = dist.new_tensor(p.base_velocity)
     if myelin is not None:

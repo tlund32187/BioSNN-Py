@@ -41,6 +41,7 @@ class DemoMinimalConfig:
     device: str = "cuda"
     profile: bool = False
     profile_steps: int = 20
+    allow_cuda_monitor_sync: bool = False
     monitor_safe_defaults: bool = True
     monitor_neuron_sample: int = 512
     monitor_edge_sample: int = 20000
@@ -61,6 +62,9 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
     device = cfg.device
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
+    cuda_device = device == "cuda"
+    allow_cuda_sync = bool(cfg.allow_cuda_monitor_sync)
+    monitor_async_gpu = cuda_device and not allow_cuda_sync
 
     dtype = "float32"
     out_dir = Path(cfg.out_dir)
@@ -116,6 +120,7 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
                 stride=10,
                 append=False,
                 flush_every=25,
+                async_gpu=monitor_async_gpu,
             ),
         ]
     else:
@@ -126,28 +131,37 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
                 sample_indices=list(range(neuron_sample)) if neuron_sample > 0 else None,
                 safe_sample=safe_neuron_sample,
                 flush_every=25,
+                async_gpu=monitor_async_gpu,
             ),
             SynapseCSVMonitor(
                 out_dir / "synapse.csv",
                 sample_indices=list(range(synapse_sample)) if synapse_sample > 0 else None,
                 stats=("mean", "std"),
                 flush_every=25,
+                async_gpu=monitor_async_gpu,
             ),
-            SpikeEventsCSVMonitor(
-                str(out_dir / "spikes.csv"),
-                stride=spike_stride,
-                max_spikes_per_step=spike_cap,
-                safe_neuron_sample=safe_neuron_sample,
-                append=False,
-                flush_every=25,
-            ),
+        ]
+        if not cuda_device or allow_cuda_sync:
+            monitors.append(
+                SpikeEventsCSVMonitor(
+                    str(out_dir / "spikes.csv"),
+                    stride=spike_stride,
+                    max_spikes_per_step=spike_cap,
+                    safe_neuron_sample=safe_neuron_sample,
+                    allow_cuda_sync=allow_cuda_sync,
+                    append=False,
+                    flush_every=25,
+                )
+            )
+        monitors.append(
             MetricsCSVMonitor(
                 str(out_dir / "metrics.csv"),
                 stride=1,
                 append=False,
                 flush_every=25,
-            ),
-        ]
+                async_gpu=monitor_async_gpu,
+            )
+        )
 
     engine.attach_monitors(monitors)
     sim_config = SimulationConfig(

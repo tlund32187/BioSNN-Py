@@ -16,6 +16,10 @@ def test_cli_demo_flag_defaults():
     assert args.monitor_safe_defaults is True
     assert args.monitor_neuron_sample == 512
     assert args.monitor_edge_sample == 20000
+    assert args.allow_cuda_monitor_sync is False
+    assert args.parallel_compile == "auto"
+    assert args.parallel_compile_workers == "auto"
+    assert args.parallel_compile_torch_threads == 1
     assert args.profile is False
     assert args.profile_steps == 20
 
@@ -39,6 +43,13 @@ def test_cli_demo_flag_defaults():
             "256",
             "--monitor-edge-sample",
             "10000",
+            "--allow-cuda-monitor-sync",
+            "--parallel-compile",
+            "on",
+            "--parallel-compile-workers",
+            "2",
+            "--parallel-compile-torch-threads",
+            "3",
             "--profile",
             "--profile-steps",
             "12",
@@ -50,6 +61,10 @@ def test_cli_demo_flag_defaults():
     assert args.monitor_safe_defaults is False
     assert args.monitor_neuron_sample == 256
     assert args.monitor_edge_sample == 10000
+    assert args.allow_cuda_monitor_sync is True
+    assert args.parallel_compile == "on"
+    assert args.parallel_compile_workers == "2"
+    assert args.parallel_compile_torch_threads == 3
     assert args.profile is True
     assert args.profile_steps == 12
 

@@ -54,6 +54,14 @@ class BufferedCsvSink:
         if len(self._buffer) >= self._flush_every:
             self._flush_buffer()
 
+    def write_rows(self, rows: Iterable[Mapping[str, Any]]) -> None:
+        rows_list = [dict(row) for row in rows]
+        if not rows_list:
+            return
+        self._buffer.extend(rows_list)
+        if len(self._buffer) >= self._flush_every:
+            self._flush_buffer()
+
     def _flush_buffer(self) -> None:
         if not self._buffer:
             return

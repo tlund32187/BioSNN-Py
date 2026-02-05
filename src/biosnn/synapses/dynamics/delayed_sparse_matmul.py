@@ -28,6 +28,7 @@ class DelayedSparseMatmulParams:
     clamp_min: float | None = None
     clamp_max: float | None = None
     receptor_scale: Mapping[ReceptorKind, float] | None = None
+    enable_sparse_updates: bool = False
     learning_update_target: Literal["both", "fused_only"] = "both"
 
 
@@ -178,11 +179,12 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         return {"weights": state.weights}
 
     def compilation_requirements(self) -> Mapping[str, bool]:
+        needs_bucket_edge_mapping = bool(self.params.enable_sparse_updates)
         return {
             "needs_edges_by_delay": False,
             "needs_pre_adjacency": False,
             "needs_sparse_delay_mats": True,
-            "needs_bucket_edge_mapping": True,
+            "needs_bucket_edge_mapping": needs_bucket_edge_mapping,
         }
 
     def apply_weight_updates(

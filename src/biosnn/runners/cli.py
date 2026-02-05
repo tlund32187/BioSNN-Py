@@ -59,6 +59,10 @@ def main() -> None:
                 device=device,
                 profile=args.profile,
                 profile_steps=args.profile_steps,
+                allow_cuda_monitor_sync=bool(args.allow_cuda_monitor_sync),
+                parallel_compile=args.parallel_compile,
+                parallel_compile_workers=_parse_thread_setting(args.parallel_compile_workers),
+                parallel_compile_torch_threads=int(args.parallel_compile_torch_threads),
                 monitor_safe_defaults=bool(args.monitor_safe_defaults),
                 monitor_neuron_sample=args.monitor_neuron_sample,
                 monitor_edge_sample=args.monitor_edge_sample,
@@ -86,6 +90,15 @@ def main() -> None:
                 relay_lateral=args.relay_lateral,
                 hidden_lateral=args.hidden_lateral,
                 weight_init=args.weight_init,
+                feedforward_delay_from_distance=args.feedforward_delay_from_distance,
+                feedforward_delay_base_velocity=args.feedforward_delay_base_velocity,
+                feedforward_delay_myelin_scale=args.feedforward_delay_myelin_scale,
+                feedforward_delay_myelin_mean=args.feedforward_delay_myelin_mean,
+                feedforward_delay_myelin_std=args.feedforward_delay_myelin_std,
+                feedforward_delay_distance_scale=args.feedforward_delay_distance_scale,
+                feedforward_delay_min=args.feedforward_delay_min,
+                feedforward_delay_max=args.feedforward_delay_max,
+                feedforward_delay_use_ceil=args.feedforward_delay_use_ceil,
                 input_drive=args.input_drive,
                 drive_monitor=args.drive_monitor,
             )
@@ -103,6 +116,7 @@ def main() -> None:
                 device=device,
                 profile=args.profile,
                 profile_steps=args.profile_steps,
+                allow_cuda_monitor_sync=bool(args.allow_cuda_monitor_sync),
                 monitor_safe_defaults=bool(args.monitor_safe_defaults),
                 monitor_neuron_sample=args.monitor_neuron_sample,
                 monitor_edge_sample=args.monitor_edge_sample,
@@ -168,6 +182,29 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="max edge sample for weight monitors when safety rails are enabled",
     )
     parser.add_argument(
+        "--allow-cuda-monitor-sync",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="allow CUDA monitors that require CPU sync (e.g., spike events)",
+    )
+    parser.add_argument(
+        "--parallel-compile",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="parallelize projection compilation on CPU",
+    )
+    parser.add_argument(
+        "--parallel-compile-workers",
+        default="auto",
+        help="worker count for parallel compile (int or 'auto')",
+    )
+    parser.add_argument(
+        "--parallel-compile-torch-threads",
+        type=int,
+        default=1,
+        help="torch.set_num_threads value used inside compile workers",
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help="run a short torch.profiler trace after the demo (writes profile.json)",
@@ -219,6 +256,60 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--relay-lateral", action="store_true")
     parser.add_argument("--hidden-lateral", action="store_true")
     parser.add_argument("--weight-init", type=float, default=0.05)
+    parser.add_argument(
+        "--feedforward-delay-from-distance",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable distance-based delays on feedforward projections",
+    )
+    parser.add_argument(
+        "--feedforward-delay-base-velocity",
+        type=float,
+        default=1.0,
+        help="base conduction velocity in length units per second",
+    )
+    parser.add_argument(
+        "--feedforward-delay-myelin-scale",
+        type=float,
+        default=5.0,
+        help="scale for myelin speedup factor",
+    )
+    parser.add_argument(
+        "--feedforward-delay-myelin-mean",
+        type=float,
+        default=0.6,
+        help="mean myelin factor (0..1)",
+    )
+    parser.add_argument(
+        "--feedforward-delay-myelin-std",
+        type=float,
+        default=0.2,
+        help="std dev for myelin factor",
+    )
+    parser.add_argument(
+        "--feedforward-delay-distance-scale",
+        type=float,
+        default=1.0,
+        help="multiplier to convert coordinate units to meters",
+    )
+    parser.add_argument(
+        "--feedforward-delay-min",
+        type=float,
+        default=0.0,
+        help="minimum axonal delay (seconds)",
+    )
+    parser.add_argument(
+        "--feedforward-delay-max",
+        type=float,
+        default=None,
+        help="maximum axonal delay (seconds); omit for no max",
+    )
+    parser.add_argument(
+        "--feedforward-delay-use-ceil",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="use ceil when converting delay seconds to steps",
+    )
     parser.add_argument("--input-drive", type=float, default=1.0)
     parser.add_argument("--drive-monitor", action="store_true", help="write drive.csv diagnostics")
     parser.add_argument("--port", type=int)

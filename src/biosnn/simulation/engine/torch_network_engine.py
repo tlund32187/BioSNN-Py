@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -14,7 +16,12 @@ from biosnn.contracts.modulators import ModulatorKind, ModulatorRelease
 from biosnn.contracts.monitors import IMonitor, Scalar, StepEvent
 from biosnn.contracts.neurons import Compartment, INeuronModel, NeuronInputs, StepContext
 from biosnn.contracts.simulation import ISimulationEngine, SimulationConfig
-from biosnn.contracts.synapses import SynapseInputs, SynapseTopology
+from biosnn.contracts.synapses import (
+    ISynapseModel,
+    ISynapseModelInplace,
+    SynapseInputs,
+    SynapseTopology,
+)
 from biosnn.contracts.tensor import Tensor
 from biosnn.core.torch_utils import require_torch, resolve_device_dtype
 from biosnn.simulation.network.specs import ModulatorSpec, PopulationSpec, ProjectionSpec
@@ -48,12 +55,22 @@ class _LearningScratch:
 
 
 @dataclass(slots=True)
-class _ProjectionRuntime:
+class _CompiledProjectionPlan:
     name: str
-    pre: str
-    post: str
-    synapse: Any
+    pre_name: str
+    post_name: str
+    synapse: ISynapseModel
     topology: SynapseTopology
+    learning_enabled: bool
+    needs_bucket_mapping: bool
+    use_fused_sparse: bool
+    fast_mode: bool
+    compiled_mode: bool
+
+
+@dataclass(slots=True)
+class _ProjectionRuntime:
+    plan: _CompiledProjectionPlan
     state: _ProjectionState
     learning: Any | None
     learn_every: int
@@ -63,6 +80,10 @@ class _ProjectionRuntime:
     pre_state: _PopulationState
     post_state: _PopulationState
     drive_target: dict[Compartment, Tensor]
+
+    @property
+    def name(self) -> str:
+        return self.plan.name
 
 
 class TorchNetworkEngine(ISimulationEngine):
@@ -81,6 +102,9 @@ class TorchNetworkEngine(ISimulationEngine):
         fast_mode: bool = False,
         compiled_mode: bool = False,
         learning_use_scratch: bool = False,
+        parallel_compile: str = "auto",
+        parallel_compile_workers: int | None = None,
+        parallel_compile_torch_threads: int = 1,
     ) -> None:
         self._pop_specs = list(populations)
         self._proj_specs = list(projections)
@@ -90,6 +114,11 @@ class TorchNetworkEngine(ISimulationEngine):
         self._fast_mode = bool(fast_mode)
         self._compiled_mode = bool(compiled_mode)
         self._learning_use_scratch = bool(learning_use_scratch)
+        self._parallel_compile = parallel_compile.lower().strip()
+        if self._parallel_compile not in {"auto", "on", "off"}:
+            raise ValueError(f"Invalid parallel_compile mode: {parallel_compile}")
+        self._parallel_compile_workers = parallel_compile_workers
+        self._parallel_compile_torch_threads = int(parallel_compile_torch_threads)
 
         self._ctx = StepContext()
         self._dt = 0.0
@@ -122,6 +151,8 @@ class TorchNetworkEngine(ISimulationEngine):
         self.last_d_weights: dict[str, Tensor] = {}
         self._learning_scratch: dict[str, _LearningScratch] = {}
         self._proj_runtime_list: list[_ProjectionRuntime] = []
+        self._proj_plan_list: list[_CompiledProjectionPlan] = []
+        self._proj_plans: dict[str, _CompiledProjectionPlan] = {}
 
         self._pop_order = [spec.name for spec in self._pop_specs]
         self._pop_map = {spec.name: spec for spec in self._pop_specs}
@@ -199,21 +230,32 @@ class TorchNetworkEngine(ISimulationEngine):
             }
             compile_jobs.append((idx, proj, topology, compile_kwargs))
 
-        is_cuda = self._device is not None and getattr(self._device, "type", None) == "cuda"
-        if is_cuda or len(compile_jobs) <= 1:
+        use_parallel, max_workers = _resolve_parallel_compile(
+            self._parallel_compile,
+            len(compile_jobs),
+            self._device,
+            self._parallel_compile_workers,
+        )
+        if not use_parallel:
             for idx, proj, topology, compile_kwargs in compile_jobs:
                 compiled_topology = compile_topology(topology, **compile_kwargs)
+                _ensure_learning_bucket_mapping(proj, compiled_topology)
                 compiled_specs[idx] = replace(proj, topology=compiled_topology)
         else:
-            max_workers = min(os.cpu_count() or 1, len(compile_jobs))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
-                    executor.submit(compile_topology, topology, **compile_kwargs): (idx, proj)
+                    executor.submit(
+                        _compile_topology_with_thread_limits,
+                        topology,
+                        compile_kwargs,
+                        self._parallel_compile_torch_threads,
+                    ): (idx, proj)
                     for idx, proj, topology, compile_kwargs in compile_jobs
                 }
                 for future, info in futures.items():
                     compiled_topology = future.result()
                     idx, proj = info
+                    _ensure_learning_bucket_mapping(proj, compiled_topology)
                     compiled_specs[idx] = replace(proj, topology=compiled_topology)
 
         self._proj_specs = [cast(ProjectionSpec, spec) for spec in compiled_specs]
@@ -247,31 +289,61 @@ class TorchNetworkEngine(ISimulationEngine):
 
         _apply_initial_spikes(self._pop_states, self._pop_order, config.meta)
         self._learning_scratch.clear()
+        self._proj_plan_list = self._build_projection_plans()
         self._proj_runtime_list = self._build_proj_runtime()
+
+    def _build_projection_plans(self) -> list[_CompiledProjectionPlan]:
+        plans: list[_CompiledProjectionPlan] = []
+        for proj in self._proj_specs:
+            meta = proj.topology.meta or {}
+            needs_bucket = (
+                meta.get("edge_bucket_comp") is not None
+                and meta.get("edge_bucket_delay") is not None
+                and meta.get("edge_bucket_pos") is not None
+            )
+            use_fused = (
+                meta.get("fused_W_by_comp") is not None
+                and meta.get("fused_W_delays_by_comp") is not None
+                and meta.get("fused_W_n_post_by_comp") is not None
+            )
+            plans.append(
+                _CompiledProjectionPlan(
+                    name=proj.name,
+                    pre_name=proj.pre,
+                    post_name=proj.post,
+                    synapse=proj.synapse,
+                    topology=proj.topology,
+                    learning_enabled=proj.learning is not None,
+                    needs_bucket_mapping=bool(needs_bucket),
+                    use_fused_sparse=bool(use_fused),
+                    fast_mode=self._fast_mode,
+                    compiled_mode=self._compiled_mode,
+                )
+            )
+        self._proj_plans = {plan.name: plan for plan in plans}
+        return plans
 
     def _build_proj_runtime(self) -> list[_ProjectionRuntime]:
         runtimes: list[_ProjectionRuntime] = []
-        for proj in self._proj_specs:
-            proj_state = self._proj_states[proj.name]
+        spec_by_name = {spec.name: spec for spec in self._proj_specs}
+        for plan in self._proj_plan_list:
+            proj = spec_by_name[plan.name]
+            proj_state = self._proj_states[plan.name]
             learning = proj.learning
             supports_sparse = bool(getattr(learning, "supports_sparse", False)) if learning is not None else False
             use_sparse = bool(proj.sparse_learning and supports_sparse)
             runtimes.append(
                 _ProjectionRuntime(
-                    name=proj.name,
-                    pre=proj.pre,
-                    post=proj.post,
-                    synapse=proj.synapse,
-                    topology=proj.topology,
+                    plan=plan,
                     state=proj_state,
                     learning=learning,
                     learn_every=proj.learn_every,
                     use_sparse_learning=use_sparse,
-                    has_step_into=hasattr(proj.synapse, "step_into"),
+                    has_step_into=isinstance(plan.synapse, ISynapseModelInplace),
                     spec=proj,
-                    pre_state=self._pop_states[proj.pre],
-                    post_state=self._pop_states[proj.post],
-                    drive_target=self._drive_buffers[proj.post],
+                    pre_state=self._pop_states[plan.pre_name],
+                    post_state=self._pop_states[plan.post_name],
+                    drive_target=self._drive_buffers[plan.post_name],
                 )
             )
         return runtimes
@@ -315,26 +387,27 @@ class TorchNetworkEngine(ISimulationEngine):
         for runtime in self._proj_runtime_list:
             pre_spikes = runtime.pre_state.spikes
             if runtime.has_step_into:
-                runtime.synapse.step_into(
+                synapse_inplace = cast(ISynapseModelInplace, runtime.plan.synapse)
+                synapse_inplace.step_into(
                     runtime.state.state,
                     pre_spikes,
                     runtime.drive_target,
-                    t=self._t,
-                    topology=runtime.topology,
+                    t=self._step,
+                    topology=runtime.plan.topology,
                     dt=self._dt,
                     ctx=self._ctx,
                 )
-                self.last_projection_drive[runtime.name] = runtime.drive_target
+                self.last_projection_drive[runtime.plan.name] = runtime.drive_target
             else:
-                runtime.state.state, syn_result = runtime.synapse.step(
+                runtime.state.state, syn_result = runtime.plan.synapse.step(
                     runtime.state.state,
-                    runtime.topology,
+                    runtime.plan.topology,
                     SynapseInputs(pre_spikes=pre_spikes),
                     dt=self._dt,
                     t=self._t,
                     ctx=self._ctx,
                 )
-                self.last_projection_drive[runtime.name] = syn_result.post_drive
+                self.last_projection_drive[runtime.plan.name] = syn_result.post_drive
                 _accumulate_drive(
                     runtime.drive_target,
                     syn_result.post_drive,
@@ -403,7 +476,7 @@ class TorchNetworkEngine(ISimulationEngine):
                 pre_spikes=runtime.pre_state.spikes,
                 post_spikes=runtime.post_state.spikes,
                 weights=weights,
-                edge_mods=edge_mods_by_proj.get(runtime.name),
+                edge_mods=edge_mods_by_proj.get(runtime.plan.name),
                 device=self._device,
                 use_sparse=runtime.use_sparse_learning,
                 scratch=self._get_learning_scratch(proj.name) if self._learning_use_scratch else None,
@@ -421,8 +494,8 @@ class TorchNetworkEngine(ISimulationEngine):
                 result=res,
                 active_edges=active_edges,
                 proj_name=proj.name,
-                synapse=runtime.synapse,
-                topology=runtime.topology,
+                synapse=runtime.plan.synapse,
+                topology=runtime.plan.topology,
             )
             _apply_weight_clamp(weights, proj)
             self.last_d_weights[proj.name] = res.d_weights
@@ -533,26 +606,27 @@ class TorchNetworkEngine(ISimulationEngine):
         for runtime in self._proj_runtime_list:
             pre_spikes = runtime.pre_state.spikes
             if runtime.has_step_into:
-                runtime.synapse.step_into(
+                synapse_inplace = cast(ISynapseModelInplace, runtime.plan.synapse)
+                synapse_inplace.step_into(
                     runtime.state.state,
                     pre_spikes,
                     runtime.drive_target,
-                    t=self._t,
-                    topology=runtime.topology,
+                    t=self._step,
+                    topology=runtime.plan.topology,
                     dt=self._dt,
                     ctx=self._ctx,
                 )
-                self.last_projection_drive[runtime.name] = runtime.drive_target
+                self.last_projection_drive[runtime.plan.name] = runtime.drive_target
             else:
-                runtime.state.state, syn_result = runtime.synapse.step(
+                runtime.state.state, syn_result = runtime.plan.synapse.step(
                     runtime.state.state,
-                    runtime.topology,
+                    runtime.plan.topology,
                     SynapseInputs(pre_spikes=pre_spikes),
                     dt=self._dt,
                     t=self._t,
                     ctx=self._ctx,
                 )
-                self.last_projection_drive[runtime.name] = syn_result.post_drive
+                self.last_projection_drive[runtime.plan.name] = syn_result.post_drive
                 _accumulate_drive(runtime.drive_target, syn_result.post_drive)
 
         if self._external_drive_fn is not None:
@@ -609,44 +683,42 @@ class TorchNetworkEngine(ISimulationEngine):
                             view.copy_(value)
 
         self.last_d_weights = {}
-        for proj in self._proj_specs:
-            if proj.learning is None:
+        for runtime in self._proj_runtime_list:
+            proj = runtime.spec
+            if runtime.learning is None:
                 continue
-            if proj.learn_every <= 0 or (self._step % proj.learn_every) != 0:
+            if runtime.learn_every <= 0 or (self._step % runtime.learn_every) != 0:
                 continue
-            proj_state = self._proj_states[proj.name]
-            learn_state = proj_state.learning_state
+            learn_state = runtime.state.learning_state
             if learn_state is None:
                 continue
 
-            weights = _require_weights(proj_state.state, proj.name)
-            supports_sparse = bool(getattr(proj.learning, "supports_sparse", False))
-            use_sparse = bool(proj.sparse_learning and supports_sparse)
+            weights = _require_weights(runtime.state.state, proj.name)
             batch, active_edges = _build_learning_batch(
                 proj=proj,
-                pre_spikes=self._pop_states[proj.pre].spikes,
-                post_spikes=self._pop_states[proj.post].spikes,
+                pre_spikes=runtime.pre_state.spikes,
+                post_spikes=runtime.post_state.spikes,
                 weights=weights,
-                edge_mods=edge_mods_by_proj.get(proj.name),
+                edge_mods=edge_mods_by_proj.get(runtime.plan.name),
                 device=self._device,
-                use_sparse=use_sparse,
+                use_sparse=runtime.use_sparse_learning,
                 scratch=self._get_learning_scratch(proj.name) if self._learning_use_scratch else None,
             )
-            new_state, res = proj.learning.step(
+            new_state, res = runtime.learning.step(
                 learn_state,
                 batch,
                 dt=self._dt,
                 t=self._t,
                 ctx=self._ctx,
             )
-            proj_state.learning_state = new_state
+            runtime.state.learning_state = new_state
             _apply_learning_update(
                 weights=weights,
                 result=res,
                 active_edges=active_edges,
                 proj_name=proj.name,
-                synapse=proj.synapse,
-                topology=proj.topology,
+                synapse=runtime.plan.synapse,
+                topology=runtime.plan.topology,
             )
             _apply_weight_clamp(weights, proj)
             self.last_d_weights[proj.name] = res.d_weights
@@ -891,10 +963,112 @@ def _compile_flags_for_projection(proj: ProjectionSpec) -> tuple[bool, bool, boo
         build_pre_adjacency = bool(reqs.get("needs_pre_adjacency", False))
         build_sparse_delay_mats = bool(reqs.get("needs_sparse_delay_mats", False))
         build_bucket_edge_mapping = bool(reqs.get("needs_bucket_edge_mapping", False))
+    if proj.learning is not None:
+        build_bucket_edge_mapping = True
+    else:
+        params = getattr(proj.synapse, "params", None)
+        if getattr(params, "enable_sparse_updates", False):
+            build_bucket_edge_mapping = True
     supports_sparse = bool(getattr(proj.learning, "supports_sparse", False))
     if proj.sparse_learning and supports_sparse:
         build_pre_adjacency = True
     return build_edges_by_delay, build_pre_adjacency, build_sparse_delay_mats, build_bucket_edge_mapping
+
+
+def _ensure_learning_bucket_mapping(proj: ProjectionSpec, topology: SynapseTopology) -> None:
+    if proj.learning is None:
+        return
+    meta = topology.meta or {}
+    if (
+        meta.get("edge_bucket_comp") is None
+        or meta.get("edge_bucket_delay") is None
+        or meta.get("edge_bucket_pos") is None
+    ):
+        raise RuntimeError(
+            f"Projection {proj.name} requires edge bucket mappings for learning, "
+            "but they were not built. Enable build_bucket_edge_mapping."
+        )
+
+
+_TORCH_THREAD_LIMIT_LOCK = threading.Lock()
+_TORCH_THREAD_LIMIT_ACTIVE = 0
+_TORCH_THREAD_LIMIT_STATE: tuple[int | None, int | None, bool] | None = None
+
+
+def _compile_topology_with_thread_limits(
+    topology: SynapseTopology,
+    compile_kwargs: Mapping[str, Any],
+    torch_threads: int,
+) -> SynapseTopology:
+    torch = require_torch()
+    if torch_threads <= 0 or not hasattr(torch, "set_num_threads"):
+        return compile_topology(topology, **compile_kwargs)
+    _enter_torch_thread_limits(torch, torch_threads)
+    try:
+        return compile_topology(topology, **compile_kwargs)
+    finally:
+        _exit_torch_thread_limits(torch)
+
+
+def _enter_torch_thread_limits(torch: Any, torch_threads: int) -> None:
+    global _TORCH_THREAD_LIMIT_ACTIVE, _TORCH_THREAD_LIMIT_STATE
+    with _TORCH_THREAD_LIMIT_LOCK:
+        if _TORCH_THREAD_LIMIT_ACTIVE == 0:
+            prev_threads = torch.get_num_threads() if hasattr(torch, "get_num_threads") else None
+            prev_interop = (
+                torch.get_num_interop_threads()
+                if hasattr(torch, "get_num_interop_threads")
+                else None
+            )
+            interop_set = False
+            torch.set_num_threads(int(torch_threads))
+            if hasattr(torch, "set_num_interop_threads"):
+                try:
+                    torch.set_num_interop_threads(1)
+                    interop_set = True
+                except RuntimeError:
+                    prev_interop = None
+            _TORCH_THREAD_LIMIT_STATE = (prev_threads, prev_interop, interop_set)
+        _TORCH_THREAD_LIMIT_ACTIVE += 1
+
+
+def _exit_torch_thread_limits(torch: Any) -> None:
+    global _TORCH_THREAD_LIMIT_ACTIVE, _TORCH_THREAD_LIMIT_STATE
+    with _TORCH_THREAD_LIMIT_LOCK:
+        _TORCH_THREAD_LIMIT_ACTIVE = max(0, _TORCH_THREAD_LIMIT_ACTIVE - 1)
+        if _TORCH_THREAD_LIMIT_ACTIVE == 0 and _TORCH_THREAD_LIMIT_STATE is not None:
+            prev_threads, prev_interop, interop_set = _TORCH_THREAD_LIMIT_STATE
+            if prev_threads is not None:
+                torch.set_num_threads(prev_threads)
+            if (
+                interop_set
+                and prev_interop is not None
+                and hasattr(torch, "set_num_interop_threads")
+            ):
+                with contextlib.suppress(RuntimeError):
+                    torch.set_num_interop_threads(prev_interop)
+            _TORCH_THREAD_LIMIT_STATE = None
+
+
+def _resolve_parallel_compile(
+    mode: str,
+    job_count: int,
+    device: Any,
+    workers: int | None,
+) -> tuple[bool, int]:
+    if device is not None and getattr(device, "type", None) == "cuda":
+        return False, 1
+    if job_count < 2:
+        return False, 1
+    mode_norm = mode.lower().strip()
+    cpu_count = os.cpu_count() or 1
+    if mode_norm == "off":
+        return False, 1
+    if mode_norm == "auto" and cpu_count < 4:
+        return False, 1
+    max_workers = workers if workers is not None else min(cpu_count, job_count)
+    max_workers = max(1, min(int(max_workers), job_count))
+    return True, max_workers
 
 
 def _apply_initial_spikes(

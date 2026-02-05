@@ -55,6 +55,10 @@ class DemoNetworkConfig:
     device: str = "cuda"
     profile: bool = False
     profile_steps: int = 20
+    allow_cuda_monitor_sync: bool = False
+    parallel_compile: Literal["auto", "on", "off"] = "auto"
+    parallel_compile_workers: int | None = None
+    parallel_compile_torch_threads: int = 1
     monitor_safe_defaults: bool = True
     monitor_neuron_sample: int = 512
     monitor_edge_sample: int = 20000
@@ -88,6 +92,7 @@ class DemoNetworkConfig:
     feedforward_delay_myelin_scale: float = 5.0
     feedforward_delay_myelin_mean: float = 0.6
     feedforward_delay_myelin_std: float = 0.2
+    feedforward_delay_distance_scale: float = 1.0
     feedforward_delay_min: float = 0.0
     feedforward_delay_max: float | None = None
     feedforward_delay_use_ceil: bool = True
@@ -138,6 +143,9 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
 
     run_mode = cfg.mode.lower().strip()
     fast_mode = run_mode == "fast"
+    cuda_device = device == "cuda"
+    allow_cuda_sync = bool(cfg.allow_cuda_monitor_sync)
+    monitor_async_gpu = cuda_device and not allow_cuda_sync
 
     dtype = "float32"
     out_dir = Path(cfg.out_dir)
@@ -277,6 +285,7 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
                 myelin_scale=cfg.feedforward_delay_myelin_scale,
                 myelin_mean=cfg.feedforward_delay_myelin_mean,
                 myelin_std=cfg.feedforward_delay_myelin_std,
+                distance_scale=cfg.feedforward_delay_distance_scale,
                 min_delay=cfg.feedforward_delay_min,
                 max_delay=cfg.feedforward_delay_max,
                 use_ceil=cfg.feedforward_delay_use_ceil,
@@ -527,6 +536,9 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
         fast_mode=fast_mode,
         compiled_mode=fast_mode,
         learning_use_scratch=fast_mode,
+        parallel_compile=cfg.parallel_compile,
+        parallel_compile_workers=cfg.parallel_compile_workers,
+        parallel_compile_torch_threads=cfg.parallel_compile_torch_threads,
     )
 
     total_neurons = sum(pop.n for pop in populations)
@@ -559,6 +571,7 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
                 stride=10,
                 append=False,
                 flush_every=25,
+                async_gpu=monitor_async_gpu,
             ),
         ]
     else:
@@ -570,39 +583,53 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
                 sample_indices=list(range(neuron_sample)) if neuron_sample > 0 else None,
                 safe_sample=safe_neuron_sample,
                 flush_every=25,
+                async_gpu=monitor_async_gpu,
             ),
-            _AggregatedSynapseCSVMonitor(
-                out_dir / "synapse.csv",
-                weight_keys=weight_keys,
-                sample_n=synapse_sample,
-                stats=("mean", "std"),
-                flush_every=25,
-            ),
-            SpikeEventsCSVMonitor(
-                str(out_dir / "spikes.csv"),
-                stride=spike_stride,
-                max_spikes_per_step=spike_cap,
-                safe_neuron_sample=safe_neuron_sample,
-                append=False,
-                flush_every=25,
-            ),
+        ]
+        if not cuda_device or allow_cuda_sync:
+            monitors.append(
+                _AggregatedSynapseCSVMonitor(
+                    out_dir / "synapse.csv",
+                    weight_keys=weight_keys,
+                    sample_n=synapse_sample,
+                    stats=("mean", "std"),
+                    flush_every=25,
+                )
+            )
+        if not cuda_device or allow_cuda_sync:
+            monitors.append(
+                SpikeEventsCSVMonitor(
+                    str(out_dir / "spikes.csv"),
+                    stride=spike_stride,
+                    max_spikes_per_step=spike_cap,
+                    safe_neuron_sample=safe_neuron_sample,
+                    allow_cuda_sync=allow_cuda_sync,
+                    append=False,
+                    flush_every=25,
+                )
+            )
+        monitors.append(
             MetricsCSVMonitor(
                 str(out_dir / "metrics.csv"),
                 stride=1,
                 append=False,
                 flush_every=25,
-            ),
-            ProjectionWeightsCSVMonitor(
-                str(out_dir / "weights.csv"),
-                projections=projections,
-                stride=weights_stride,
-                max_edges_sample=weights_cap,
-                safe_max_edges_sample=safe_edge_sample,
-                append=False,
-                flush_every=25,
-            ),
-        ]
-        if cfg.drive_monitor:
+                async_gpu=monitor_async_gpu,
+            )
+        )
+        if not cuda_device or allow_cuda_sync:
+            monitors.append(
+                ProjectionWeightsCSVMonitor(
+                    str(out_dir / "weights.csv"),
+                    projections=projections,
+                    stride=weights_stride,
+                    max_edges_sample=weights_cap,
+                    safe_max_edges_sample=safe_edge_sample,
+                    append=False,
+                    flush_every=25,
+                )
+            )
+        if cfg.drive_monitor and (not cuda_device or allow_cuda_sync):
             monitors.append(
                 _PopDriveCSVMonitor(
                     out_dir / "drive.csv",
@@ -938,6 +965,7 @@ def _apply_feedforward_delays(
     myelin_scale: float,
     myelin_mean: float,
     myelin_std: float,
+    distance_scale: float,
     min_delay: float,
     max_delay: float | None,
     use_ceil: bool,
@@ -969,6 +997,7 @@ def _apply_feedforward_delays(
     params = DelayParams(
         base_velocity=float(base_velocity),
         myelin_scale=float(myelin_scale),
+        distance_scale=float(distance_scale),
         min_delay=float(min_delay),
         max_delay=max_delay,
         use_ceil=bool(use_ceil),

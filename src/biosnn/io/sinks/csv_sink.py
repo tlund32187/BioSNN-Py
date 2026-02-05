@@ -56,6 +56,22 @@ class CsvSink:
         if self._write_count % self._flush_every == 0:
             self._file.flush()
 
+    def write_rows(self, rows: Iterable[Mapping[str, Any]]) -> None:
+        rows_list = list(rows)
+        if not rows_list:
+            return
+        if self._writer is None:
+            self._fieldnames = list(rows_list[0].keys())
+            self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
+            if self._should_write_header and not self._header_written:
+                self._writer.writeheader()
+                self._header_written = True
+        before = self._write_count
+        self._writer.writerows(rows_list)
+        self._write_count += len(rows_list)
+        if self._write_count // self._flush_every != before // self._flush_every:
+            self._file.flush()
+
     def flush(self) -> None:
         self._file.flush()
 

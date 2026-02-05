@@ -43,6 +43,7 @@ class AsyncCsvSink:
         )
         self._closed = False
         self._lock = threading.Lock()
+        self._state_lock = threading.Lock()
 
         mode = "a" if append else "w"
         self._file = self._path.open(mode, newline="", encoding="utf-8")
@@ -63,21 +64,29 @@ class AsyncCsvSink:
         self._thread.start()
 
     def write_row(self, row: Mapping[str, Any]) -> None:
-        if self._closed:
-            return
-        self._queue.put(dict(row))
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("AsyncCsvSink is closed; cannot write new rows.")
+            self._queue.put(dict(row))
+
+    def write_rows(self, rows: Iterable[Mapping[str, Any]]) -> None:
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("AsyncCsvSink is closed; cannot write new rows.")
+            for row in rows:
+                self._queue.put(dict(row))
 
     def flush(self) -> None:
-        if self._closed:
-            return
         self._queue.join()
         with self._lock:
             self._file.flush()
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+        self.flush()
         self._queue.put(_SENTINEL)
         self._thread.join()
 

@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from biosnn.contracts.monitors import IMonitor, StepEvent
-from biosnn.io.sinks.csv_sink import CsvSink
+from biosnn.io.sinks import AsyncCsvSink, BufferedCsvSink, CsvSink
 from biosnn.monitors.metrics.scalar_utils import scalar_to_float
+from biosnn.monitors.metrics.tensor_reducer import reduce_stat
 
 
 class MetricsCSVMonitor(IMonitor):
@@ -20,9 +21,20 @@ class MetricsCSVMonitor(IMonitor):
         *,
         stride: int = 1,
         append: bool = False,
-        flush_every: int = 1,
+        flush_every: int = 256,
+        async_gpu: bool = False,
+        async_io: bool = False,
     ) -> None:
-        self._sink = CsvSink(
+        self._async_gpu = bool(async_gpu)
+        self._async_io = bool(async_io)
+        sink_cls: type[CsvSink] | type[BufferedCsvSink] | type[AsyncCsvSink]
+        if self._async_io:
+            sink_cls = AsyncCsvSink
+        elif self._async_gpu:
+            sink_cls = BufferedCsvSink
+        else:
+            sink_cls = CsvSink
+        self._sink = sink_cls(
             path,
             fieldnames=[
                 "step",
@@ -40,37 +52,42 @@ class MetricsCSVMonitor(IMonitor):
         self._stride = max(1, stride)
 
     def on_step(self, event: StepEvent) -> None:
-        step = int(scalar_to_float(event.scalars.get("step", 0))) if event.scalars else 0
+        step = _step_from_event(event, async_gpu=self._async_gpu)
         if step % self._stride != 0:
             return
 
-        spike_count = _value_from_scalars(event, "spike_count_total")
-        spike_fraction = _value_from_scalars(event, "spike_fraction_total")
+        spike_count = _value_from_scalars(event, "spike_count_total", as_tensor=self._async_gpu)
+        spike_fraction = _value_from_scalars(event, "spike_fraction_total", as_tensor=self._async_gpu)
 
         if (spike_count is None or spike_fraction is None) and event.spikes is not None and hasattr(
             event.spikes, "numel"
         ):
-            spikes = event.spikes
-            if (
-                getattr(spikes, "dtype", None) is not None
-                and "bool" in str(spikes.dtype).lower()
-                and hasattr(spikes, "float")
-            ):
-                spikes = spikes.float()
-            total = float(spikes.sum().item()) if spikes.numel() else 0.0
-            frac = float(spikes.mean().item()) if spikes.numel() else 0.0
-            spike_count = total if spike_count is None else spike_count
-            spike_fraction = frac if spike_fraction is None else spike_fraction
+            if spike_count is None:
+                spike_count = reduce_stat(event.spikes, "sum", as_tensor=self._async_gpu)
+            if spike_fraction is None:
+                spike_fraction = reduce_stat(event.spikes, "mean", as_tensor=self._async_gpu)
 
         row = {
             "step": step,
             "t": event.t,
-            "spike_count_total": _safe_value(spike_count),
-            "spike_fraction_total": _safe_value(spike_fraction),
-            "train_accuracy": _safe_value(_value_from_scalars(event, "train_accuracy")),
-            "eval_accuracy": _safe_value(_value_from_scalars(event, "eval_accuracy")),
-            "loss": _safe_value(_value_from_scalars(event, "loss")),
-            "reward": _safe_value(_value_from_scalars(event, "reward")),
+            "spike_count_total": _safe_value(spike_count, as_tensor=self._async_gpu),
+            "spike_fraction_total": _safe_value(spike_fraction, as_tensor=self._async_gpu),
+            "train_accuracy": _safe_value(
+                _value_from_scalars(event, "train_accuracy", as_tensor=self._async_gpu),
+                as_tensor=self._async_gpu,
+            ),
+            "eval_accuracy": _safe_value(
+                _value_from_scalars(event, "eval_accuracy", as_tensor=self._async_gpu),
+                as_tensor=self._async_gpu,
+            ),
+            "loss": _safe_value(
+                _value_from_scalars(event, "loss", as_tensor=self._async_gpu),
+                as_tensor=self._async_gpu,
+            ),
+            "reward": _safe_value(
+                _value_from_scalars(event, "reward", as_tensor=self._async_gpu),
+                as_tensor=self._async_gpu,
+            ),
         }
         self._sink.write_row(row)
 
@@ -95,16 +112,36 @@ class MetricsCSVMonitor(IMonitor):
         self._sink.close()
 
 
-def _value_from_scalars(event: StepEvent, key: str) -> float | None:
+def _value_from_scalars(event: StepEvent, key: str, *, as_tensor: bool) -> Any | None:
     if event.scalars and key in event.scalars:
-        return scalar_to_float(event.scalars[key])
+        value = event.scalars[key]
+        if as_tensor:
+            if hasattr(value, "detach"):
+                return value.detach()
+            return value
+        return scalar_to_float(value)
     return None
 
 
-def _safe_value(value: float | None) -> Any:
+def _safe_value(value: Any | None, *, as_tensor: bool) -> Any:
     if value is None:
         return ""
-    return value
+    if as_tensor:
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    return scalar_to_float(value)
+
+
+def _step_from_event(event: StepEvent, *, async_gpu: bool) -> int:
+    if not event.scalars or "step" not in event.scalars:
+        return 0
+    step_val = event.scalars["step"]
+    if isinstance(step_val, (int, float)):
+        return int(step_val)
+    if async_gpu:
+        return 0
+    return int(scalar_to_float(step_val))
 
 
 __all__ = ["MetricsCSVMonitor"]

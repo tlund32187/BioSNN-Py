@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from biosnn.contracts.learning import ILearningRule, LearningBatch, LearningStepResult
 from biosnn.contracts.neurons import (
     Compartment,
     INeuronModel,
@@ -55,7 +56,32 @@ class DummyNeuron(INeuronModel):
         return {}
 
 
-def _build_engine(synapse) -> TorchNetworkEngine:
+class DummyLearning(ILearningRule):
+    name = "dummy_learning"
+    supports_sparse = True
+
+    def init_state(self, e: int, *, ctx: StepContext):
+        _ = e, ctx
+        return None
+
+    def step(
+        self,
+        state,
+        batch: LearningBatch,
+        *,
+        dt: float,
+        t: float,
+        ctx: StepContext,
+    ) -> tuple[None, LearningStepResult]:
+        _ = state, batch, dt, t, ctx
+        return None, LearningStepResult(d_weights=batch.weights)
+
+    def state_tensors(self, state):
+        _ = state
+        return {}
+
+
+def _build_engine(synapse, *, learning: ILearningRule | None = None) -> TorchNetworkEngine:
     pop = PopulationSpec(name="Pop", model=DummyNeuron(), n=1)
     topology = SynapseTopology(
         pre_idx=torch.tensor([0], dtype=torch.long),
@@ -69,6 +95,8 @@ def _build_engine(synapse) -> TorchNetworkEngine:
         topology=topology,
         pre="Pop",
         post="Pop",
+        learning=learning,
+        sparse_learning=learning is not None,
     )
     return TorchNetworkEngine(populations=[pop], projections=[proj])
 
@@ -83,16 +111,27 @@ def test_compilation_flags_for_delayed_current():
 
 def test_compilation_flags_for_sparse_matmul():
     syn = DelayedSparseMatmulSynapse(DelayedSparseMatmulParams())
-    engine = _build_engine(syn)
+    engine = _build_engine(syn, learning=None)
     engine.reset(config=SimulationConfig(dt=1e-3, device="cpu"))
     meta = engine._proj_specs[0].topology.meta or {}
     assert "W_by_delay_by_comp_csr" in meta or "W_by_delay_by_comp" in meta
-    assert "edge_bucket_comp" in meta
-    assert "edge_bucket_delay" in meta
-    assert "edge_bucket_pos" in meta
+    assert "edge_bucket_comp" not in meta
+    assert "edge_bucket_delay" not in meta
+    assert "edge_bucket_pos" not in meta
     assert "fused_W_by_comp" in meta
     assert "fused_W_delays_by_comp" in meta
     assert "fused_W_n_post_by_comp" in meta
+    assert "edge_bucket_fused_pos" not in meta
+
+
+def test_sparse_matmul_builds_bucket_mappings_with_learning():
+    syn = DelayedSparseMatmulSynapse(DelayedSparseMatmulParams())
+    engine = _build_engine(syn, learning=DummyLearning())
+    engine.reset(config=SimulationConfig(dt=1e-3, device="cpu"))
+    meta = engine._proj_specs[0].topology.meta or {}
+    assert "edge_bucket_comp" in meta
+    assert "edge_bucket_delay" in meta
+    assert "edge_bucket_pos" in meta
     assert "edge_bucket_fused_pos" in meta
 
 
