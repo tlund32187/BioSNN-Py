@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from biosnn.contracts.simulation import SimulationConfig
+from biosnn.simulation.engine import TorchNetworkEngine
 from tests.support.scenarios import (
     build_delay_impulse_engine,
     build_learning_gate_engine,
@@ -28,7 +29,7 @@ def has_cuda() -> bool:
 
 
 def run_scenario_on_device(
-    build_fn: Callable[[], tuple[object, tuple[str, ...]]],
+    build_fn: Callable[[], tuple[TorchNetworkEngine, tuple[str, ...]]],
     *,
     device: str,
     steps: int,

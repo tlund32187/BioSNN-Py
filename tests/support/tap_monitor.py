@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -72,13 +72,13 @@ def _clone_scalar(value: Any, cpu_copy: bool) -> Any:
 
 def _series_to_numpy(series: Sequence[Any]) -> np.ndarray:
     if not series:
-        return np.asarray([])
+        return cast(np.ndarray, np.asarray([]))
     first = series[0]
     if _is_torch_tensor(first):
         torch = require_torch()
         stacked = torch.stack([item.detach().to("cpu") for item in series])
-        return stacked.numpy()
-    return np.asarray(series)
+        return cast(np.ndarray, stacked.numpy())
+    return cast(np.ndarray, np.asarray(series))
 
 
 def _is_torch_tensor(value: Any) -> bool:

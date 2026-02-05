@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 
 from biosnn.contracts.simulation import SimulationConfig
+from biosnn.simulation.engine import TorchNetworkEngine
 from tests.support.determinism import set_deterministic_cpu
 from tests.support.scenarios import (
     build_delay_impulse_engine,
@@ -43,7 +45,7 @@ def main() -> None:
     data["steps"] = np.arange(len(tap.t), dtype=np.int64)
 
     encoded = {_encode_key(key): np.asarray(value) for key, value in data.items()}
-    np.savez(npz_path, **encoded)
+    np.savez(str(npz_path), **cast(dict[str, np.ndarray], encoded))  # type: ignore[arg-type]
 
     if args.csv:
         csv_dir = out_dir / f"{args.name}_v1"
@@ -96,12 +98,12 @@ def _prepare_csv_array(array: np.ndarray) -> np.ndarray:
     return arr
 
 
-def _run_prop_chain() -> tuple[object, tuple[str, ...]]:
+def _run_prop_chain() -> tuple[TorchNetworkEngine, tuple[str, ...]]:
     engine, tap_keys, _ = build_prop_chain_engine(compiled_mode=False)
     return engine, tap_keys
 
 
-def _run_delay_impulse() -> tuple[object, tuple[str, ...]]:
+def _run_delay_impulse() -> tuple[TorchNetworkEngine, tuple[str, ...]]:
     engine, proj_name, _ = build_delay_impulse_engine(delay_steps=3, compiled_mode=False)
     tap_keys = (
         "pop/Input/spikes",
@@ -113,7 +115,7 @@ def _run_delay_impulse() -> tuple[object, tuple[str, ...]]:
     return engine, tap_keys
 
 
-def _run_learning_gate() -> tuple[object, tuple[str, ...]]:
+def _run_learning_gate() -> tuple[TorchNetworkEngine, tuple[str, ...]]:
     engine, proj_name, _, _ = build_learning_gate_engine(dopamine_on=True, compiled_mode=False)
     tap_keys = (
         "pop/Pre/spikes",
@@ -125,7 +127,7 @@ def _run_learning_gate() -> tuple[object, tuple[str, ...]]:
     return engine, tap_keys
 
 
-_SCENARIOS: dict[str, Callable[[], tuple[object, tuple[str, ...]]]] = {
+_SCENARIOS: dict[str, Callable[[], tuple[TorchNetworkEngine, tuple[str, ...]]]] = {
     "prop_chain": _run_prop_chain,
     "delay_impulse": _run_delay_impulse,
     "learning_gate": _run_learning_gate,

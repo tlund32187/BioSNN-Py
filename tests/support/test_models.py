@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
 from biosnn.contracts.neurons import (
     Compartment,
@@ -158,7 +159,7 @@ class DeterministicLIFModel(INeuronModel):
 def _as_like(value: Tensor | None, ref: Tensor) -> Tensor:
     if value is None:
         torch = require_torch()
-        return torch.zeros_like(ref)
+        return cast(Tensor, torch.zeros_like(ref))
     if value.device != ref.device or value.dtype != ref.dtype:
-        return value.to(device=ref.device, dtype=ref.dtype)
-    return value
+        return cast(Tensor, value.to(device=ref.device, dtype=ref.dtype))
+    return cast(Tensor, value)

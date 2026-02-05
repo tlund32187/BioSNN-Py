@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from typing import cast
 
 from biosnn.contracts.modulators import ModulatorKind, ModulatorRelease
 from biosnn.contracts.neurons import Compartment, StepContext
@@ -256,7 +257,7 @@ def _identity_topology(
 
 def _zeros_positions(n: int, *, dtype: object, device: str) -> Tensor:
     torch = require_torch()
-    return torch.zeros((n, 3), device=device, dtype=dtype)
+    return cast(Tensor, torch.zeros((n, 3), device=device, dtype=dtype))
 
 
 def _pulse(
@@ -272,7 +273,7 @@ def _pulse(
     if step < start or step > end:
         return None
     torch = require_torch()
-    return torch.full((n,), float(value), device=device, dtype=dtype)
+    return cast(Tensor, torch.full((n,), float(value), device=device, dtype=dtype))
 
 
 def _reset_engine(engine: TorchNetworkEngine, *, device: str, dtype: str) -> None:
