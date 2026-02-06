@@ -28,6 +28,7 @@ dev = [
   "pytest>=8.0.0",
   "ruff>=0.7.0",
   "mypy>=1.10.0",
+  "numpy>=1.26.0",
   "types-setuptools",
   "pre-commit>=3.7.0",
 ]

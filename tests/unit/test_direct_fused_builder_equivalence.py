@@ -68,6 +68,13 @@ def test_direct_fused_builder_equivalence(device: str) -> None:
 
     assert topo_direct.meta is not None
     assert "values_by_comp" not in topo_direct.meta
+    assert topo_store.meta is not None
+    assert topo_store.meta.get("edge_bucket_fused_pos") is not None
+    assert topo_direct.meta.get("edge_bucket_fused_pos") is not None
+    torch.testing.assert_close(
+        topo_store.meta["edge_bucket_fused_pos"],
+        topo_direct.meta["edge_bucket_fused_pos"],
+    )
 
     synapse = DelayedSparseMatmulSynapse(DelayedSparseMatmulParams(init_weight=0.0))
     ctx = StepContext(device=device, dtype="float32")

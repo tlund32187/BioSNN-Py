@@ -112,6 +112,15 @@ When compiling sparse delay mats, non-empty delay buckets are fused by default:
 This removes the Python loop over delays and is the intended high-performance path. The legacy per-delay
 loop remains as a fallback if fused artifacts are absent.
 
+### Scaling constraints: delay ring memory
+Delay-based synapses allocate dense ring buffers per projection. The estimated size is:
+`bytes ~= (max_delay_steps + 1) * n_post * n_compartments * bytes_per_value`
+
+At reset time the engine estimates this memory and enforces `max_ring_mib` (default 2048 MiB).
+If you hit the guard, reduce `max_delay_steps`, reduce `n_post`, use smaller delays, or choose a
+smaller dtype. You can override the limit via `SimulationConfig(max_ring_mib=...)` or
+`python -m biosnn.runners.cli --max-ring-mib ...`.
+
 3) Run checks:
 ```powershell
 ruff check .
@@ -129,6 +138,7 @@ pip install -e ".[dev]"
 
 See: `docs/public_api.md` and `docs/architecture/decisions/0001-library-first.md`
 and `docs/architecture/decisions/0002-run-modes-and-fused-delays.md`
+and `docs/architecture/decisions/0003-delay-ring-scaling-options.md`
 
 ## Model docs
 - `docs/models/adex_2c.md`

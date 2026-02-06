@@ -39,6 +39,7 @@ class DemoMinimalConfig:
     dt: float = 1e-3
     seed: int | None = None
     device: str = "cuda"
+    max_ring_mib: float | None = 2048.0
     profile: bool = False
     profile_steps: int = 20
     allow_cuda_monitor_sync: bool | None = None
@@ -172,6 +173,7 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
         device=device,
         dtype=dtype,
         seed=cfg.seed,
+        max_ring_mib=cfg.max_ring_mib,
     )
     engine.reset(config=sim_config)
     engine.run(steps=cfg.steps)

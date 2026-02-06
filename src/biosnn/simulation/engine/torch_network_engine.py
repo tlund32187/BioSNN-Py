@@ -189,7 +189,9 @@ class TorchNetworkEngine(ISimulationEngine):
         self._proj_states.clear()
         pop_map = {spec.name: spec for spec in self._pop_specs}
         compiled_specs: list[ProjectionSpec | None] = [None] * len(self._proj_specs)
-        compile_jobs: list[tuple[int, ProjectionSpec, SynapseTopology, dict[str, Any]]] = []
+        compile_jobs: list[
+            tuple[int, ProjectionSpec, SynapseTopology, dict[str, Any], bool]
+        ] = []
 
         for idx, proj in enumerate(self._proj_specs):
             edge_count = _edge_count(proj.topology)
@@ -211,6 +213,7 @@ class TorchNetworkEngine(ISimulationEngine):
             )
 
             build_edges, build_adj, build_sparse, build_bucket_mapping = _compile_flags_for_projection(proj)
+            requires_ring = build_edges or build_sparse
             if build_sparse and hasattr(proj.synapse, "params"):
                 params = getattr(proj.synapse, "params", None)
                 receptor_scale = getattr(params, "receptor_scale", None) if params is not None else None
@@ -228,7 +231,7 @@ class TorchNetworkEngine(ISimulationEngine):
                 "build_bucket_edge_mapping": build_bucket_mapping,
                 "fuse_delay_buckets": build_sparse,
             }
-            compile_jobs.append((idx, proj, topology, compile_kwargs))
+            compile_jobs.append((idx, proj, topology, compile_kwargs, requires_ring))
 
         use_parallel, max_workers = _resolve_parallel_compile(
             self._parallel_compile,
@@ -237,8 +240,14 @@ class TorchNetworkEngine(ISimulationEngine):
             self._parallel_compile_workers,
         )
         if not use_parallel:
-            for idx, proj, topology, compile_kwargs in compile_jobs:
+            for idx, proj, topology, compile_kwargs, requires_ring in compile_jobs:
                 compiled_topology = compile_topology(topology, **compile_kwargs)
+                _check_ring_buffer_budget(
+                    proj_name=proj.name,
+                    topology=compiled_topology,
+                    max_ring_mib=config.max_ring_mib,
+                    requires_ring=requires_ring,
+                )
                 _ensure_learning_bucket_mapping(proj, compiled_topology)
                 compiled_specs[idx] = replace(proj, topology=compiled_topology)
         else:
@@ -249,12 +258,18 @@ class TorchNetworkEngine(ISimulationEngine):
                         topology,
                         compile_kwargs,
                         self._parallel_compile_torch_threads,
-                    ): (idx, proj)
-                    for idx, proj, topology, compile_kwargs in compile_jobs
+                    ): (idx, proj, requires_ring)
+                    for idx, proj, topology, compile_kwargs, requires_ring in compile_jobs
                 }
                 for future, info in futures.items():
                     compiled_topology = future.result()
-                    idx, proj = info
+                    idx, proj, requires_ring = info
+                    _check_ring_buffer_budget(
+                        proj_name=proj.name,
+                        topology=compiled_topology,
+                        max_ring_mib=config.max_ring_mib,
+                        requires_ring=requires_ring,
+                    )
                     _ensure_learning_bucket_mapping(proj, compiled_topology)
                     compiled_specs[idx] = replace(proj, topology=compiled_topology)
 
@@ -1721,6 +1736,48 @@ def _ensure_topology_meta(
     if updated:
         return replace(topology, meta=meta)
     return topology
+
+
+def _check_ring_buffer_budget(
+    *,
+    proj_name: str,
+    topology: SynapseTopology,
+    max_ring_mib: float | None,
+    requires_ring: bool,
+) -> None:
+    if not requires_ring:
+        return
+    if max_ring_mib is None:
+        return
+    try:
+        max_mib = float(max_ring_mib)
+    except (TypeError, ValueError):
+        return
+    if max_mib <= 0:
+        return
+    meta = topology.meta or {}
+    est_mib = meta.get("estimated_ring_mib")
+    if est_mib is None:
+        return
+    try:
+        est_val = float(est_mib)
+    except (TypeError, ValueError):
+        return
+    if est_val <= max_mib:
+        return
+    ring_len = meta.get("ring_len", "unknown")
+    n_post = meta.get("n_post", "unknown")
+    if topology.weights is not None and hasattr(topology.weights, "dtype"):
+        dtype = str(topology.weights.dtype)
+    else:
+        dtype = str(meta.get("dtype", "unknown"))
+    raise RuntimeError(
+        f"Projection '{proj_name}' ring buffer estimate {est_val:.2f} MiB exceeds "
+        f"max_ring_mib={max_mib:.2f} MiB. "
+        f"ring_len={ring_len}, n_post={n_post}, dtype={dtype}. "
+        "Reduce max_delay_steps, reduce n_post, use smaller delays, or choose a smaller dtype "
+        "to lower ring buffer memory, or increase max_ring_mib."
+    )
 
 
 __all__ = ["TorchNetworkEngine"]

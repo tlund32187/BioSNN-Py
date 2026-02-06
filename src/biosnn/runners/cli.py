@@ -57,6 +57,7 @@ def main() -> None:
                 dt=dt,
                 seed=args.seed,
                 device=device,
+                max_ring_mib=args.max_ring_mib,
                 profile=args.profile,
                 profile_steps=args.profile_steps,
                 allow_cuda_monitor_sync=args.allow_cuda_monitor_sync,
@@ -114,6 +115,7 @@ def main() -> None:
                 dt=dt,
                 seed=args.seed,
                 device=device,
+                max_ring_mib=args.max_ring_mib,
                 profile=args.profile,
                 profile_steps=args.profile_steps,
                 allow_cuda_monitor_sync=args.allow_cuda_monitor_sync,
@@ -161,6 +163,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=["dashboard", "fast"],
         default="dashboard",
         help="run mode: dashboard (full artifacts) or fast (throughput-oriented)",
+    )
+    parser.add_argument(
+        "--max-ring-mib",
+        type=float,
+        default=2048.0,
+        help="max ring buffer size per projection in MiB (set <=0 to disable)",
     )
     parser.add_argument(
         "--monitor-safe-defaults",

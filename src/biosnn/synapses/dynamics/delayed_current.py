@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from biosnn.contracts.neurons import Compartment, StepContext, Tensor
 from biosnn.contracts.synapses import (
@@ -15,7 +15,8 @@ from biosnn.contracts.synapses import (
     SynapseStepResult,
     SynapseTopology,
 )
-from biosnn.core.torch_utils import require_torch, resolve_device_dtype
+from biosnn.core.torch_utils import _resolve_dtype, require_torch, resolve_device_dtype
+from biosnn.synapses.buffers.event_list_ring import EventListRing
 
 _COMPARTMENT_ORDER = tuple(Compartment)
 _COMPARTMENT_TO_ID = {comp: idx for idx, comp in enumerate(_COMPARTMENT_ORDER)}
@@ -29,6 +30,9 @@ class DelayedCurrentParams:
     clamp_min: float | None = None
     clamp_max: float | None = None
     receptor_scale: Mapping[ReceptorKind, float] | None = None
+    ring_dtype: str | None = None
+    ring_strategy: Literal["dense", "event_list_proto"] = "dense"
+    event_list_max_events: int = 1_000_000
     use_edge_buffer: bool = False
     event_driven: bool = False
     adaptive_event_driven: bool = False
@@ -44,6 +48,7 @@ class DelayedCurrentState:
     delay_tmp: Tensor | None  # shape [E] scratch for edge buffer
     post_ring: dict[Compartment, Tensor] | None  # shape [D, Npost] per compartment
     post_out: dict[Compartment, Tensor] | None  # reusable output buffers [Npost] per compartment
+    post_event_ring: dict[Compartment, EventListRing] | None  # sparse event ring per compartment
     cursor: int
 
 
@@ -66,6 +71,7 @@ class DelayedCurrentSynapse(ISynapseModel):
             delay_tmp=None,
             post_ring=None,
             post_out=None,
+            post_event_ring=None,
             cursor=0,
         )
 
@@ -89,6 +95,9 @@ class DelayedCurrentSynapse(ISynapseModel):
             if state.post_out is not None:
                 for out in state.post_out.values():
                     out.zero_()
+            if state.post_event_ring is not None:
+                for event_list in state.post_event_ring.values():
+                    event_list.clear()
             state.cursor = 0
             return state
         state.weights[edge_indices] = self.params.init_weight
@@ -102,6 +111,9 @@ class DelayedCurrentSynapse(ISynapseModel):
         if state.post_out is not None:
             for out in state.post_out.values():
                 out[:] = 0.0
+        if state.post_event_ring is not None:
+            for event_list in state.post_event_ring.values():
+                event_list.clear()
         return state
 
     def step(
@@ -117,6 +129,13 @@ class DelayedCurrentSynapse(ISynapseModel):
         torch = require_torch()
         use_no_grad = _use_no_grad(ctx)
         with torch.no_grad() if use_no_grad else nullcontext():
+            if (
+                self.params.ring_strategy == "event_list_proto"
+                and not (self.params.event_driven or self.params.adaptive_event_driven)
+            ):
+                raise RuntimeError(
+                    "ring_strategy=event_list_proto requires event_driven or adaptive_event_driven."
+                )
             weights = state.weights
             device = weights.device
             validate_shapes = _validate_shapes(ctx)
@@ -505,15 +524,23 @@ def _step_post_ring(
     depth = max_delay + 1
     n_post = _infer_n_post(topology)
     edges_by_delay = _edges_by_delay(topology, device)
-    post_ring, post_out = _ensure_post_ring(state, topology, depth, n_post, device, weights.dtype)
+    ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
+    post_ring, post_out = _ensure_post_ring(
+        state,
+        topology,
+        depth,
+        n_post,
+        device,
+        ring_dtype,
+        weights.dtype,
+    )
 
     cursor = state.cursor % depth
     post_drive: dict[Compartment, Tensor] = {}
     for comp, ring in post_ring.items():
         slot = ring[cursor]
         out = post_out[comp]
-        out.copy_(slot)
-        slot.zero_()
+        _copy_ring_slot(slot, out)
         post_drive[comp] = out
 
     weights = _maybe_clamp_weights(model, state, weights)
@@ -539,7 +566,11 @@ def _step_post_ring(
                 post_drive[comp].index_add_(0, edge_post, edge_current)
             else:
                 target_row = (cursor + delay) % depth
-                post_ring[comp][target_row].index_add_(0, edge_post, edge_current)
+                post_ring[comp][target_row].index_add_(
+                    0,
+                    edge_post,
+                    _as_ring_dtype(edge_current, ring_dtype),
+                )
             continue
 
         comp_ids = topology.target_compartments
@@ -558,7 +589,11 @@ def _step_post_ring(
                 post_drive[comp].index_add_(0, posts, currents)
             else:
                 target_row = (cursor + delay) % depth
-                post_ring[comp][target_row].index_add_(0, posts, currents)
+                post_ring[comp][target_row].index_add_(
+                    0,
+                    posts,
+                    _as_ring_dtype(currents, ring_dtype),
+                )
 
     state.cursor = (cursor + 1) % depth
     return state, post_drive
@@ -580,15 +615,23 @@ def _step_post_ring_into(
     depth = max_delay + 1
     n_post = _infer_n_post(topology)
     edges_by_delay = _edges_by_delay(topology, device)
-    post_ring, _ = _ensure_post_ring(state, topology, depth, n_post, device, weights.dtype)
+    ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
+    post_ring, _ = _ensure_post_ring(
+        state,
+        topology,
+        depth,
+        n_post,
+        device,
+        ring_dtype,
+        weights.dtype,
+    )
 
     cursor = state.cursor % depth
     for comp, ring in post_ring.items():
         slot = ring[cursor]
         if comp not in out_drive:
             raise KeyError(f"Drive accumulator missing compartment {comp}")
-        out_drive[comp].add_(slot)
-        slot.zero_()
+        _add_ring_slot(slot, out_drive[comp])
 
     weights = _maybe_clamp_weights(model, state, weights)
 
@@ -615,7 +658,11 @@ def _step_post_ring_into(
                 out_drive[comp].index_add_(0, edge_post, edge_current)
             else:
                 target_row = (cursor + delay) % depth
-                post_ring[comp][target_row].index_add_(0, edge_post, edge_current)
+                post_ring[comp][target_row].index_add_(
+                    0,
+                    edge_post,
+                    _as_ring_dtype(edge_current, ring_dtype),
+                )
             continue
 
         comp_ids = topology.target_compartments
@@ -634,7 +681,11 @@ def _step_post_ring_into(
                 out_drive[comp].index_add_(0, posts, currents)
             else:
                 target_row = (cursor + delay) % depth
-                post_ring[comp][target_row].index_add_(0, posts, currents)
+                post_ring[comp][target_row].index_add_(
+                    0,
+                    posts,
+                    _as_ring_dtype(currents, ring_dtype),
+                )
 
     state.cursor = (cursor + 1) % depth
 
@@ -655,16 +706,45 @@ def _step_post_ring_event_driven(
     max_delay = _max_delay_steps(topology)
     depth = max_delay + 1
     n_post = _infer_n_post(topology)
-    post_ring, post_out = _ensure_post_ring(state, topology, depth, n_post, device, weights.dtype)
+    ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
+    use_event_list = model.params.ring_strategy == "event_list_proto"
+    event_ring: dict[Compartment, EventListRing] | None = None
+    if use_event_list:
+        post_out = _ensure_post_out(state, topology, n_post, device, weights.dtype)
+        event_ring = _ensure_event_ring(
+            state,
+            topology,
+            depth,
+            device,
+            ring_dtype,
+            max_events=model.params.event_list_max_events,
+        )
+    else:
+        post_ring, post_out = _ensure_post_ring(
+            state,
+            topology,
+            depth,
+            n_post,
+            device,
+            ring_dtype,
+            weights.dtype,
+        )
 
     cursor = state.cursor % depth
     post_drive: dict[Compartment, Tensor] = {}
-    for comp, ring in post_ring.items():
-        slot = ring[cursor]
-        out = post_out[comp]
-        out.copy_(slot)
-        slot.zero_()
-        post_drive[comp] = out
+    if use_event_list:
+        assert event_ring is not None
+        for comp, event_list in event_ring.items():
+            out = post_out[comp]
+            out.zero_()
+            event_list.pop_into(cursor, out)
+            post_drive[comp] = out
+    else:
+        for comp, ring in post_ring.items():
+            slot = ring[cursor]
+            out = post_out[comp]
+            _copy_ring_slot(slot, out)
+            post_drive[comp] = out
 
     weights = _maybe_clamp_weights(model, state, weights)
 
@@ -715,11 +795,21 @@ def _step_post_ring_event_driven(
                 target_rows = torch.remainder(
                     delay_vals.index_select(0, delayed_idx) + cursor, depth
                 )
-                post_ring[comp].index_put_(
-                    (target_rows, edge_post.index_select(0, delayed_idx)),
-                    edge_current.index_select(0, delayed_idx),
-                    accumulate=True,
-                )
+                delayed_posts = edge_post.index_select(0, delayed_idx)
+                delayed_vals = edge_current.index_select(0, delayed_idx)
+                if use_event_list:
+                    assert event_ring is not None
+                    event_ring[comp].schedule(
+                        target_rows,
+                        delayed_posts,
+                        _as_ring_dtype(delayed_vals, ring_dtype),
+                    )
+                else:
+                    post_ring[comp].index_put_(
+                        (target_rows, delayed_posts),
+                        _as_ring_dtype(delayed_vals, ring_dtype),
+                        accumulate=True,
+                    )
     else:
         comp_ids = topology.target_compartments
         if comp_ids.device != device or comp_ids.dtype != torch.long:
@@ -750,11 +840,21 @@ def _step_post_ring_event_driven(
                 target_rows = torch.remainder(
                     comp_delays.index_select(0, delayed_idx) + cursor, depth
                 )
-                post_ring[comp].index_put_(
-                    (target_rows, comp_posts.index_select(0, delayed_idx)),
-                    comp_currents.index_select(0, delayed_idx),
-                    accumulate=True,
-                )
+                delayed_posts = comp_posts.index_select(0, delayed_idx)
+                delayed_vals = comp_currents.index_select(0, delayed_idx)
+                if use_event_list:
+                    assert event_ring is not None
+                    event_ring[comp].schedule(
+                        target_rows,
+                        delayed_posts,
+                        _as_ring_dtype(delayed_vals, ring_dtype),
+                    )
+                else:
+                    post_ring[comp].index_put_(
+                        (target_rows, delayed_posts),
+                        _as_ring_dtype(delayed_vals, ring_dtype),
+                        accumulate=True,
+                    )
 
     state.cursor = (cursor + 1) % depth
     extras = {"processed_edges": weights.new_tensor(edges.numel())}
@@ -778,15 +878,42 @@ def _step_post_ring_event_driven_into(
     max_delay = _max_delay_steps(topology)
     depth = max_delay + 1
     n_post = _infer_n_post(topology)
-    post_ring, _ = _ensure_post_ring(state, topology, depth, n_post, device, weights.dtype)
+    ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
+    use_event_list = model.params.ring_strategy == "event_list_proto"
+    event_ring: dict[Compartment, EventListRing] | None = None
+    if use_event_list:
+        event_ring = _ensure_event_ring(
+            state,
+            topology,
+            depth,
+            device,
+            ring_dtype,
+            max_events=model.params.event_list_max_events,
+        )
+    else:
+        post_ring, _ = _ensure_post_ring(
+            state,
+            topology,
+            depth,
+            n_post,
+            device,
+            ring_dtype,
+            weights.dtype,
+        )
 
     cursor = state.cursor % depth
-    for comp, ring in post_ring.items():
-        slot = ring[cursor]
-        if comp not in out_drive:
-            raise KeyError(f"Drive accumulator missing compartment {comp}")
-        out_drive[comp].add_(slot)
-        slot.zero_()
+    if use_event_list:
+        assert event_ring is not None
+        for comp, event_list in event_ring.items():
+            if comp not in out_drive:
+                raise KeyError(f"Drive accumulator missing compartment {comp}")
+            event_list.pop_into(cursor, out_drive[comp])
+    else:
+        for comp, ring in post_ring.items():
+            slot = ring[cursor]
+            if comp not in out_drive:
+                raise KeyError(f"Drive accumulator missing compartment {comp}")
+            _add_ring_slot(slot, out_drive[comp])
 
     weights = _maybe_clamp_weights(model, state, weights)
 
@@ -837,11 +964,21 @@ def _step_post_ring_event_driven_into(
                 target_rows = torch.remainder(
                     delay_vals.index_select(0, delayed_idx) + cursor, depth
                 )
-                post_ring[comp].index_put_(
-                    (target_rows, edge_post.index_select(0, delayed_idx)),
-                    edge_current.index_select(0, delayed_idx),
-                    accumulate=True,
-                )
+                delayed_posts = edge_post.index_select(0, delayed_idx)
+                delayed_vals = edge_current.index_select(0, delayed_idx)
+                if use_event_list:
+                    assert event_ring is not None
+                    event_ring[comp].schedule(
+                        target_rows,
+                        delayed_posts,
+                        _as_ring_dtype(delayed_vals, ring_dtype),
+                    )
+                else:
+                    post_ring[comp].index_put_(
+                        (target_rows, delayed_posts),
+                        _as_ring_dtype(delayed_vals, ring_dtype),
+                        accumulate=True,
+                    )
     else:
         comp_ids = topology.target_compartments
         if comp_ids.device != device or comp_ids.dtype != torch.long:
@@ -872,11 +1009,21 @@ def _step_post_ring_event_driven_into(
                 target_rows = torch.remainder(
                     comp_delays.index_select(0, delayed_idx) + cursor, depth
                 )
-                post_ring[comp].index_put_(
-                    (target_rows, comp_posts.index_select(0, delayed_idx)),
-                    comp_currents.index_select(0, delayed_idx),
-                    accumulate=True,
-                )
+                delayed_posts = comp_posts.index_select(0, delayed_idx)
+                delayed_vals = comp_currents.index_select(0, delayed_idx)
+                if use_event_list:
+                    assert event_ring is not None
+                    event_ring[comp].schedule(
+                        target_rows,
+                        delayed_posts,
+                        _as_ring_dtype(delayed_vals, ring_dtype),
+                    )
+                else:
+                    post_ring[comp].index_put_(
+                        (target_rows, delayed_posts),
+                        _as_ring_dtype(delayed_vals, ring_dtype),
+                        accumulate=True,
+                    )
 
     state.cursor = (cursor + 1) % depth
 
@@ -887,7 +1034,8 @@ def _ensure_post_ring(
     depth: int,
     n_post: int,
     device: Any,
-    dtype: Any,
+    ring_dtype: Any,
+    out_dtype: Any,
 ) -> tuple[dict[Compartment, Tensor], dict[Compartment, Tensor]]:
     torch = require_torch()
     if state.post_ring is None:
@@ -896,14 +1044,103 @@ def _ensure_post_ring(
         state.post_out = {}
     for comp in _ring_compartments(topology):
         ring = state.post_ring.get(comp)
-        if ring is None or ring.shape != (depth, n_post) or ring.device != device or ring.dtype != dtype:
-            ring = torch.zeros((depth, n_post), device=device, dtype=dtype)
+        if (
+            ring is None
+            or ring.shape != (depth, n_post)
+            or ring.device != device
+            or ring.dtype != ring_dtype
+        ):
+            try:
+                ring = torch.zeros((depth, n_post), device=device, dtype=ring_dtype)
+            except Exception as exc:  # pragma: no cover - device/dtype dependent
+                raise RuntimeError(
+                    f"ring_dtype={ring_dtype} is not supported on device {device} for delay rings; "
+                    "use ring_dtype=None/float32 or run on CUDA."
+                ) from exc
             state.post_ring[comp] = ring
         out = state.post_out.get(comp)
-        if out is None or out.shape != (n_post,) or out.device != device or out.dtype != dtype:
-            out = torch.zeros((n_post,), device=device, dtype=dtype)
+        if out is None or out.shape != (n_post,) or out.device != device or out.dtype != out_dtype:
+            out = torch.zeros((n_post,), device=device, dtype=out_dtype)
             state.post_out[comp] = out
     return state.post_ring, state.post_out
+
+
+def _ensure_post_out(
+    state: DelayedCurrentState,
+    topology: SynapseTopology,
+    n_post: int,
+    device: Any,
+    out_dtype: Any,
+) -> dict[Compartment, Tensor]:
+    torch = require_torch()
+    if state.post_out is None:
+        state.post_out = {}
+    for comp in _ring_compartments(topology):
+        out = state.post_out.get(comp)
+        if out is None or out.shape != (n_post,) or out.device != device or out.dtype != out_dtype:
+            out = torch.zeros((n_post,), device=device, dtype=out_dtype)
+            state.post_out[comp] = out
+    return state.post_out
+
+
+def _ensure_event_ring(
+    state: DelayedCurrentState,
+    topology: SynapseTopology,
+    depth: int,
+    device: Any,
+    ring_dtype: Any,
+    *,
+    max_events: int,
+) -> dict[Compartment, EventListRing]:
+    if state.post_event_ring is None:
+        state.post_event_ring = {}
+    for comp in _ring_compartments(topology):
+        ring = state.post_event_ring.get(comp)
+        if (
+            ring is None
+            or ring.depth != depth
+            or ring.device != device
+            or ring.dtype != ring_dtype
+            or ring.max_events != int(max_events)
+        ):
+            ring = EventListRing(
+                depth=depth,
+                device=device,
+                dtype=ring_dtype,
+                max_events=max_events,
+            )
+            state.post_event_ring[comp] = ring
+    return state.post_event_ring
+
+
+def _resolve_ring_dtype(ring_dtype: str | None, weights_dtype: Any, device: Any) -> Any:
+    if ring_dtype is None:
+        return weights_dtype
+    torch = require_torch()
+    resolved = _resolve_dtype(torch, ring_dtype)
+    return resolved
+
+
+def _copy_ring_slot(slot: Tensor, out: Tensor) -> None:
+    if slot.dtype == out.dtype:
+        out.copy_(slot)
+    else:
+        out.copy_(slot.to(dtype=out.dtype))
+    slot.zero_()
+
+
+def _add_ring_slot(slot: Tensor, out: Tensor) -> None:
+    if slot.dtype == out.dtype:
+        out.add_(slot)
+    else:
+        out.add_(slot.to(dtype=out.dtype))
+    slot.zero_()
+
+
+def _as_ring_dtype(tensor: Tensor, ring_dtype: Any) -> Tensor:
+    if tensor.dtype == ring_dtype:
+        return tensor
+    return tensor.to(dtype=ring_dtype)
 
 
 def _ring_compartments(topology: SynapseTopology) -> tuple[Compartment, ...]:

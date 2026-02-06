@@ -15,6 +15,7 @@ class SimulationConfig:
     seed: int | None = None
     device: str | None = None
     dtype: str | None = None
+    max_ring_mib: float | None = 2048.0
     meta: Mapping[str, Any] | None = None
 
 

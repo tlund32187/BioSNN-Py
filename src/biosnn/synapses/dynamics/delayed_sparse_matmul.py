@@ -16,7 +16,7 @@ from biosnn.contracts.synapses import (
     SynapseStepResult,
     SynapseTopology,
 )
-from biosnn.core.torch_utils import require_torch, resolve_device_dtype
+from biosnn.core.torch_utils import _resolve_dtype, require_torch, resolve_device_dtype
 
 _COMPARTMENT_ORDER = tuple(Compartment)
 _COMPARTMENT_TO_ID = {comp: idx for idx, comp in enumerate(_COMPARTMENT_ORDER)}
@@ -28,8 +28,10 @@ class DelayedSparseMatmulParams:
     clamp_min: float | None = None
     clamp_max: float | None = None
     receptor_scale: Mapping[ReceptorKind, float] | None = None
+    ring_dtype: str | None = None
     enable_sparse_updates: bool = False
     learning_update_target: Literal["both", "fused_only"] = "both"
+    fused_layout: Literal["auto", "coo", "csr"] = "auto"
 
 
 @dataclass(slots=True)
@@ -275,43 +277,54 @@ def _step_sparse_matmul(
     max_delay = _max_delay_steps(topology)
     depth = max_delay + 1
     n_post = _infer_n_post(topology)
-    post_ring, post_out = _ensure_post_ring(state, topology, depth, n_post, device, weights.dtype)
+    ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
+    post_ring, post_out = _ensure_post_ring(
+        state,
+        topology,
+        depth,
+        n_post,
+        device,
+        ring_dtype,
+        weights.dtype,
+    )
 
     cursor = state.cursor % depth
     post_drive: dict[Compartment, Tensor] = {}
     for comp, ring in post_ring.items():
         slot = ring[cursor]
         out = post_out[comp]
-        out.copy_(slot)
-        slot.zero_()
+        _copy_ring_slot(slot, out)
         post_drive[comp] = out
 
     weights = _maybe_clamp_weights(model, state, topology, weights)
     pre_activity = _fill_pre_activity_buf(state, pre_spikes, weights, device)
 
     # Preferred path: fused delay buckets (single sparse matmul per compartment).
-    fused_mats, fused_delays, fused_n_post = _fused_sparse_by_comp(topology, device)
+    fused_mats, fused_delays, fused_n_post, fused_d, fused_immediate_idx, fused_delayed_idx = (
+        _fused_sparse_by_comp(topology, device, fused_layout=model.params.fused_layout)
+    )
     if fused_mats:
         for comp, fused in fused_mats.items():
             delays = fused_delays.get(comp)
             if delays is None or delays.numel() == 0:
                 continue
+            immediate_idx = fused_immediate_idx.get(comp)
+            delayed_idx = fused_delayed_idx.get(comp)
             n_post_comp = fused_n_post.get(comp, n_post)
+            d_val = fused_d.get(comp, int(delays.numel()))
             contrib_flat = torch.sparse.mm(fused, pre_activity.unsqueeze(1)).squeeze(1)
             if contrib_flat.numel() == 0:
                 continue
-            contrib = contrib_flat.view(int(delays.numel()), n_post_comp)
-            ring_indices = torch.remainder(delays + cursor, depth)
-            immediate_mask = delays == 0
-            immediate_idx = immediate_mask.nonzero(as_tuple=False).flatten()
-            if immediate_idx.numel() > 0:
+            contrib = contrib_flat.view(int(d_val), n_post_comp)
+            if immediate_idx is not None and immediate_idx.numel() > 0:
                 post_drive[comp].add_(contrib.index_select(0, immediate_idx).sum(dim=0))
-            delayed_idx = (~immediate_mask).nonzero(as_tuple=False).flatten()
-            if delayed_idx.numel() > 0:
+            if delayed_idx is not None and delayed_idx.numel() > 0:
+                ring_indices = torch.remainder(delays + cursor, depth)
+                contrib_ring = _as_ring_dtype(contrib, ring_dtype)
                 post_ring[comp].index_add_(
                     0,
                     ring_indices.index_select(0, delayed_idx),
-                    contrib.index_select(0, delayed_idx),
+                    contrib_ring.index_select(0, delayed_idx),
                 )
     else:
         mats_by_comp = _nonempty_mats_by_comp(topology, device)
@@ -322,7 +335,7 @@ def _step_sparse_matmul(
                 if delay == 0:
                     post_drive[comp].add_(contrib)
                 else:
-                    post_ring[comp][target_row].add_(contrib)
+                    post_ring[comp][target_row].add_(_as_ring_dtype(contrib, ring_dtype))
 
     state.cursor = (cursor + 1) % depth
     return post_drive
@@ -341,21 +354,31 @@ def _step_sparse_matmul_into(
     max_delay = _max_delay_steps(topology)
     depth = max_delay + 1
     n_post = _infer_n_post(topology)
-    post_ring, _ = _ensure_post_ring(state, topology, depth, n_post, device, weights.dtype)
+    ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
+    post_ring, _ = _ensure_post_ring(
+        state,
+        topology,
+        depth,
+        n_post,
+        device,
+        ring_dtype,
+        weights.dtype,
+    )
 
     cursor = state.cursor % depth
     for comp, ring in post_ring.items():
         slot = ring[cursor]
         if comp not in out_drive:
             raise KeyError(f"Drive accumulator missing compartment {comp}")
-        out_drive[comp].add_(slot)
-        slot.zero_()
+        _add_ring_slot(slot, out_drive[comp])
 
     weights = _maybe_clamp_weights(model, state, topology, weights)
     pre_activity = _fill_pre_activity_buf(state, pre_spikes, weights, device)
 
     # Preferred path: fused delay buckets (single sparse matmul per compartment).
-    fused_mats, fused_delays, fused_n_post = _fused_sparse_by_comp(topology, device)
+    fused_mats, fused_delays, fused_n_post, fused_d, fused_immediate_idx, fused_delayed_idx = (
+        _fused_sparse_by_comp(topology, device, fused_layout=model.params.fused_layout)
+    )
     if fused_mats:
         for comp, fused in fused_mats.items():
             if comp not in out_drive:
@@ -363,22 +386,23 @@ def _step_sparse_matmul_into(
             delays = fused_delays.get(comp)
             if delays is None or delays.numel() == 0:
                 continue
+            immediate_idx = fused_immediate_idx.get(comp)
+            delayed_idx = fused_delayed_idx.get(comp)
             n_post_comp = fused_n_post.get(comp, n_post)
+            d_val = fused_d.get(comp, int(delays.numel()))
             contrib_flat = torch.sparse.mm(fused, pre_activity.unsqueeze(1)).squeeze(1)
             if contrib_flat.numel() == 0:
                 continue
-            contrib = contrib_flat.view(int(delays.numel()), n_post_comp)
-            ring_indices = torch.remainder(delays + cursor, depth)
-            immediate_mask = delays == 0
-            immediate_idx = immediate_mask.nonzero(as_tuple=False).flatten()
-            if immediate_idx.numel() > 0:
+            contrib = contrib_flat.view(int(d_val), n_post_comp)
+            if immediate_idx is not None and immediate_idx.numel() > 0:
                 out_drive[comp].add_(contrib.index_select(0, immediate_idx).sum(dim=0))
-            delayed_idx = (~immediate_mask).nonzero(as_tuple=False).flatten()
-            if delayed_idx.numel() > 0:
+            if delayed_idx is not None and delayed_idx.numel() > 0:
+                ring_indices = torch.remainder(delays + cursor, depth)
+                contrib_ring = _as_ring_dtype(contrib, ring_dtype)
                 post_ring[comp].index_add_(
                     0,
                     ring_indices.index_select(0, delayed_idx),
-                    contrib.index_select(0, delayed_idx),
+                    contrib_ring.index_select(0, delayed_idx),
                 )
     else:
         mats_by_comp = _nonempty_mats_by_comp(topology, device)
@@ -391,7 +415,7 @@ def _step_sparse_matmul_into(
                 if delay == 0:
                     out_drive[comp].add_(contrib)
                 else:
-                    post_ring[comp][target_row].add_(contrib)
+                    post_ring[comp][target_row].add_(_as_ring_dtype(contrib, ring_dtype))
 
     state.cursor = (cursor + 1) % depth
 
@@ -402,7 +426,8 @@ def _ensure_post_ring(
     depth: int,
     n_post: int,
     device: Any,
-    dtype: Any,
+    ring_dtype: Any,
+    out_dtype: Any,
 ) -> tuple[dict[Compartment, Tensor], dict[Compartment, Tensor]]:
     torch = require_torch()
     if state.post_ring is None:
@@ -411,14 +436,55 @@ def _ensure_post_ring(
         state.post_out = {}
     for comp in _ring_compartments(topology):
         ring = state.post_ring.get(comp)
-        if ring is None or ring.shape != (depth, n_post) or ring.device != device or ring.dtype != dtype:
-            ring = torch.zeros((depth, n_post), device=device, dtype=dtype)
+        if (
+            ring is None
+            or ring.shape != (depth, n_post)
+            or ring.device != device
+            or ring.dtype != ring_dtype
+        ):
+            try:
+                ring = torch.zeros((depth, n_post), device=device, dtype=ring_dtype)
+            except Exception as exc:  # pragma: no cover - device/dtype dependent
+                raise RuntimeError(
+                    f"ring_dtype={ring_dtype} is not supported on device {device} for delay rings; "
+                    "use ring_dtype=None/float32 or run on CUDA."
+                ) from exc
             state.post_ring[comp] = ring
         out = state.post_out.get(comp)
-        if out is None or out.shape != (n_post,) or out.device != device or out.dtype != dtype:
-            out = torch.zeros((n_post,), device=device, dtype=dtype)
+        if out is None or out.shape != (n_post,) or out.device != device or out.dtype != out_dtype:
+            out = torch.zeros((n_post,), device=device, dtype=out_dtype)
             state.post_out[comp] = out
     return state.post_ring, state.post_out
+
+
+def _resolve_ring_dtype(ring_dtype: str | None, weights_dtype: Any, device: Any) -> Any:
+    if ring_dtype is None:
+        return weights_dtype
+    torch = require_torch()
+    resolved = _resolve_dtype(torch, ring_dtype)
+    return resolved
+
+
+def _copy_ring_slot(slot: Tensor, out: Tensor) -> None:
+    if slot.dtype == out.dtype:
+        out.copy_(slot)
+    else:
+        out.copy_(slot.to(dtype=out.dtype))
+    slot.zero_()
+
+
+def _add_ring_slot(slot: Tensor, out: Tensor) -> None:
+    if slot.dtype == out.dtype:
+        out.add_(slot)
+    else:
+        out.add_(slot.to(dtype=out.dtype))
+    slot.zero_()
+
+
+def _as_ring_dtype(tensor: Tensor, ring_dtype: Any) -> Tensor:
+    if tensor.dtype == ring_dtype:
+        return tensor
+    return tensor.to(dtype=ring_dtype)
 
 
 def _ring_compartments(topology: SynapseTopology) -> tuple[Compartment, ...]:
@@ -517,18 +583,72 @@ def _nonempty_mats_by_comp(
 
 
 def _fused_sparse_by_comp(
-    topology: SynapseTopology, device: Any
-) -> tuple[dict[Compartment, Tensor], dict[Compartment, Tensor], dict[Compartment, int]]:
+    topology: SynapseTopology,
+    device: Any,
+    *,
+    fused_layout: Literal["auto", "coo", "csr"],
+) -> tuple[
+    dict[Compartment, Tensor],
+    dict[Compartment, Tensor],
+    dict[Compartment, int],
+    dict[Compartment, int],
+    dict[Compartment, Tensor],
+    dict[Compartment, Tensor],
+]:
     meta = topology.meta or {}
-    fused = meta.get("fused_W_by_comp")
-    delays = meta.get("fused_W_delays_by_comp")
+    fused_coo = meta.get("fused_W_by_comp_coo") or meta.get("fused_W_by_comp")
+    fused_csr = meta.get("fused_W_by_comp_csr")
+    delays = meta.get("fused_W_delays_long_by_comp") or meta.get("fused_W_delays_by_comp")
     n_post_by_comp = meta.get("fused_W_n_post_by_comp")
-    if not isinstance(fused, dict) or not isinstance(delays, dict) or not isinstance(n_post_by_comp, dict):
-        return {}, {}, {}
+    d_by_comp_meta = meta.get("fused_D_by_comp") or meta.get("fused_W_n_blocks_by_comp")
+    immediate_idx_by_comp = meta.get("fused_immediate_blocks_idx_by_comp")
+    delayed_idx_by_comp = meta.get("fused_delayed_blocks_idx_by_comp")
+    if not isinstance(delays, dict) or not isinstance(n_post_by_comp, dict):
+        return {}, {}, {}, {}, {}, {}
+    if not isinstance(immediate_idx_by_comp, dict) or not isinstance(delayed_idx_by_comp, dict):
+        raise RuntimeError(
+            "fused routing metadata missing; "
+            "compile_topology(..., build_sparse_delay_mats=True) to precompute fused routing indices."
+        )
+
+    coo_dict = fused_coo if isinstance(fused_coo, dict) else {}
+    csr_dict = fused_csr if isinstance(fused_csr, dict) else {}
+
+    d_meta = d_by_comp_meta if isinstance(d_by_comp_meta, dict) else {}
+    use_csr_default = fused_layout == "csr"
+    if fused_layout == "auto" and (
+        (device is not None and getattr(device, "type", None) == "cpu" and csr_dict)
+        or (meta.get("fused_layout_preference") == "csr" and csr_dict)
+    ):
+        use_csr_default = True
+
     out_fused: dict[Compartment, Tensor] = {}
     out_delays: dict[Compartment, Tensor] = {}
     out_n_post: dict[Compartment, int] = {}
-    for comp, mat in fused.items():
+    out_d: dict[Compartment, int] = {}
+    out_immediate_idx: dict[Compartment, Tensor] = {}
+    out_delayed_idx: dict[Compartment, Tensor] = {}
+
+    all_comps = set(coo_dict) | set(csr_dict)
+    for comp in all_comps:
+        mat = None
+        if fused_layout == "coo":
+            mat = coo_dict.get(comp)
+            if mat is None:
+                mat = csr_dict.get(comp)
+        elif fused_layout == "csr":
+            mat = csr_dict.get(comp)
+            if mat is None:
+                mat = coo_dict.get(comp)
+        else:
+            if use_csr_default:
+                mat = csr_dict.get(comp)
+                if mat is None:
+                    mat = coo_dict.get(comp)
+            else:
+                mat = coo_dict.get(comp)
+                if mat is None:
+                    mat = csr_dict.get(comp)
         if mat is None:
             continue
         if hasattr(mat, "device") and device is not None and mat.device != device:
@@ -544,8 +664,27 @@ def _fused_sparse_by_comp(
                 "fused_W_delays_by_comp is on a different device; "
                 "compile_topology(..., build_sparse_delay_mats=True) with the synapse device."
             )
+        immediate_idx = immediate_idx_by_comp.get(comp)
+        delayed_idx = delayed_idx_by_comp.get(comp)
+        if immediate_idx is None or delayed_idx is None:
+            raise RuntimeError(
+                "fused routing metadata missing; "
+                "compile_topology(..., build_sparse_delay_mats=True) to precompute fused routing indices."
+            )
+        if hasattr(immediate_idx, "device") and device is not None and immediate_idx.device != device:
+            raise RuntimeError(
+                "fused_immediate_blocks_idx_by_comp is on a different device; "
+                "compile_topology(..., build_sparse_delay_mats=True) with the synapse device."
+            )
+        if hasattr(delayed_idx, "device") and device is not None and delayed_idx.device != device:
+            raise RuntimeError(
+                "fused_delayed_blocks_idx_by_comp is on a different device; "
+                "compile_topology(..., build_sparse_delay_mats=True) with the synapse device."
+            )
         out_fused[cast(Compartment, comp)] = cast(Tensor, mat)
         out_delays[cast(Compartment, comp)] = cast(Tensor, delay_vec)
+        out_immediate_idx[cast(Compartment, comp)] = cast(Tensor, immediate_idx)
+        out_delayed_idx[cast(Compartment, comp)] = cast(Tensor, delayed_idx)
         n_post_val = n_post_by_comp.get(comp)
         if n_post_val is None:
             continue
@@ -553,7 +692,15 @@ def _fused_sparse_by_comp(
             out_n_post[cast(Compartment, comp)] = int(n_post_val)
         except Exception:
             continue
-    return out_fused, out_delays, out_n_post
+        d_val = d_meta.get(comp)
+        if d_val is None:
+            try:
+                d_val = int(delay_vec.numel())
+            except Exception:
+                d_val = None
+        if d_val is not None:
+            out_d[cast(Compartment, comp)] = int(d_val)
+    return out_fused, out_delays, out_n_post, out_d, out_immediate_idx, out_delayed_idx
 
 
 def _validate_sparse_mats_by_comp(
