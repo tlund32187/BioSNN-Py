@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from biosnn.contracts.monitors import IMonitor, StepEvent
+from biosnn.contracts.monitors import IMonitor, MonitorRequirements, StepEvent
 from biosnn.io.sinks import AsyncCsvSink, BufferedCsvSink, CsvSink
 from biosnn.monitors.metrics import reduce_stat, reduce_tensor, sample_tensor, scalar_to_float
 
@@ -115,6 +115,58 @@ class NeuronCSVMonitor(IMonitor):
         sample_indices = list(range(self._safe_sample))
         self._sample_indices = sample_indices
         return sample_indices
+
+    def requirements(self) -> MonitorRequirements:
+        if self._tensor_keys is None:
+            return MonitorRequirements.all()
+
+        needs_population_state = False
+        needs_v_soma = False
+        needs_projection_weights = False
+        needs_synapse_state = False
+        needs_modulators = False
+        needs_learning_state = False
+        needs_homeostasis_state = False
+
+        for key in self._tensor_keys:
+            key_str = str(key)
+            if key_str == "weights":
+                needs_projection_weights = True
+                needs_synapse_state = True
+                continue
+            if key_str == "v_soma" or key_str.endswith("/v_soma"):
+                needs_v_soma = True
+                needs_population_state = True
+                continue
+            if key_str.startswith("proj/"):
+                if key_str.endswith("/weights"):
+                    needs_projection_weights = True
+                else:
+                    needs_synapse_state = True
+                continue
+            if key_str.startswith("learn/"):
+                needs_learning_state = True
+                continue
+            if key_str.startswith("mod/"):
+                needs_modulators = True
+                continue
+            if key_str.startswith("homeostasis/"):
+                needs_homeostasis_state = True
+                continue
+            needs_population_state = True
+
+        return MonitorRequirements(
+            needs_spikes=bool(self._include_spikes),
+            needs_v_soma=needs_v_soma,
+            needs_projection_weights=needs_projection_weights,
+            needs_synapse_state=needs_synapse_state,
+            needs_modulators=needs_modulators,
+            needs_learning_state=needs_learning_state,
+            needs_homeostasis_state=needs_homeostasis_state,
+            needs_population_state=needs_population_state,
+            needs_scalars=bool(self._include_scalars),
+            needs_population_slices=False,
+        )
 
     def flush(self) -> None:
         self._sink.flush()

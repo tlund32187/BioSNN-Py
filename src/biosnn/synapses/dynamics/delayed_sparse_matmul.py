@@ -32,6 +32,7 @@ class DelayedSparseMatmulParams:
     enable_sparse_updates: bool = False
     learning_update_target: Literal["both", "fused_only"] = "both"
     fused_layout: Literal["auto", "coo", "csr"] = "auto"
+    store_sparse_by_delay: bool | None = None
 
 
 @dataclass(slots=True)
@@ -181,13 +182,24 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         return {"weights": state.weights}
 
     def compilation_requirements(self) -> Mapping[str, bool]:
-        needs_bucket_edge_mapping = bool(self.params.enable_sparse_updates)
-        return {
+        requirements: dict[str, bool] = {
             "needs_edges_by_delay": False,
             "needs_pre_adjacency": False,
             "needs_sparse_delay_mats": True,
-            "needs_bucket_edge_mapping": needs_bucket_edge_mapping,
+            "needs_bucket_edge_mapping": False,
+            "wants_fused_sparse": True,
+            "wants_by_delay_sparse": bool(self.params.store_sparse_by_delay),
+            "wants_bucket_edge_mapping": bool(self.params.enable_sparse_updates),
+            "wants_weights_snapshot_each_step": False,
+            "wants_projection_drive_tensor": False,
         }
+        if self.params.fused_layout == "csr":
+            requirements["wants_fused_csr"] = True
+        elif self.params.fused_layout == "coo":
+            requirements["wants_fused_csr"] = False
+        if self.params.store_sparse_by_delay is not None:
+            requirements["store_sparse_by_delay"] = bool(self.params.store_sparse_by_delay)
+        return requirements
 
     def apply_weight_updates(
         self,
@@ -462,7 +474,22 @@ def _resolve_ring_dtype(ring_dtype: str | None, weights_dtype: Any, device: Any)
         return weights_dtype
     torch = require_torch()
     resolved = _resolve_dtype(torch, ring_dtype)
+    _validate_ring_dtype_supported(torch=torch, resolved_dtype=resolved, device=device)
     return resolved
+
+
+def _validate_ring_dtype_supported(*, torch: Any, resolved_dtype: Any, device: Any) -> None:
+    if device is None or getattr(device, "type", None) != "cpu":
+        return
+    try:
+        probe = torch.zeros((2, 2), device=device, dtype=resolved_dtype)
+        probe.add_(1)
+        idx = torch.tensor([0, 1], device=device, dtype=torch.long)
+        probe.index_add_(0, idx, probe)
+    except Exception as exc:
+        raise RuntimeError(
+            f"ring_dtype={resolved_dtype} is not supported on CPU for ring operations."
+        ) from exc
 
 
 def _copy_ring_slot(slot: Tensor, out: Tensor) -> None:

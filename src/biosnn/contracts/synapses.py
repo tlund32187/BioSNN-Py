@@ -98,6 +98,13 @@ class ICompilationRequirements(Protocol):
         - needs_pre_adjacency
         - needs_sparse_delay_mats
         - needs_bucket_edge_mapping
+        - wants_fused_sparse
+        - wants_fused_csr
+        - wants_by_delay_sparse
+        - store_sparse_by_delay
+        - wants_bucket_edge_mapping
+        - wants_weights_snapshot_each_step
+        - wants_projection_drive_tensor
         """
         ...
 

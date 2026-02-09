@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from biosnn.contracts.monitors import IMonitor, StepEvent
+from biosnn.contracts.monitors import IMonitor, MonitorRequirements, StepEvent
 from biosnn.io.sinks import AsyncCsvSink, BufferedCsvSink, CsvSink
 from biosnn.monitors.metrics.scalar_utils import scalar_to_float
 from biosnn.monitors.metrics.tensor_reducer import reduce_stat
@@ -104,6 +104,9 @@ class MetricsCSVMonitor(IMonitor):
                 "reward": "",
             }
         )
+
+    def requirements(self) -> MonitorRequirements:
+        return MonitorRequirements(needs_scalars=True)
 
     def flush(self) -> None:
         self._sink.flush()

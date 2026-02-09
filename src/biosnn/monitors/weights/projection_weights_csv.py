@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from biosnn.contracts.monitors import IMonitor, StepEvent
+from biosnn.contracts.monitors import IMonitor, MonitorRequirements, StepEvent
 from biosnn.contracts.tensor import Tensor
 from biosnn.core.torch_utils import require_torch
 from biosnn.io.sinks.csv_sink import CsvSink
@@ -94,6 +94,17 @@ class ProjectionWeightsCSVMonitor(IMonitor):
                         "w": float(weight),
                     }
                 )
+
+    def compilation_requirements(self) -> Mapping[str, bool]:
+        """Declare engine payload needs for this monitor."""
+
+        return {"wants_weights_snapshot_each_step": True}
+
+    def requirements(self) -> MonitorRequirements:
+        return MonitorRequirements(
+            needs_projection_weights=True,
+            needs_scalars=True,
+        )
 
     def flush(self) -> None:
         self._sink.flush()

@@ -60,5 +60,13 @@ jobs:
           python -m pip install -e ".[dev]"
           python -m pip install "numpy>=1.26.0"
           python -m pip install "torch" --index-url https://download.pytorch.org/whl/cpu
+      - name: Detect CUDA
+        id: cuda
+        run: |
+          python -c "import os, torch; open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8').write(f'has_cuda={int(torch.cuda.is_available())}\n')"
       - name: Tests (pytest cuda)
+        if: steps.cuda.outputs.has_cuda == '1'
         run: pytest -m "cuda"
+      - name: Skip note (no CUDA on runner)
+        if: steps.cuda.outputs.has_cuda != '1'
+        run: echo "CUDA tests are optional and require a GPU runner; skipping on CPU runner."

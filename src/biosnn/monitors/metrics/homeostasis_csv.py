@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from biosnn.contracts.monitors import IMonitor, StepEvent
+from biosnn.contracts.monitors import IMonitor, MonitorRequirements, StepEvent
 from biosnn.io.sinks import AsyncCsvSink, BufferedCsvSink, CsvSink
 from biosnn.monitors.metrics.scalar_utils import scalar_to_float
 
@@ -82,6 +82,9 @@ class HomeostasisCSVMonitor(IMonitor):
             }
             self._sink.write_row(row)
 
+    def requirements(self) -> MonitorRequirements:
+        return MonitorRequirements(needs_scalars=True)
+
     def flush(self) -> None:
         self._sink.flush()
 
@@ -123,4 +126,3 @@ def _step_from_event(event: StepEvent, *, async_gpu: bool) -> int:
 
 
 __all__ = ["HomeostasisCSVMonitor"]
-

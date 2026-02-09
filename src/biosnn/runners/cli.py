@@ -7,16 +7,20 @@ import os
 import threading
 import time
 import webbrowser
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from urllib.parse import quote
 
+from biosnn.contracts.monitors import IMonitor
 from biosnn.core.torch_utils import require_torch
 from biosnn.experiments.demo_minimal import DemoMinimalConfig, run_demo_minimal
-from biosnn.experiments.demo_network import DemoNetworkConfig, run_demo_network
+from biosnn.experiments.demo_network import DemoNetworkConfig, build_network_demo
+from biosnn.experiments.demo_runner import run_demo_from_spec
+from biosnn.experiments.demo_types import DemoModelSpec, DemoRuntimeConfig
+from biosnn.experiments.demos import FEATURE_DEMO_BUILDERS, FeatureDemoConfig, FeatureDemoName
 from biosnn.learning.homeostasis import HomeostasisScope, RateEmaThresholdHomeostasisConfig
 
 
@@ -32,6 +36,7 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     run_dir = _make_run_dir(repo_root / "artifacts")
     device = _resolve_device(torch, args.device)
+    _validate_ring_dtype_for_device(torch=torch, ring_dtype=args.ring_dtype, device=device)
     steps = args.steps
     dt = args.dt
 
@@ -41,81 +46,7 @@ def main() -> None:
 
     mode = args.mode
 
-    if args.demo == "network":
-        input_to_relay_p = args.input_to_relay_p
-        relay_to_hidden_p = args.relay_to_hidden_p
-        hidden_to_output_p = args.hidden_to_output_p
-        if args.p_in_hidden is not None:
-            input_to_relay_p = args.p_in_hidden
-            relay_to_hidden_p = args.p_in_hidden
-        if args.p_hidden_out is not None:
-            hidden_to_output_p = args.p_hidden_out
-        run_demo_network(
-            DemoNetworkConfig(
-                out_dir=run_dir,
-                mode=mode,
-                steps=steps,
-                dt=dt,
-                seed=args.seed,
-                device=device,
-                max_ring_mib=args.max_ring_mib,
-                profile=args.profile,
-                profile_steps=args.profile_steps,
-                allow_cuda_monitor_sync=args.allow_cuda_monitor_sync,
-                parallel_compile=args.parallel_compile,
-                parallel_compile_workers=_parse_thread_setting(args.parallel_compile_workers),
-                parallel_compile_torch_threads=int(args.parallel_compile_torch_threads),
-                monitor_safe_defaults=bool(args.monitor_safe_defaults),
-                monitor_neuron_sample=args.monitor_neuron_sample,
-                monitor_edge_sample=args.monitor_edge_sample,
-                n_in=args.n_in,
-                n_hidden=args.n_hidden,
-                n_out=args.n_out,
-                input_pops=args.input_pops,
-                input_depth=args.input_depth,
-                hidden_layers=args.hidden_layers,
-                hidden_pops_per_layer=args.hidden_pops_per_layer,
-                output_pops=args.output_pops,
-                input_cross=args.input_cross,
-                input_to_relay_p=input_to_relay_p,
-                input_to_relay_weight_scale=args.input_to_relay_weight_scale,
-                relay_to_hidden_p=relay_to_hidden_p,
-                relay_to_hidden_weight_scale=args.relay_to_hidden_weight_scale,
-                hidden_to_output_p=hidden_to_output_p,
-                hidden_to_output_weight_scale=args.hidden_to_output_weight_scale,
-                input_skip_to_hidden=args.input_skip_to_hidden,
-                input_skip_p=args.input_skip_p,
-                input_skip_weight_scale=args.input_skip_weight_scale,
-                relay_cross=args.relay_cross,
-                relay_cross_p=args.relay_cross_p,
-                relay_cross_weight_scale=args.relay_cross_weight_scale,
-                relay_lateral=args.relay_lateral,
-                hidden_lateral=args.hidden_lateral,
-                weight_init=args.weight_init,
-                enable_homeostasis=bool(args.enable_homeostasis),
-                homeostasis=RateEmaThresholdHomeostasisConfig(
-                    alpha=float(args.homeostasis_alpha),
-                    eta=float(args.homeostasis_eta),
-                    r_target=float(args.homeostasis_r_target),
-                    clamp_min=float(args.homeostasis_clamp_min),
-                    clamp_max=float(args.homeostasis_clamp_max),
-                    scope=cast(HomeostasisScope, args.homeostasis_scope),
-                ),
-                homeostasis_export_every=int(args.homeostasis_export_every),
-                feedforward_delay_from_distance=args.feedforward_delay_from_distance,
-                feedforward_delay_base_velocity=args.feedforward_delay_base_velocity,
-                feedforward_delay_myelin_scale=args.feedforward_delay_myelin_scale,
-                feedforward_delay_myelin_mean=args.feedforward_delay_myelin_mean,
-                feedforward_delay_myelin_std=args.feedforward_delay_myelin_std,
-                feedforward_delay_distance_scale=args.feedforward_delay_distance_scale,
-                feedforward_delay_min=args.feedforward_delay_min,
-                feedforward_delay_max=args.feedforward_delay_max,
-                feedforward_delay_use_ceil=args.feedforward_delay_use_ceil,
-                input_drive=args.input_drive,
-                drive_monitor=args.drive_monitor,
-            )
-        )
-    else:
+    if args.demo == "minimal":
         run_demo_minimal(
             DemoMinimalConfig(
                 out_dir=run_dir,
@@ -135,6 +66,20 @@ def main() -> None:
                 monitor_edge_sample=args.monitor_edge_sample,
             )
         )
+    else:
+        builders = _demo_registry()
+        builder = builders.get(args.demo)
+        if builder is None:
+            raise ValueError(f"Unsupported demo '{args.demo}'")
+        model_spec, runtime_cfg, monitors = builder(
+            args=args,
+            run_dir=run_dir,
+            mode=cast(ModeName, mode),
+            steps=int(steps),
+            dt=float(dt),
+            device=device,
+        )
+        run_demo_from_spec(model_spec, runtime_cfg, monitors)
 
     if not _should_launch_dashboard(mode):
         print("Fast mode selected; skipping dashboard server.")
@@ -155,13 +100,284 @@ def main() -> None:
         return
 
 
+ModeName = Literal["dashboard", "fast"]
+ParallelCompileMode = Literal["auto", "on", "off"]
+DemoBuildResult = tuple[DemoModelSpec, DemoRuntimeConfig, list[IMonitor]]
+DemoBuilder = Callable[..., DemoBuildResult]
+
+
+def _demo_registry() -> Mapping[str, DemoBuilder]:
+    return {
+        "network": _build_network_demo_from_cli,
+        "propagation_impulse": _build_propagation_impulse_demo_from_cli,
+        "delay_impulse": _build_delay_impulse_demo_from_cli,
+        "learning_gate": _build_learning_gate_demo_from_cli,
+        "dopamine_plasticity": _build_dopamine_plasticity_demo_from_cli,
+    }
+
+
+def _build_network_demo_from_cli(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    mode: ModeName,
+    steps: int,
+    dt: float,
+    device: str,
+) -> DemoBuildResult:
+    cfg = _build_network_config_from_args(
+        args=args,
+        run_dir=run_dir,
+        mode=mode,
+        steps=steps,
+        dt=dt,
+        device=device,
+    )
+    return build_network_demo(cfg)
+
+
+def _build_propagation_impulse_demo_from_cli(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    mode: ModeName,
+    steps: int,
+    dt: float,
+    device: str,
+) -> DemoBuildResult:
+    return _build_feature_demo_from_cli(
+        demo_name="propagation_impulse",
+        args=args,
+        run_dir=run_dir,
+        mode=mode,
+        steps=steps,
+        dt=dt,
+        device=device,
+    )
+
+
+def _build_delay_impulse_demo_from_cli(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    mode: ModeName,
+    steps: int,
+    dt: float,
+    device: str,
+) -> DemoBuildResult:
+    return _build_feature_demo_from_cli(
+        demo_name="delay_impulse",
+        args=args,
+        run_dir=run_dir,
+        mode=mode,
+        steps=steps,
+        dt=dt,
+        device=device,
+    )
+
+
+def _build_learning_gate_demo_from_cli(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    mode: ModeName,
+    steps: int,
+    dt: float,
+    device: str,
+) -> DemoBuildResult:
+    return _build_feature_demo_from_cli(
+        demo_name="learning_gate",
+        args=args,
+        run_dir=run_dir,
+        mode=mode,
+        steps=steps,
+        dt=dt,
+        device=device,
+    )
+
+
+def _build_dopamine_plasticity_demo_from_cli(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    mode: ModeName,
+    steps: int,
+    dt: float,
+    device: str,
+) -> DemoBuildResult:
+    return _build_feature_demo_from_cli(
+        demo_name="dopamine_plasticity",
+        args=args,
+        run_dir=run_dir,
+        mode=mode,
+        steps=steps,
+        dt=dt,
+        device=device,
+    )
+
+
+def _build_feature_demo_from_cli(
+    *,
+    demo_name: str,
+    args: argparse.Namespace,
+    run_dir: Path,
+    mode: ModeName,
+    steps: int,
+    dt: float,
+    device: str,
+) -> DemoBuildResult:
+    if demo_name not in FEATURE_DEMO_BUILDERS:
+        raise ValueError(f"Unknown feature demo '{demo_name}'")
+    typed_demo_name = cast(FeatureDemoName, demo_name)
+    cfg = _build_feature_config_from_args(
+        args=args,
+        run_dir=run_dir,
+        mode=mode,
+        steps=steps,
+        dt=dt,
+        device=device,
+    )
+    builder = cast(Callable[[FeatureDemoConfig], DemoBuildResult], FEATURE_DEMO_BUILDERS[typed_demo_name])
+    return builder(cfg)
+
+
+def _build_feature_config_from_args(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    mode: ModeName,
+    steps: int,
+    dt: float,
+    device: str,
+) -> FeatureDemoConfig:
+    return FeatureDemoConfig(
+        out_dir=run_dir,
+        mode=mode,
+        steps=steps,
+        dt=dt,
+        seed=args.seed,
+        device=device,
+        max_ring_mib=args.max_ring_mib,
+        profile=args.profile,
+        profile_steps=args.profile_steps,
+        allow_cuda_monitor_sync=args.allow_cuda_monitor_sync,
+        parallel_compile=cast(ParallelCompileMode, args.parallel_compile),
+        parallel_compile_workers=_parse_thread_setting(args.parallel_compile_workers),
+        parallel_compile_torch_threads=int(args.parallel_compile_torch_threads),
+        delay_steps=int(args.delay_steps),
+        learning_lr=float(args.learning_lr),
+        da_amount=float(args.da_amount),
+        da_step=int(args.da_step),
+        fused_layout=cast(Literal["auto", "coo", "csr"], args.fused_layout),
+        ring_dtype=cast(str | None, args.ring_dtype),
+        ring_strategy=cast(Literal["dense", "event_bucketed"], args.ring_strategy),
+        store_sparse_by_delay=cast(bool | None, args.store_sparse_by_delay),
+    )
+
+
+def _build_network_config_from_args(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    mode: ModeName,
+    steps: int,
+    dt: float,
+    device: str,
+) -> DemoNetworkConfig:
+    input_to_relay_p = args.input_to_relay_p
+    relay_to_hidden_p = args.relay_to_hidden_p
+    hidden_to_output_p = args.hidden_to_output_p
+    if args.p_in_hidden is not None:
+        input_to_relay_p = args.p_in_hidden
+        relay_to_hidden_p = args.p_in_hidden
+    if args.p_hidden_out is not None:
+        hidden_to_output_p = args.p_hidden_out
+    return DemoNetworkConfig(
+        out_dir=run_dir,
+        mode=mode,
+        steps=steps,
+        dt=dt,
+        seed=args.seed,
+        device=device,
+        max_ring_mib=args.max_ring_mib,
+        profile=args.profile,
+        profile_steps=args.profile_steps,
+        allow_cuda_monitor_sync=args.allow_cuda_monitor_sync,
+        parallel_compile=cast(ParallelCompileMode, args.parallel_compile),
+        parallel_compile_workers=_parse_thread_setting(args.parallel_compile_workers),
+        parallel_compile_torch_threads=int(args.parallel_compile_torch_threads),
+        monitor_safe_defaults=bool(args.monitor_safe_defaults),
+        monitor_neuron_sample=args.monitor_neuron_sample,
+        monitor_edge_sample=args.monitor_edge_sample,
+        n_in=args.n_in,
+        n_hidden=args.n_hidden,
+        n_out=args.n_out,
+        input_pops=args.input_pops,
+        input_depth=args.input_depth,
+        hidden_layers=args.hidden_layers,
+        hidden_pops_per_layer=args.hidden_pops_per_layer,
+        output_pops=args.output_pops,
+        input_cross=args.input_cross,
+        input_to_relay_p=input_to_relay_p,
+        input_to_relay_weight_scale=args.input_to_relay_weight_scale,
+        relay_to_hidden_p=relay_to_hidden_p,
+        relay_to_hidden_weight_scale=args.relay_to_hidden_weight_scale,
+        hidden_to_output_p=hidden_to_output_p,
+        hidden_to_output_weight_scale=args.hidden_to_output_weight_scale,
+        input_skip_to_hidden=args.input_skip_to_hidden,
+        input_skip_p=args.input_skip_p,
+        input_skip_weight_scale=args.input_skip_weight_scale,
+        relay_cross=args.relay_cross,
+        relay_cross_p=args.relay_cross_p,
+        relay_cross_weight_scale=args.relay_cross_weight_scale,
+        relay_lateral=args.relay_lateral,
+        hidden_lateral=args.hidden_lateral,
+        weight_init=args.weight_init,
+        enable_homeostasis=bool(args.enable_homeostasis),
+        homeostasis=RateEmaThresholdHomeostasisConfig(
+            alpha=float(args.homeostasis_alpha),
+            eta=float(args.homeostasis_eta),
+            r_target=float(args.homeostasis_r_target),
+            clamp_min=float(args.homeostasis_clamp_min),
+            clamp_max=float(args.homeostasis_clamp_max),
+            scope=cast(HomeostasisScope, args.homeostasis_scope),
+        ),
+        homeostasis_export_every=int(args.homeostasis_export_every),
+        feedforward_delay_from_distance=args.feedforward_delay_from_distance,
+        feedforward_delay_base_velocity=args.feedforward_delay_base_velocity,
+        feedforward_delay_myelin_scale=args.feedforward_delay_myelin_scale,
+        feedforward_delay_myelin_mean=args.feedforward_delay_myelin_mean,
+        feedforward_delay_myelin_std=args.feedforward_delay_myelin_std,
+        feedforward_delay_distance_scale=args.feedforward_delay_distance_scale,
+        feedforward_delay_min=args.feedforward_delay_min,
+        feedforward_delay_max=args.feedforward_delay_max,
+        feedforward_delay_use_ceil=args.feedforward_delay_use_ceil,
+        input_drive=args.input_drive,
+        drive_monitor=args.drive_monitor,
+        fused_layout=cast(Literal["auto", "coo", "csr"], args.fused_layout),
+        ring_dtype=cast(str | None, args.ring_dtype),
+        ring_strategy=cast(Literal["dense", "event_bucketed"], args.ring_strategy),
+        store_sparse_by_delay=cast(bool | None, args.store_sparse_by_delay),
+    )
+
+
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run BioSNN demo and open dashboard")
     parser.add_argument(
         "--demo",
-        choices=["minimal", "network"],
+        choices=[
+            "minimal",
+            "network",
+            "propagation_impulse",
+            "delay_impulse",
+            "learning_gate",
+            "dopamine_plasticity",
+        ],
         default=_default_demo(),
-        help="which demo to run",
+        help=(
+            "demo to run: minimal, network, propagation_impulse, delay_impulse, "
+            "learning_gate, dopamine_plasticity"
+        ),
     )
     parser.add_argument(
         "--device",
@@ -180,6 +396,31 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         default=2048.0,
         help="max ring buffer size per projection in MiB (set <=0 to disable)",
+    )
+    parser.add_argument(
+        "--fused-layout",
+        choices=["auto", "coo", "csr"],
+        default="auto",
+        help="fused sparse layout preference for delayed_sparse_matmul synapses",
+    )
+    parser.add_argument(
+        "--ring-dtype",
+        type=_parse_ring_dtype,
+        default=None,
+        help="ring buffer dtype: none, float32, float16, or bfloat16",
+    )
+    parser.add_argument(
+        "--ring-strategy",
+        choices=["dense", "event_bucketed"],
+        default="dense",
+        help="ring buffer strategy for delayed_current synapses",
+    )
+    parser.add_argument(
+        "--store-sparse-by-delay",
+        type=_parse_true_false,
+        default=None,
+        metavar="{true,false}",
+        help="override sparse by-delay matrix storage for delayed_sparse_matmul",
     )
     parser.add_argument(
         "--monitor-safe-defaults",
@@ -245,6 +486,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="set OMP_NUM_THREADS and MKL_NUM_THREADS to match --torch-threads",
     )
     parser.add_argument("--steps", type=int, default=500)
+    parser.add_argument("--delay_steps", type=int, default=3)
+    parser.add_argument("--learning_lr", type=float, default=0.1)
+    parser.add_argument("--da_amount", type=float, default=1.0)
+    parser.add_argument("--da_step", type=int, default=10)
     parser.add_argument("--n", type=int, default=100, help="number of neurons")
     parser.add_argument("--p", type=float, default=0.05, help="connection probability")
     parser.add_argument("--dt", type=float, default=1e-3)
@@ -396,6 +641,47 @@ def _parse_thread_setting(value: str | None) -> int | None:
     if parsed <= 0:
         raise ValueError(f"Thread count must be positive: {parsed}")
     return parsed
+
+
+def _parse_ring_dtype(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized == "none":
+        return None
+    if normalized in {"float32", "float16", "bfloat16"}:
+        return normalized
+    raise ValueError(f"Invalid ring dtype: {value}")
+
+
+def _parse_true_false(value: str | None) -> bool:
+    if value is None:
+        raise ValueError("Expected true or false")
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "y", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean literal: {value}")
+
+
+def _validate_ring_dtype_for_device(*, torch: Any, ring_dtype: str | None, device: str) -> None:
+    if ring_dtype is None:
+        return
+    dtype = getattr(torch, ring_dtype, None)
+    if dtype is None:
+        raise ValueError(f"Unsupported ring dtype: {ring_dtype}")
+    if device != "cpu":
+        return
+    try:
+        probe = torch.zeros((2, 2), device="cpu", dtype=dtype)
+        probe.add_(1)
+        idx = torch.tensor([0, 1], device="cpu", dtype=torch.long)
+        probe.index_add_(0, idx, probe)
+    except Exception as exc:
+        raise ValueError(
+            f"--ring-dtype {ring_dtype} is not supported on CPU in this runtime."
+        ) from exc
 
 
 def _apply_threading_env(threads: int | None, interop: int | None) -> None:

@@ -31,7 +31,7 @@ class DelayedCurrentParams:
     clamp_max: float | None = None
     receptor_scale: Mapping[ReceptorKind, float] | None = None
     ring_dtype: str | None = None
-    ring_strategy: Literal["dense", "event_list_proto"] = "dense"
+    ring_strategy: Literal["dense", "event_list_proto", "event_bucketed"] = "dense"
     event_list_max_events: int = 1_000_000
     use_edge_buffer: bool = False
     event_driven: bool = False
@@ -130,11 +130,11 @@ class DelayedCurrentSynapse(ISynapseModel):
         use_no_grad = _use_no_grad(ctx)
         with torch.no_grad() if use_no_grad else nullcontext():
             if (
-                self.params.ring_strategy == "event_list_proto"
+                self.params.ring_strategy in {"event_list_proto", "event_bucketed"}
                 and not (self.params.event_driven or self.params.adaptive_event_driven)
             ):
                 raise RuntimeError(
-                    "ring_strategy=event_list_proto requires event_driven or adaptive_event_driven."
+                    "ring_strategy=event_bucketed requires event_driven or adaptive_event_driven."
                 )
             weights = state.weights
             device = weights.device
@@ -349,6 +349,11 @@ class DelayedCurrentSynapse(ISynapseModel):
             "needs_pre_adjacency": needs_pre_adjacency,
             "needs_sparse_delay_mats": False,
             "needs_bucket_edge_mapping": False,
+            "wants_fused_sparse": False,
+            "wants_by_delay_sparse": False,
+            "wants_bucket_edge_mapping": False,
+            "wants_weights_snapshot_each_step": False,
+            "wants_projection_drive_tensor": False,
         }
 
     def _scale_table(self, like: Tensor, kinds: tuple[ReceptorKind, ...]) -> Tensor:
@@ -707,7 +712,7 @@ def _step_post_ring_event_driven(
     depth = max_delay + 1
     n_post = _infer_n_post(topology)
     ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
-    use_event_list = model.params.ring_strategy == "event_list_proto"
+    use_event_list = model.params.ring_strategy in {"event_list_proto", "event_bucketed"}
     event_ring: dict[Compartment, EventListRing] | None = None
     if use_event_list:
         post_out = _ensure_post_out(state, topology, n_post, device, weights.dtype)
@@ -879,7 +884,7 @@ def _step_post_ring_event_driven_into(
     depth = max_delay + 1
     n_post = _infer_n_post(topology)
     ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
-    use_event_list = model.params.ring_strategy == "event_list_proto"
+    use_event_list = model.params.ring_strategy in {"event_list_proto", "event_bucketed"}
     event_ring: dict[Compartment, EventListRing] | None = None
     if use_event_list:
         event_ring = _ensure_event_ring(
@@ -1118,7 +1123,22 @@ def _resolve_ring_dtype(ring_dtype: str | None, weights_dtype: Any, device: Any)
         return weights_dtype
     torch = require_torch()
     resolved = _resolve_dtype(torch, ring_dtype)
+    _validate_ring_dtype_supported(torch=torch, resolved_dtype=resolved, device=device)
     return resolved
+
+
+def _validate_ring_dtype_supported(*, torch: Any, resolved_dtype: Any, device: Any) -> None:
+    if device is None or getattr(device, "type", None) != "cpu":
+        return
+    try:
+        probe = torch.zeros((2, 2), device=device, dtype=resolved_dtype)
+        probe.add_(1)
+        idx = torch.tensor([0, 1], device=device, dtype=torch.long)
+        probe.index_add_(0, idx, probe)
+    except Exception as exc:
+        raise RuntimeError(
+            f"ring_dtype={resolved_dtype} is not supported on CPU for ring operations."
+        ) from exc
 
 
 def _copy_ring_slot(slot: Tensor, out: Tensor) -> None:

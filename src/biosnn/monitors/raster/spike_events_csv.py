@@ -6,7 +6,7 @@ import warnings
 from collections.abc import Mapping
 from typing import Any
 
-from biosnn.contracts.monitors import IMonitor, StepEvent
+from biosnn.contracts.monitors import IMonitor, MonitorRequirements, StepEvent
 from biosnn.contracts.tensor import Tensor
 from biosnn.core.torch_utils import require_torch
 from biosnn.io.sinks import AsyncCsvSink, CsvSink
@@ -111,6 +111,13 @@ class SpikeEventsCSVMonitor(IMonitor):
             self._sample_mask[pop] = mask
         mask = self._sample_mask[pop]
         return indices[mask[indices]]
+
+    def requirements(self) -> MonitorRequirements:
+        return MonitorRequirements(
+            needs_spikes=True,
+            needs_scalars=True,
+            needs_population_slices=True,
+        )
 
     def flush(self) -> None:
         self._sink.flush()

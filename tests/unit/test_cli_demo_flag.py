@@ -25,12 +25,28 @@ def test_cli_demo_flag_defaults():
     assert args.parallel_compile_torch_threads == 1
     assert args.profile is False
     assert args.profile_steps == 20
+    assert args.delay_steps == 3
+    assert args.learning_lr == 0.1
+    assert args.da_amount == 1.0
+    assert args.da_step == 10
+    assert args.fused_layout == "auto"
+    assert args.ring_dtype is None
+    assert args.ring_strategy == "dense"
+    assert args.store_sparse_by_delay is None
 
     args = cli._parse_args(["--demo", "minimal"])
     assert args.demo == "minimal"
 
     args = cli._parse_args(["--demo", "network"])
     assert args.demo == "network"
+    args = cli._parse_args(["--demo", "propagation_impulse"])
+    assert args.demo == "propagation_impulse"
+    args = cli._parse_args(["--demo", "delay_impulse"])
+    assert args.demo == "delay_impulse"
+    args = cli._parse_args(["--demo", "learning_gate"])
+    assert args.demo == "learning_gate"
+    args = cli._parse_args(["--demo", "dopamine_plasticity"])
+    assert args.demo == "dopamine_plasticity"
 
     args = cli._parse_args(["--mode", "fast"])
     assert args.mode == "fast"
@@ -56,6 +72,22 @@ def test_cli_demo_flag_defaults():
             "--profile",
             "--profile-steps",
             "12",
+            "--delay_steps",
+            "7",
+            "--learning_lr",
+            "0.2",
+            "--da_amount",
+            "2.5",
+            "--da_step",
+            "9",
+            "--fused-layout",
+            "csr",
+            "--ring-dtype",
+            "bfloat16",
+            "--ring-strategy",
+            "event_bucketed",
+            "--store-sparse-by-delay",
+            "true",
         ]
     )
     assert args.torch_threads == "4"
@@ -70,6 +102,20 @@ def test_cli_demo_flag_defaults():
     assert args.parallel_compile_torch_threads == 3
     assert args.profile is True
     assert args.profile_steps == 12
+    assert args.delay_steps == 7
+    assert args.learning_lr == 0.2
+    assert args.da_amount == 2.5
+    assert args.da_step == 9
+    assert args.fused_layout == "csr"
+    assert args.ring_dtype == "bfloat16"
+    assert args.ring_strategy == "event_bucketed"
+    assert args.store_sparse_by_delay is True
+
+    args = cli._parse_args(["--ring-dtype", "none"])
+    assert args.ring_dtype is None
+
+    args = cli._parse_args(["--store-sparse-by-delay", "false"])
+    assert args.store_sparse_by_delay is False
 
 
 def test_cli_dashboard_mode_gate():

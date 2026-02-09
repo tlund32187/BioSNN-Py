@@ -16,7 +16,7 @@ from biosnn.connectivity.builders import (
     build_bipartite_erdos_renyi_topology,
 )
 from biosnn.connectivity.delays import DelayParams, compute_delay_steps
-from biosnn.contracts.monitors import IMonitor, StepEvent
+from biosnn.contracts.monitors import IMonitor, MonitorRequirements, StepEvent
 from biosnn.contracts.neurons import Compartment
 from biosnn.contracts.synapses import ISynapseModel
 from biosnn.core.torch_utils import require_torch
@@ -103,6 +103,10 @@ class DemoNetworkConfig:
     feedforward_delay_max: float | None = None
     feedforward_delay_use_ceil: bool = True
     input_drive: float = 1.0
+    fused_layout: Literal["auto", "coo", "csr"] = "auto"
+    ring_dtype: str | None = None
+    ring_strategy: Literal["dense", "event_bucketed"] = "dense"
+    store_sparse_by_delay: bool | None = None
     neuron_sample: int = 32
     synapse_sample: int = 64
     spike_stride: int = 2
@@ -256,17 +260,28 @@ def build_network_demo(
         output_layer.append(pop)
     layers.append(output_layer)
 
-    use_sparse_synapse = device == "cuda"
+    sparse_override = cfg.fused_layout != "auto" or cfg.store_sparse_by_delay is not None
+    use_sparse_synapse = device == "cuda" or sparse_override
     make_synapse: Callable[[], ISynapseModel]
     if use_sparse_synapse:
-        # CUDA default: use sparse matmul backend to avoid CPU fallback paths.
-        syn_params_sparse = DelayedSparseMatmulParams(init_weight=cfg.weight_init)
+        syn_params_sparse = DelayedSparseMatmulParams(
+            init_weight=cfg.weight_init,
+            ring_dtype=cfg.ring_dtype,
+            fused_layout=cfg.fused_layout,
+            store_sparse_by_delay=cfg.store_sparse_by_delay,
+        )
 
         def make_synapse() -> ISynapseModel:
             return DelayedSparseMatmulSynapse(syn_params_sparse)
 
     else:
-        syn_params_current = DelayedCurrentParams(init_weight=cfg.weight_init)
+        use_event_bucketed = cfg.ring_strategy == "event_bucketed"
+        syn_params_current = DelayedCurrentParams(
+            init_weight=cfg.weight_init,
+            ring_dtype=cfg.ring_dtype,
+            ring_strategy=_ring_strategy_for_delayed_current(cfg.ring_strategy),
+            event_driven=use_event_bucketed,
+        )
 
         def make_synapse() -> ISynapseModel:
             return DelayedCurrentSynapse(syn_params_current)
@@ -728,6 +743,15 @@ class _AggregatedSynapseCSVMonitor(IMonitor):
 
         self._sink.write_row(row)
 
+    def compilation_requirements(self) -> dict[str, bool]:
+        return {"wants_weights_snapshot_each_step": True}
+
+    def requirements(self) -> MonitorRequirements:
+        return MonitorRequirements(
+            needs_projection_weights=True,
+            needs_scalars=True,
+        )
+
     def flush(self) -> None:
         self._sink.flush()
 
@@ -784,6 +808,11 @@ class _PopDriveCSVMonitor(IMonitor):
                 row[f"{pop_key}_dend_abs_mean"] = scalar_to_float(dend.abs().mean())
 
         self._sink.write_row(row)
+
+    def requirements(self) -> MonitorRequirements:
+        return MonitorRequirements(
+            needs_scalars=True,
+        )
 
     def flush(self) -> None:
         self._sink.flush()
@@ -1223,6 +1252,12 @@ def default_target_compartment_for_post(model: Any) -> Compartment:
     if Compartment.DENDRITE in compartments:
         return Compartment.DENDRITE
     return Compartment.SOMA
+
+
+def _ring_strategy_for_delayed_current(
+    strategy: Literal["dense", "event_bucketed"],
+) -> Literal["dense", "event_list_proto"]:
+    return "event_list_proto" if strategy == "event_bucketed" else "dense"
 
 
 def _sanitize_key(value: str) -> str:

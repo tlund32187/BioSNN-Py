@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any, cast
 
 import pytest
 
@@ -101,6 +103,31 @@ class SparseDeltaRule(ILearningRule):
         return {}
 
 
+def _compiled_edge_value(meta: Mapping[str, Any], *, edge_idx: int) -> Tensor:
+    edge_bucket_comp = cast(Tensor, meta["edge_bucket_comp"])
+    edge_bucket_delay = cast(Tensor, meta["edge_bucket_delay"])
+    edge_bucket_pos = cast(Tensor, meta["edge_bucket_pos"])
+
+    comp_id = int(edge_bucket_comp[edge_idx].item())
+    delay = int(edge_bucket_delay[edge_idx].item())
+    pos = int(edge_bucket_pos[edge_idx].item())
+    comp = tuple(Compartment)[comp_id]
+
+    values_by_comp = cast(Any, meta.get("values_by_comp"))
+    if isinstance(values_by_comp, dict):
+        values = values_by_comp[comp][delay]
+        assert values is not None
+        return cast(Tensor, values[pos])
+
+    fused_by_comp = cast(Any, meta.get("fused_W_by_comp"))
+    edge_bucket_fused_pos = cast(Any, meta.get("edge_bucket_fused_pos"))
+    assert isinstance(fused_by_comp, dict)
+    assert edge_bucket_fused_pos is not None
+    fused_values = fused_by_comp[comp].values()
+    fused_pos = int(edge_bucket_fused_pos[edge_idx].item())
+    return cast(Tensor, fused_values[fused_pos])
+
+
 def _build_engine(*, compiled_mode: bool, clamp_max: float | None = None) -> TorchNetworkEngine:
     pre_spikes = torch.tensor([True, False, False])
     post_spikes = torch.tensor([False, False])
@@ -167,21 +194,11 @@ def test_sparse_matmul_learning_updates(compiled_mode: bool) -> None:
     torch.testing.assert_close(topo_weights_after_first, expected_weights)
 
     meta = engine._proj_specs[0].topology.meta or {}
-    values_by_comp = meta["values_by_comp"]
-    edge_bucket_comp = meta["edge_bucket_comp"]
-    edge_bucket_delay = meta["edge_bucket_delay"]
-    edge_bucket_pos = meta["edge_bucket_pos"]
     edge_scale = meta["edge_scale"]
 
-    comp_id = int(edge_bucket_comp[0].item())
-    delay = int(edge_bucket_delay[0].item())
-    pos = int(edge_bucket_pos[0].item())
-    comp = tuple(Compartment)[comp_id]
-    values = values_by_comp[comp][delay]
-    assert values is not None
-
     expected_val = weights_after_first[0] * edge_scale[0]
-    torch.testing.assert_close(values[pos], expected_val)
+    compiled_val = _compiled_edge_value(meta, edge_idx=0)
+    torch.testing.assert_close(compiled_val, expected_val)
 
     engine.step()
     drive_second = engine.last_projection_drive["P"][Compartment.DENDRITE].clone()
@@ -208,16 +225,7 @@ def test_sparse_matmul_clamp_and_weight_binding(compiled_mode: bool) -> None:
     torch.testing.assert_close(topo_weights, expected)
 
     meta = engine._proj_specs[0].topology.meta or {}
-    values_by_comp = meta["values_by_comp"]
-    edge_bucket_comp = meta["edge_bucket_comp"]
-    edge_bucket_delay = meta["edge_bucket_delay"]
-    edge_bucket_pos = meta["edge_bucket_pos"]
     edge_scale = meta["edge_scale"]
 
-    comp_id = int(edge_bucket_comp[0].item())
-    delay = int(edge_bucket_delay[0].item())
-    pos = int(edge_bucket_pos[0].item())
-    comp = tuple(Compartment)[comp_id]
-    values = values_by_comp[comp][delay]
-    assert values is not None
-    torch.testing.assert_close(values[pos], expected[0] * edge_scale[0])
+    compiled_val = _compiled_edge_value(meta, edge_idx=0)
+    torch.testing.assert_close(compiled_val, expected[0] * edge_scale[0])

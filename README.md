@@ -139,6 +139,7 @@ pip install -e ".[dev]"
 See: `docs/public_api.md` and `docs/architecture/decisions/0001-library-first.md`
 and `docs/architecture/decisions/0002-run-modes-and-fused-delays.md`
 and `docs/architecture/decisions/0003-delay-ring-scaling-options.md`
+and `docs/ci.md`
 
 ## Model docs
 - `docs/models/adex_2c.md`
