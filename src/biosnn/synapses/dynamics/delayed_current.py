@@ -16,10 +16,11 @@ from biosnn.contracts.synapses import (
     SynapseTopology,
 )
 from biosnn.core.torch_utils import _resolve_dtype, require_torch, resolve_device_dtype
-from biosnn.synapses.buffers.event_list_ring import EventListRing
+from biosnn.synapses.buffers import BucketedEventRing, EventListRing
 
 _COMPARTMENT_ORDER = tuple(Compartment)
 _COMPARTMENT_TO_ID = {comp: idx for idx, comp in enumerate(_COMPARTMENT_ORDER)}
+_EventRing = EventListRing | BucketedEventRing
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,7 @@ class DelayedCurrentParams:
     ring_dtype: str | None = None
     ring_strategy: Literal["dense", "event_list_proto", "event_bucketed"] = "dense"
     event_list_max_events: int = 1_000_000
+    ring_capacity_max: int = 2_000_000
     use_edge_buffer: bool = False
     event_driven: bool = False
     adaptive_event_driven: bool = False
@@ -48,7 +50,7 @@ class DelayedCurrentState:
     delay_tmp: Tensor | None  # shape [E] scratch for edge buffer
     post_ring: dict[Compartment, Tensor] | None  # shape [D, Npost] per compartment
     post_out: dict[Compartment, Tensor] | None  # reusable output buffers [Npost] per compartment
-    post_event_ring: dict[Compartment, EventListRing] | None  # sparse event ring per compartment
+    post_event_ring: dict[Compartment, _EventRing] | None  # sparse event ring per compartment
     cursor: int
 
 
@@ -134,7 +136,8 @@ class DelayedCurrentSynapse(ISynapseModel):
                 and not (self.params.event_driven or self.params.adaptive_event_driven)
             ):
                 raise RuntimeError(
-                    "ring_strategy=event_bucketed requires event_driven or adaptive_event_driven."
+                    f"ring_strategy={self.params.ring_strategy} requires "
+                    "event_driven or adaptive_event_driven."
                 )
             weights = state.weights
             device = weights.device
@@ -338,7 +341,7 @@ class DelayedCurrentSynapse(ISynapseModel):
             tensors["delay_buffer"] = state.delay_buffer
         return tensors
 
-    def compilation_requirements(self) -> Mapping[str, bool]:
+    def compilation_requirements(self) -> Mapping[str, bool | str | None]:
         needs_pre_adjacency = bool(self.params.event_driven or self.params.adaptive_event_driven)
         needs_edges_by_delay = bool(
             (not self.params.use_edge_buffer)
@@ -354,6 +357,9 @@ class DelayedCurrentSynapse(ISynapseModel):
             "wants_bucket_edge_mapping": False,
             "wants_weights_snapshot_each_step": False,
             "wants_projection_drive_tensor": False,
+            "wants_fused_layout": "auto",
+            "ring_strategy": self.params.ring_strategy,
+            "ring_dtype": self.params.ring_dtype,
         }
 
     def _scale_table(self, like: Tensor, kinds: tuple[ReceptorKind, ...]) -> Tensor:
@@ -713,7 +719,7 @@ def _step_post_ring_event_driven(
     n_post = _infer_n_post(topology)
     ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
     use_event_list = model.params.ring_strategy in {"event_list_proto", "event_bucketed"}
-    event_ring: dict[Compartment, EventListRing] | None = None
+    event_ring: dict[Compartment, _EventRing] | None = None
     if use_event_list:
         post_out = _ensure_post_out(state, topology, n_post, device, weights.dtype)
         event_ring = _ensure_event_ring(
@@ -722,7 +728,8 @@ def _step_post_ring_event_driven(
             depth,
             device,
             ring_dtype,
-            max_events=model.params.event_list_max_events,
+            max_events=_ring_max_events_for_strategy(model.params),
+            ring_strategy=model.params.ring_strategy,
         )
     else:
         post_ring, post_out = _ensure_post_ring(
@@ -885,7 +892,7 @@ def _step_post_ring_event_driven_into(
     n_post = _infer_n_post(topology)
     ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
     use_event_list = model.params.ring_strategy in {"event_list_proto", "event_bucketed"}
-    event_ring: dict[Compartment, EventListRing] | None = None
+    event_ring: dict[Compartment, _EventRing] | None = None
     if use_event_list:
         event_ring = _ensure_event_ring(
             state,
@@ -893,7 +900,8 @@ def _step_post_ring_event_driven_into(
             depth,
             device,
             ring_dtype,
-            max_events=model.params.event_list_max_events,
+            max_events=_ring_max_events_for_strategy(model.params),
+            ring_strategy=model.params.ring_strategy,
         )
     else:
         post_ring, _ = _ensure_post_ring(
@@ -1088,6 +1096,12 @@ def _ensure_post_out(
     return state.post_out
 
 
+def _ring_max_events_for_strategy(params: DelayedCurrentParams) -> int:
+    if params.ring_strategy == "event_bucketed":
+        return int(params.ring_capacity_max)
+    return int(params.event_list_max_events)
+
+
 def _ensure_event_ring(
     state: DelayedCurrentState,
     topology: SynapseTopology,
@@ -1096,24 +1110,35 @@ def _ensure_event_ring(
     ring_dtype: Any,
     *,
     max_events: int,
-) -> dict[Compartment, EventListRing]:
+    ring_strategy: str,
+) -> dict[Compartment, _EventRing]:
     if state.post_event_ring is None:
         state.post_event_ring = {}
+    ring_cls = BucketedEventRing if ring_strategy == "event_bucketed" else EventListRing
     for comp in _ring_compartments(topology):
         ring = state.post_event_ring.get(comp)
         if (
             ring is None
+            or not isinstance(ring, ring_cls)
             or ring.depth != depth
             or ring.device != device
             or ring.dtype != ring_dtype
             or ring.max_events != int(max_events)
         ):
-            ring = EventListRing(
-                depth=depth,
-                device=device,
-                dtype=ring_dtype,
-                max_events=max_events,
-            )
+            if ring_cls is BucketedEventRing:
+                ring = BucketedEventRing(
+                    depth=depth,
+                    device=device,
+                    dtype=ring_dtype,
+                    capacity_max=max_events,
+                )
+            else:
+                ring = EventListRing(
+                    depth=depth,
+                    device=device,
+                    dtype=ring_dtype,
+                    max_events=max_events,
+                )
             state.post_event_ring[comp] = ring
     return state.post_event_ring
 

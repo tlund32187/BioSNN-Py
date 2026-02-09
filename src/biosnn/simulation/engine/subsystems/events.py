@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
 from biosnn.contracts.homeostasis import IHomeostasisRule
@@ -10,9 +11,68 @@ from biosnn.contracts.tensor import Tensor
 from biosnn.core.torch_utils import require_torch
 from biosnn.simulation.network.specs import ModulatorSpec, PopulationSpec, ProjectionSpec
 
+from .models import (
+    STEP_EVENT_KEY_HOMEOSTASIS_STATE,
+    STEP_EVENT_KEY_LEARNING_STATE,
+    STEP_EVENT_KEY_MODULATORS,
+    STEP_EVENT_KEY_POPULATION_SLICES,
+    STEP_EVENT_KEY_POPULATION_STATE,
+    STEP_EVENT_KEY_PROJECTION_WEIGHTS,
+    STEP_EVENT_KEY_SCALARS,
+    STEP_EVENT_KEY_SPIKES,
+    STEP_EVENT_KEY_SYNAPSE_STATE,
+    STEP_EVENT_KEY_V_SOMA,
+    NetworkRequirements,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class StepEventPayloadPlan:
+    needs_spike_tensors: bool
+    needs_event_spikes: bool
+    needs_population_state: bool
+    needs_v_soma: bool
+    needs_population_slices: bool
+    needs_scalars: bool
+    needs_projection_weights: bool
+    needs_synapse_state: bool
+    needs_learning_state: bool
+    needs_homeostasis_state: bool
+    needs_modulator_state: bool
+
+    @property
+    def needs_population_tensors(self) -> bool:
+        return bool(self.needs_population_state or self.needs_v_soma)
+
 
 class StepEventSubsystem:
     """Builds minimal StepEvent tensor/scalar payloads based on monitor requirements."""
+
+    def payload_plan(
+        self,
+        requirements: NetworkRequirements,
+        *,
+        fast_mode: bool,
+    ) -> StepEventPayloadPlan:
+        needs_synapse_state = requirements.needs_step_event(STEP_EVENT_KEY_SYNAPSE_STATE)
+        needs_projection_weights = (
+            requirements.needs_step_event(STEP_EVENT_KEY_PROJECTION_WEIGHTS)
+            and not needs_synapse_state
+        )
+        needs_spike_tensors = requirements.needs_step_event(STEP_EVENT_KEY_SPIKES)
+        return StepEventPayloadPlan(
+            needs_spike_tensors=needs_spike_tensors,
+            needs_event_spikes=bool(needs_spike_tensors and not fast_mode),
+            needs_population_state=requirements.needs_step_event(STEP_EVENT_KEY_POPULATION_STATE),
+            needs_v_soma=requirements.needs_step_event(STEP_EVENT_KEY_V_SOMA),
+            needs_population_slices=requirements.needs_step_event(STEP_EVENT_KEY_POPULATION_SLICES),
+            needs_scalars=requirements.needs_step_event(STEP_EVENT_KEY_SCALARS),
+            needs_projection_weights=needs_projection_weights,
+            needs_synapse_state=needs_synapse_state,
+            needs_learning_state=requirements.needs_step_event(STEP_EVENT_KEY_LEARNING_STATE),
+            needs_homeostasis_state=requirements.needs_step_event(STEP_EVENT_KEY_HOMEOSTASIS_STATE),
+            needs_modulator_state=requirements.needs_step_event(STEP_EVENT_KEY_MODULATORS),
+        )
 
     def merge_population_tensors(
         self,
@@ -155,4 +215,4 @@ class StepEventSubsystem:
                 target[comp] = existing + tensor
 
 
-__all__ = ["StepEventSubsystem"]
+__all__ = ["StepEventPayloadPlan", "StepEventSubsystem"]

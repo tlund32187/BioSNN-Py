@@ -33,6 +33,8 @@ from biosnn.simulation.engine.subsystems import (
     LearningSubsystem,
     ModulatorSubsystem,
     MonitorSubsystem,
+    NetworkRequirements,
+    StepEventPayloadPlan,
     StepEventSubsystem,
     TopologySubsystem,
 )
@@ -148,6 +150,8 @@ class TorchNetworkEngine(ISimulationEngine):
         self._mod_states: dict[str, Any] = {}
         self._monitors: list[IMonitor] = []
         self._monitor_requirements = MonitorRequirements.none()
+        self._network_requirements = NetworkRequirements.none()
+        self._event_payload_plan: StepEventPayloadPlan | None = None
         self._drive_buffers: dict[str, dict[Compartment, Tensor]] = {}
         self._drive_global: dict[Compartment, Tensor] = {}
         self._drive_global_buffers: list[Tensor] = []
@@ -179,6 +183,10 @@ class TorchNetworkEngine(ISimulationEngine):
         self._learning_subsystem = LearningSubsystem()
         self._monitor_subsystem = MonitorSubsystem()
         self._event_subsystem = StepEventSubsystem()
+        self._event_payload_plan = self._event_subsystem.payload_plan(
+            self._network_requirements,
+            fast_mode=self._fast_mode,
+        )
 
         self._pop_order = [spec.name for spec in self._pop_specs]
         self._pop_map = {spec.name: spec for spec in self._pop_specs}
@@ -239,11 +247,22 @@ class TorchNetworkEngine(ISimulationEngine):
 
         self._proj_states.clear()
         self._monitor_requirements = self._monitor_subsystem.collect_requirements(self._monitors)
+        monitor_compile_requirements = self._monitor_subsystem.collect_compilation_requirements(
+            self._monitors
+        )
+        self._network_requirements = self._monitor_subsystem.build_network_requirements(
+            self._monitors,
+            monitor_requirements=self._monitor_requirements,
+            compilation_requirements=monitor_compile_requirements,
+        )
+        self._event_payload_plan = self._event_subsystem.payload_plan(
+            self._network_requirements,
+            fast_mode=self._fast_mode,
+        )
         pop_map = {spec.name: spec for spec in self._pop_specs}
         compile_jobs: list[
             tuple[int, ProjectionSpec, SynapseTopology, dict[str, Any], bool]
         ] = []
-        monitor_requirements = self._monitor_subsystem.collect_compilation_requirements(self._monitors)
 
         for idx, proj in enumerate(self._proj_specs):
             edge_count = self._topology_subsystem.edge_count(proj.topology)
@@ -264,9 +283,17 @@ class TorchNetworkEngine(ISimulationEngine):
                 n_post=pop_map[proj.post].n,
             )
 
+            projection_requirements = self._topology_subsystem.projection_network_requirements(
+                proj,
+                base_requirements=self._network_requirements,
+            )
+            projection_requirements = self._learning_subsystem.projection_network_requirements(
+                proj,
+                base_requirements=projection_requirements,
+            )
             compile_flags = self._topology_subsystem.compile_flags_for_projection(
                 proj,
-                monitor_requirements=monitor_requirements,
+                requirements=projection_requirements,
                 device=self._device,
             )
             requires_ring = compile_flags.build_edges_by_delay or compile_flags.build_sparse_delay_mats
@@ -398,6 +425,16 @@ class TorchNetworkEngine(ISimulationEngine):
             self._monitor_subsystem.validate_fast_mode_monitors(monitor_list)
         self._monitors = monitor_list
         self._monitor_requirements = self._monitor_subsystem.collect_requirements(monitor_list)
+        compile_requirements = self._monitor_subsystem.collect_compilation_requirements(monitor_list)
+        self._network_requirements = self._monitor_subsystem.build_network_requirements(
+            monitor_list,
+            monitor_requirements=self._monitor_requirements,
+            compilation_requirements=compile_requirements,
+        )
+        self._event_payload_plan = self._event_subsystem.payload_plan(
+            self._network_requirements,
+            fast_mode=self._fast_mode,
+        )
         if self._compiled_mode and self._pop_states and self._device is not None:
             pop_compartments = self._buffer_subsystem.collect_drive_compartments(
                 self._pop_specs,
@@ -419,16 +456,19 @@ class TorchNetworkEngine(ISimulationEngine):
             return self._step_compiled()
 
         no_monitors = not self._monitor_subsystem.has_active(self._monitors)
-        monitor_req = self._monitor_requirements
-        needs_population_tensors = bool(monitor_req.needs_population_state or monitor_req.needs_v_soma)
-        needs_population_slices = bool(monitor_req.needs_population_slices)
-        needs_event_spikes = bool(monitor_req.needs_spikes and not self._fast_mode)
-        needs_event_scalars = bool(monitor_req.needs_scalars)
-        needs_projection_weights = bool(monitor_req.needs_projection_weights)
-        needs_synapse_state = bool(monitor_req.needs_synapse_state)
-        needs_learning_state = bool(monitor_req.needs_learning_state)
-        needs_homeostasis_state = bool(monitor_req.needs_homeostasis_state)
-        needs_modulator_state = bool(monitor_req.needs_modulators)
+        event_plan = self._event_payload_plan or self._event_subsystem.payload_plan(
+            self._network_requirements,
+            fast_mode=self._fast_mode,
+        )
+        needs_population_tensors = event_plan.needs_population_tensors
+        needs_population_slices = event_plan.needs_population_slices
+        needs_event_spikes = event_plan.needs_event_spikes
+        needs_event_scalars = event_plan.needs_scalars
+        needs_projection_weights = event_plan.needs_projection_weights
+        needs_synapse_state = event_plan.needs_synapse_state
+        needs_learning_state = event_plan.needs_learning_state
+        needs_homeostasis_state = event_plan.needs_homeostasis_state
+        needs_modulator_state = event_plan.needs_modulator_state
         mod_by_pop, edge_mods_by_proj = self._modulator_subsystem.step(
             mod_specs=self._mod_specs,
             mod_states=self._mod_states,
@@ -529,9 +569,9 @@ class TorchNetworkEngine(ISimulationEngine):
                     spikes_concat.append(spikes)
                 if needs_population_tensors:
                     tensors = spec.model.state_tensors(pop_state.state)
-                    if monitor_req.needs_population_state:
+                    if event_plan.needs_population_state:
                         neuron_tensors_by_pop[spec.name] = tensors
-                    elif monitor_req.needs_v_soma:
+                    elif event_plan.needs_v_soma:
                         v_soma = tensors.get("v_soma")
                         if v_soma is not None:
                             neuron_tensors_by_pop[spec.name] = {"v_soma": v_soma}
@@ -686,11 +726,14 @@ class TorchNetworkEngine(ISimulationEngine):
 
         torch = require_torch()
         no_monitors = not self._monitor_subsystem.has_active(self._monitors)
-        monitor_req = self._monitor_requirements
-        needs_population_tensors = bool(monitor_req.needs_population_state or monitor_req.needs_v_soma)
-        needs_event_spikes = bool(monitor_req.needs_spikes and not self._fast_mode)
-        needs_event_scalars = bool(monitor_req.needs_scalars)
-        needs_population_slices = bool(monitor_req.needs_population_slices)
+        event_plan = self._event_payload_plan or self._event_subsystem.payload_plan(
+            self._network_requirements,
+            fast_mode=self._fast_mode,
+        )
+        needs_population_tensors = event_plan.needs_population_tensors
+        needs_event_spikes = event_plan.needs_event_spikes
+        needs_event_scalars = event_plan.needs_scalars
+        needs_population_slices = event_plan.needs_population_slices
         build_event_payload = not no_monitors
         if self._mod_specs:
             mod_by_pop, edge_mods_by_proj = self._modulator_subsystem.step_compiled(
@@ -781,7 +824,7 @@ class TorchNetworkEngine(ISimulationEngine):
             if build_event_payload and needs_population_tensors:
                 if self._fast_mode:
                     if self._compiled_event_tensors is not None:
-                        if monitor_req.needs_spikes:
+                        if event_plan.needs_spike_tensors:
                             self._compiled_event_tensors[f"pop/{spec.name}/spikes"] = spikes_view
                         tensors = spec.model.state_tensors(pop_state.state)
                         for key in self._compiled_pop_tensor_keys.get(spec.name, ()):
@@ -951,22 +994,25 @@ class TorchNetworkEngine(ISimulationEngine):
 
         self._compiled_pop_tensor_views = {}
         self._compiled_pop_tensor_keys = {}
-        monitor_req = self._monitor_requirements
-        needs_population_tensors = bool(monitor_req.needs_population_state or monitor_req.needs_v_soma)
-        needs_projection_weights = bool(monitor_req.needs_projection_weights)
-        needs_synapse_state = bool(monitor_req.needs_synapse_state)
-        needs_learning_state = bool(monitor_req.needs_learning_state)
-        needs_homeostasis_state = bool(monitor_req.needs_homeostasis_state)
-        needs_modulator_state = bool(monitor_req.needs_modulators)
+        event_plan = self._event_payload_plan or self._event_subsystem.payload_plan(
+            self._network_requirements,
+            fast_mode=self._fast_mode,
+        )
+        needs_population_tensors = event_plan.needs_population_tensors
+        needs_projection_weights = event_plan.needs_projection_weights
+        needs_synapse_state = event_plan.needs_synapse_state
+        needs_learning_state = event_plan.needs_learning_state
+        needs_homeostasis_state = event_plan.needs_homeostasis_state
+        needs_modulator_state = event_plan.needs_modulator_state
         compiled_event_tensors: dict[str, Tensor] = {}
         if self._fast_mode:
             if needs_population_tensors:
                 for spec in self._pop_specs:
                     pop_state = self._pop_states[spec.name]
-                    if monitor_req.needs_spikes:
+                    if event_plan.needs_spike_tensors:
                         compiled_event_tensors[f"pop/{spec.name}/spikes"] = pop_state.spikes
                     tensors = spec.model.state_tensors(pop_state.state)
-                    if monitor_req.needs_population_state:
+                    if event_plan.needs_population_state:
                         keys_for_pop = tuple(tensors.keys())
                     else:
                         keys_for_pop = tuple(key for key in tensors if key == "v_soma")
@@ -985,7 +1031,7 @@ class TorchNetworkEngine(ISimulationEngine):
                 pop_tensors: dict[str, Mapping[str, Tensor]] = {}
                 for spec in self._pop_specs:
                     tensors = spec.model.state_tensors(self._pop_states[spec.name].state)
-                    if monitor_req.needs_population_state:
+                    if event_plan.needs_population_state:
                         selected = tensors
                     else:
                         v_soma = tensors.get("v_soma")
@@ -1055,7 +1101,7 @@ class TorchNetworkEngine(ISimulationEngine):
             )
         self._compiled_meta = (
             {"population_slices": self._pop_slice_tuples}
-            if self._monitor_requirements.needs_population_slices
+            if event_plan.needs_population_slices
             else None
         )
 

@@ -53,6 +53,20 @@ const metricNodes = {
   lossLatest: document.getElementById("lossLatest"),
 };
 
+const runNodes = {
+  demoSelect: document.getElementById("runDemoSelect"),
+  stepsInput: document.getElementById("runStepsInput"),
+  deviceSelect: document.getElementById("runDeviceSelect"),
+  fusedLayoutSelect: document.getElementById("runFusedLayoutSelect"),
+  ringStrategySelect: document.getElementById("runRingStrategySelect"),
+  learningToggle: document.getElementById("runLearningToggle"),
+  modulatorToggle: document.getElementById("runModulatorToggle"),
+  startButton: document.getElementById("runStartButton"),
+  stopButton: document.getElementById("runStopButton"),
+  stateText: document.getElementById("runStateText"),
+  featureList: document.getElementById("runFeatureList"),
+};
+
 const theme = {
   background: "#0f1529",
   grid: "rgba(255,255,255,0.06)",
@@ -100,13 +114,33 @@ const dataConfig = (() => {
     }
     return value;
   };
+  const runParam = readParam("run", null);
+  const normalizeRunPath = (value) => {
+    if (!value) return null;
+    const path = String(value).trim();
+    if (!path) return null;
+    return path.endsWith("/") ? path.slice(0, -1) : path;
+  };
+  const runPath = normalizeRunPath(runParam);
+  const pathFromRun = (filename) => (runPath ? `${runPath}/${filename}` : null);
+  const topologyJson = readParam("topology", pathFromRun("topology.json") || "data/topology.json");
+  const neuronCsv = readParam("neuron", pathFromRun("neuron.csv") || "data/neuron.csv");
+  const synapseCsv = readParam("synapse", pathFromRun("synapse.csv") || "data/synapse.csv");
+  const spikesCsv = readParam("spikes", pathFromRun("spikes.csv") || "data/spikes.csv");
+  const metricsCsv = readParam("metrics", pathFromRun("metrics.csv") || "data/metrics.csv");
+  const weightsCsv = readParam("weights", pathFromRun("weights.csv") || "data/weights.csv");
   return {
-    neuronCsv: readParam("neuron", "data/neuron.csv"),
-    synapseCsv: readParam("synapse", "data/synapse.csv"),
-    spikesCsv: readParam("spikes", "data/spikes.csv"),
-    metricsCsv: readParam("metrics", "data/metrics.csv"),
-    weightsCsv: readParam("weights", "data/weights.csv"),
-    topologyJson: readParam("topology", "data/topology.json"),
+    runPath,
+    neuronCsv,
+    synapseCsv,
+    spikesCsv,
+    metricsCsv,
+    weightsCsv,
+    topologyJson,
+    runConfigJson: pathFromRun("run_config.json"),
+    runFeaturesJson: pathFromRun("run_features.json"),
+    runStatusJson: pathFromRun("run_status.json"),
+    useApi: runParam == null,
     refreshMs: Number(params.get("refresh") || 1200),
     totalSteps: Number(params.get("total_steps") || params.get("steps") || 0),
   };
@@ -135,6 +169,17 @@ const dataState = {
   neuronRatesCache: null,
   live: false,
   lastUpdated: null,
+  runConfig: null,
+  runFeatures: null,
+  runStatus: null,
+};
+
+const runState = {
+  demos: [],
+  status: null,
+  apiAvailable: false,
+  activeRunPath: dataConfig.runPath || null,
+  lastAppliedRunId: null,
 };
 
 const NEURON_SHOW_ALL_CAP = 512;
@@ -1495,13 +1540,32 @@ async function refreshData() {
     }
     return loadJson(path);
   };
-  const [neuronRes, synapseRes, spikesRes, metricsRes, weightsRes, topologyRes] = await Promise.all([
+  const loadOptionalJsonMaybe = (path) => {
+    if (!path) {
+      return Promise.resolve({ data: null, error: null, url: "(disabled)", disabled: true });
+    }
+    return loadJson(path, { optional: true });
+  };
+  const [
+    neuronRes,
+    synapseRes,
+    spikesRes,
+    metricsRes,
+    weightsRes,
+    topologyRes,
+    runConfigRes,
+    runFeaturesRes,
+    runStatusRes,
+  ] = await Promise.all([
     loadCsvMaybe(dataConfig.neuronCsv),
     loadCsvMaybe(dataConfig.synapseCsv),
     loadCsvMaybe(dataConfig.spikesCsv),
     loadCsvMaybe(dataConfig.metricsCsv),
     loadCsvMaybe(dataConfig.weightsCsv),
     loadJsonMaybe(dataConfig.topologyJson),
+    loadOptionalJsonMaybe(dataConfig.runConfigJson),
+    loadOptionalJsonMaybe(dataConfig.runFeaturesJson),
+    loadOptionalJsonMaybe(dataConfig.runStatusJson),
   ]);
 
   const neuronRows = neuronRes.data;
@@ -1518,6 +1582,9 @@ async function refreshData() {
   dataState.weightsRows = weightsRows;
   dataState.weightsIndex = weightsRows ? buildWeightsIndex(weightsRows) : null;
   dataState.topology = topology;
+  dataState.runConfig = runConfigRes.data;
+  dataState.runFeatures = runFeaturesRes.data;
+  dataState.runStatus = runStatusRes.data || dataState.runStatus;
   dataState.totalSteps = getTotalSteps();
   dataState.live = Boolean(neuronRows || synapseRows || spikesRows || metricsRows || weightsRows || topology);
   dataState.lastUpdated = new Date();
@@ -1529,8 +1596,19 @@ async function refreshData() {
     metricsRes,
     weightsRes,
     topologyRes,
+    runConfigRes,
+    runFeaturesRes,
+    runStatusRes,
   ]);
   updateDataLink();
+  if (dataState.runConfig) {
+    const runId = dataState.runConfig.run_id || dataState.runConfig.runId || null;
+    if (runId && runId !== runState.lastAppliedRunId) {
+      populateRunControlsFromSpec(dataState.runConfig);
+      runState.lastAppliedRunId = runId;
+    }
+  }
+  renderFeatureChecklist(dataState.runFeatures);
 
   if (topology) {
     if (topology.mode === "population") {
@@ -1581,14 +1659,20 @@ async function loadCsv(path) {
   }
 }
 
-async function loadJson(path) {
+async function loadJson(path, { optional = false } = {}) {
   try {
     const response = await fetch(`${path}?ts=${Date.now()}`);
     if (!response.ok) {
+      if (optional && response.status === 404) {
+        return { data: null, error: null, url: path, disabled: true };
+      }
       return { data: null, error: `${response.status} ${response.statusText}`, url: path };
     }
     return { data: await response.json(), error: null, url: path };
   } catch (error) {
+    if (optional) {
+      return { data: null, error: null, url: path, disabled: true };
+    }
     return { data: null, error: String(error), url: path };
   }
 }
@@ -1623,6 +1707,10 @@ function updateDataStatus(results) {
 }
 
 function resolveRunFolderUrl() {
+  if (runState.activeRunPath) {
+    const base = new URL(runState.activeRunPath.replace(/\/+$/, "") + "/", window.location.href);
+    return base.toString();
+  }
   const candidates = [
     dataConfig.topologyJson,
     dataConfig.neuronCsv,
@@ -2187,6 +2275,245 @@ function drawHeatmapMatrix(canvas, matrix, clampMin, clampMax, counts) {
   ctx.globalAlpha = 1;
 }
 
+function normalizeRunPath(value) {
+  if (!value) return null;
+  const path = String(value).trim();
+  if (!path) return null;
+  return path.endsWith("/") ? path.slice(0, -1) : path;
+}
+
+function applyRunDirectory(runPath, { updateUrl = false } = {}) {
+  const normalized = normalizeRunPath(runPath);
+  if (!normalized) return;
+  if (runState.activeRunPath === normalized) return;
+  runState.activeRunPath = normalized;
+  dataConfig.runPath = normalized;
+  dataConfig.topologyJson = `${normalized}/topology.json`;
+  dataConfig.neuronCsv = `${normalized}/neuron.csv`;
+  dataConfig.synapseCsv = `${normalized}/synapse.csv`;
+  dataConfig.spikesCsv = `${normalized}/spikes.csv`;
+  dataConfig.metricsCsv = `${normalized}/metrics.csv`;
+  dataConfig.weightsCsv = `${normalized}/weights.csv`;
+  dataConfig.runConfigJson = `${normalized}/run_config.json`;
+  dataConfig.runFeaturesJson = `${normalized}/run_features.json`;
+  dataConfig.runStatusJson = `${normalized}/run_status.json`;
+  updateDataLink();
+  if (updateUrl) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("run", normalized);
+    window.history.replaceState({}, "", url.toString());
+  }
+}
+
+function setRunStateText(status) {
+  if (!runNodes.stateText) return;
+  if (!status) {
+    runNodes.stateText.textContent = "State: unknown";
+    return;
+  }
+  const runId = status.run_id ? ` (${status.run_id})` : "";
+  runNodes.stateText.textContent = `State: ${status.state || "unknown"}${runId}`;
+}
+
+function setRunControlsEnabled(enabled) {
+  const controls = [
+    runNodes.demoSelect,
+    runNodes.stepsInput,
+    runNodes.deviceSelect,
+    runNodes.fusedLayoutSelect,
+    runNodes.ringStrategySelect,
+    runNodes.learningToggle,
+    runNodes.modulatorToggle,
+    runNodes.startButton,
+    runNodes.stopButton,
+  ];
+  controls.forEach((control) => {
+    if (control) control.disabled = !enabled;
+  });
+}
+
+function renderFeatureChecklist(features) {
+  if (!runNodes.featureList) return;
+  if (!features || typeof features !== "object") {
+    runNodes.featureList.innerHTML = "<li>No feature manifest loaded.</li>";
+    return;
+  }
+  const learning = features.learning || {};
+  const delays = features.delays || {};
+  const modulators = features.modulators || {};
+  const synapse = features.synapse || {};
+  const monitor = features.monitor || {};
+  const items = [
+    `Learning: <strong>${learning.enabled ? "ON" : "OFF"}</strong>` +
+      (learning.enabled ? ` (${learning.rule || "rule?"}, lr=${learning.lr ?? "?"})` : ""),
+    `Delays: <strong>${delays.enabled ? "ON" : "OFF"}</strong>` +
+      ` (max=${delays.max_delay_steps ?? "?"}, ring_len=${delays.ring_len ?? "?"})`,
+    `Modulators: <strong>${modulators.enabled ? "ON" : "OFF"}</strong>` +
+      ` (${(modulators.kinds || []).join(", ") || "none"})`,
+    `Synapse backend: <strong>${synapse.backend || "unknown"}</strong>`,
+    `Fused layout: <strong>${synapse.fused_layout || "unknown"}</strong>`,
+    `Ring: <strong>${synapse.ring_strategy || "unknown"}</strong>` +
+      ` (dtype=${synapse.ring_dtype || "none"})`,
+    `Monitor policy: <strong>${monitor.sync_policy || monitor.mode || "unknown"}</strong>`,
+  ];
+  runNodes.featureList.innerHTML = items.map((item) => `<li>${item}</li>`).join("");
+}
+
+function populateRunControlsFromSpec(spec) {
+  if (!spec || typeof spec !== "object") return;
+  if (runNodes.demoSelect && spec.demo_id) runNodes.demoSelect.value = String(spec.demo_id);
+  if (runNodes.stepsInput && Number.isFinite(Number(spec.steps))) {
+    runNodes.stepsInput.value = String(Math.max(1, Number(spec.steps)));
+  }
+  if (runNodes.deviceSelect && spec.device) runNodes.deviceSelect.value = String(spec.device);
+  if (runNodes.fusedLayoutSelect && spec.fused_layout) {
+    runNodes.fusedLayoutSelect.value = String(spec.fused_layout);
+  }
+  if (runNodes.ringStrategySelect && spec.ring_strategy) {
+    runNodes.ringStrategySelect.value = String(spec.ring_strategy);
+  }
+  if (runNodes.learningToggle) {
+    runNodes.learningToggle.checked = Boolean(spec.learning?.enabled);
+  }
+  if (runNodes.modulatorToggle) {
+    runNodes.modulatorToggle.checked = Boolean(spec.modulators?.enabled);
+  }
+}
+
+function selectedDemoDefaults() {
+  const id = runNodes.demoSelect?.value;
+  if (!id) return null;
+  const found = runState.demos.find((demo) => String(demo.id) === String(id));
+  if (!found || !found.defaults || typeof found.defaults !== "object") return null;
+  try {
+    return JSON.parse(JSON.stringify(found.defaults));
+  } catch {
+    return null;
+  }
+}
+
+function buildRunSpecFromControls() {
+  const base = selectedDemoDefaults() || {};
+  const steps = Math.max(1, Number(runNodes.stepsInput?.value || base.steps || 200));
+  const device = runNodes.deviceSelect?.value || base.device || "cpu";
+  const fusedLayout = runNodes.fusedLayoutSelect?.value || base.fused_layout || "auto";
+  const ringStrategy = runNodes.ringStrategySelect?.value || base.ring_strategy || "dense";
+  const learningEnabled = Boolean(runNodes.learningToggle?.checked);
+  const modEnabled = Boolean(runNodes.modulatorToggle?.checked);
+  return {
+    ...base,
+    demo_id: runNodes.demoSelect?.value || base.demo_id || "network",
+    steps,
+    device,
+    fused_layout: fusedLayout,
+    ring_strategy: ringStrategy,
+    monitor_mode: "dashboard",
+    learning: {
+      ...(base.learning || {}),
+      enabled: learningEnabled,
+    },
+    modulators: {
+      ...(base.modulators || {}),
+      enabled: modEnabled,
+      kinds: modEnabled ? (base.modulators?.kinds || ["dopamine"]) : [],
+    },
+  };
+}
+
+async function apiJson(path, options) {
+  try {
+    const response = await fetch(path, options);
+    if (!response.ok) {
+      return null;
+    }
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function refreshDashboardApiBootstrap() {
+  if (!dataConfig.useApi) {
+    setRunStateText({ state: "query-run" });
+    setRunControlsEnabled(false);
+    return;
+  }
+  const demosPayload = await apiJson("/api/demos");
+  const statusPayload = await apiJson("/api/run/status");
+  if (!demosPayload || !Array.isArray(demosPayload.demos)) {
+    runState.apiAvailable = false;
+    setRunStateText({ state: "api-unavailable" });
+    setRunControlsEnabled(false);
+    return;
+  }
+  runState.apiAvailable = true;
+  setRunControlsEnabled(true);
+  runState.demos = demosPayload.demos;
+  if (runNodes.demoSelect) {
+    const selected = runNodes.demoSelect.value;
+    runNodes.demoSelect.innerHTML = runState.demos
+      .map((demo) => `<option value="${demo.id}">${demo.name || demo.id}</option>`)
+      .join("");
+    if (selected && runState.demos.some((demo) => demo.id === selected)) {
+      runNodes.demoSelect.value = selected;
+    } else if (runState.demos.length > 0) {
+      runNodes.demoSelect.value = runState.demos[0].id;
+      populateRunControlsFromSpec(runState.demos[0].defaults || {});
+    }
+  }
+  if (statusPayload && typeof statusPayload === "object") {
+    runState.status = statusPayload;
+    dataState.runStatus = statusPayload;
+    setRunStateText(statusPayload);
+    const queryRun = new URLSearchParams(window.location.search).get("run");
+    if (!queryRun && statusPayload.run_dir) {
+      applyRunDirectory(statusPayload.run_dir, { updateUrl: false });
+    }
+  }
+}
+
+async function refreshDashboardRunStatus() {
+  if (!runState.apiAvailable) return;
+  const statusPayload = await apiJson("/api/run/status");
+  if (!statusPayload) return;
+  runState.status = statusPayload;
+  dataState.runStatus = statusPayload;
+  setRunStateText(statusPayload);
+  const queryRun = new URLSearchParams(window.location.search).get("run");
+  if (!queryRun && statusPayload.run_dir) {
+    applyRunDirectory(statusPayload.run_dir, { updateUrl: false });
+  }
+}
+
+async function onStartRunClick() {
+  if (!runState.apiAvailable) return;
+  const spec = buildRunSpecFromControls();
+  const payload = await apiJson("/api/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(spec),
+  });
+  if (!payload) {
+    setRunStateText({ state: "start-failed" });
+    return;
+  }
+  if (payload.run_dir) {
+    applyRunDirectory(payload.run_dir, { updateUrl: true });
+  }
+  await refreshDashboardRunStatus();
+  await refreshData();
+}
+
+async function onStopRunClick() {
+  if (!runState.apiAvailable) return;
+  await apiJson("/api/run/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  await refreshDashboardRunStatus();
+}
+
 function renderWeightHeatmaps() {
   if (!dataState.weightsIndex) {
     drawHeatmap(canvases.heatmapInput, 16, 18, null);
@@ -2376,6 +2703,33 @@ if (uiControls.weightProjection2) {
 if (uiControls.weightStep) {
   uiControls.weightStep.addEventListener("change", () => {});
 }
-refreshData();
-setInterval(refreshData, dataConfig.refreshMs);
-requestAnimationFrame(tick);
+if (runNodes.demoSelect) {
+  runNodes.demoSelect.addEventListener("change", () => {
+    const defaults = selectedDemoDefaults();
+    if (defaults) {
+      populateRunControlsFromSpec(defaults);
+    }
+  });
+}
+if (runNodes.startButton) {
+  runNodes.startButton.addEventListener("click", () => {
+    onStartRunClick();
+  });
+}
+if (runNodes.stopButton) {
+  runNodes.stopButton.addEventListener("click", () => {
+    onStopRunClick();
+  });
+}
+
+async function bootstrapDashboard() {
+  await refreshDashboardApiBootstrap();
+  await refreshData();
+  setInterval(async () => {
+    await refreshDashboardRunStatus();
+    await refreshData();
+  }, dataConfig.refreshMs);
+  requestAnimationFrame(tick);
+}
+
+bootstrapDashboard();

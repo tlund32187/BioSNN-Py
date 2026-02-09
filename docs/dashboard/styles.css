@@ -40,6 +40,13 @@ body {
   margin-bottom: 24px;
 }
 
+.header-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 420px;
+}
+
 .eyebrow {
   text-transform: uppercase;
   letter-spacing: 0.35em;
@@ -102,6 +109,94 @@ h1 {
 .header-metrics {
   display: flex;
   gap: 12px;
+}
+
+.run-panel,
+.feature-panel {
+  background: rgba(18, 24, 41, 0.8);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 12px;
+  box-shadow: var(--shadow);
+}
+
+.run-panel h2,
+.feature-panel h2 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+}
+
+.run-controls {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(90px, 1fr));
+  margin-bottom: 8px;
+}
+
+.run-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+}
+
+.run-controls label.checkbox-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.run-controls input,
+.run-controls select {
+  background: var(--panel-strong);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.run-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.run-actions button {
+  background: rgba(93, 220, 255, 0.18);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.run-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.feature-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.feature-panel li strong {
+  color: var(--text);
 }
 
 .metric {
@@ -488,8 +583,17 @@ h1 {
     align-items: flex-start;
   }
 
+  .header-side {
+    width: 100%;
+    min-width: 0;
+  }
+
   .header-metrics {
     width: 100%;
+  }
+
+  .run-controls {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
   }
 
   .grid {

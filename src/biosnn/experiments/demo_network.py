@@ -103,6 +103,7 @@ class DemoNetworkConfig:
     feedforward_delay_max: float | None = None
     feedforward_delay_use_ceil: bool = True
     input_drive: float = 1.0
+    synapse_backend: Literal["spmm_fused", "event_driven"] = "spmm_fused"
     fused_layout: Literal["auto", "coo", "csr"] = "auto"
     ring_dtype: str | None = None
     ring_strategy: Literal["dense", "event_bucketed"] = "dense"
@@ -260,15 +261,22 @@ def build_network_demo(
         output_layer.append(pop)
     layers.append(output_layer)
 
-    sparse_override = cfg.fused_layout != "auto" or cfg.store_sparse_by_delay is not None
+    sparse_override = (
+        cfg.fused_layout != "auto"
+        or cfg.store_sparse_by_delay is not None
+        or cfg.synapse_backend != "spmm_fused"
+    )
     use_sparse_synapse = device == "cuda" or sparse_override
     make_synapse: Callable[[], ISynapseModel]
     if use_sparse_synapse:
+        sparse_backend = cast(Literal["spmm_fused", "event_driven"], cfg.synapse_backend)
         syn_params_sparse = DelayedSparseMatmulParams(
             init_weight=cfg.weight_init,
             ring_dtype=cfg.ring_dtype,
             fused_layout=cfg.fused_layout,
             store_sparse_by_delay=cfg.store_sparse_by_delay,
+            backend=sparse_backend,
+            ring_strategy=cfg.ring_strategy if sparse_backend == "event_driven" else "dense",
         )
 
         def make_synapse() -> ISynapseModel:

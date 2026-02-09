@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import cast
 
+from biosnn.contracts.learning import ILearningRule
 from biosnn.contracts.modulators import ModulatorKind, ModulatorRelease
 from biosnn.contracts.neurons import Compartment, StepContext
 from biosnn.contracts.simulation import SimulationConfig
@@ -163,6 +164,7 @@ def build_learning_gate_engine(
     *,
     dopamine_on: bool,
     compiled_mode: bool,
+    learning_rule: ILearningRule | None = None,
     device: str = "cpu",
     dtype: object | None = None,
 ) -> tuple[TorchNetworkEngine, str, ReleasesFn, ExternalDriveFn]:
@@ -178,7 +180,7 @@ def build_learning_gate_engine(
     synapse = DelayedSparseMatmulSynapse(DelayedSparseMatmulParams(init_weight=0.0))
     topology = _identity_topology(1, weight_value=0.0, delay_steps=2, dtype=dtype)
     proj_name = "Pre_to_Post"
-    learning = ThreeFactorHebbianRule(ThreeFactorHebbianParams(lr=0.1))
+    learning = learning_rule or ThreeFactorHebbianRule(ThreeFactorHebbianParams(lr=0.1))
     projection = ProjectionSpec(
         name=proj_name,
         synapse=synapse,

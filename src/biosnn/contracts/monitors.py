@@ -13,6 +13,7 @@ from typing import Any, Protocol, TypeAlias, runtime_checkable
 from biosnn.contracts.tensor import Tensor
 
 Scalar: TypeAlias = float | int | Tensor  # noqa: UP040
+CompilationRequirementValue: TypeAlias = bool | str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,14 +108,17 @@ class IMonitorRequirements(Protocol):
 class IMonitorCompilationRequirements(Protocol):
     """Optional hook for monitor-driven engine artifact requirements."""
 
-    def compilation_requirements(self) -> Mapping[str, bool]:
+    def compilation_requirements(self) -> Mapping[str, CompilationRequirementValue]:
         """Return monitor requirements consumed by engine compile planning.
 
         Expected keys (if applicable):
         - wants_fused_sparse
+        - wants_fused_layout
         - wants_by_delay_sparse
         - wants_bucket_edge_mapping
         - wants_weights_snapshot_each_step
         - wants_projection_drive_tensor
+        - ring_strategy
+        - ring_dtype
         """
         ...

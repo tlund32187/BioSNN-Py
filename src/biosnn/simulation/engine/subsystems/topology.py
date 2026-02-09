@@ -15,7 +15,7 @@ from biosnn.contracts.synapses import SynapseTopology
 from biosnn.contracts.tensor import Tensor
 from biosnn.simulation.network.specs import PopulationSpec, ProjectionSpec
 
-from .models import CompiledNetworkPlan, ProjectionPlan
+from .models import CompiledNetworkPlan, NetworkRequirements, ProjectionPlan
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +108,7 @@ class TopologySubsystem:
         self,
         proj: ProjectionSpec,
         *,
-        monitor_requirements: Mapping[str, bool],
+        requirements: NetworkRequirements,
         device: Any,
     ) -> ProjectionCompileFlags:
         build_edges_by_delay = False
@@ -127,29 +127,32 @@ class TopologySubsystem:
             except Exception:
                 reqs = None
         if isinstance(reqs, Mapping):
-            build_edges_by_delay = bool(reqs.get("needs_edges_by_delay", False))
-            build_pre_adjacency = bool(reqs.get("needs_pre_adjacency", False))
-            build_sparse_delay_mats = bool(reqs.get("needs_sparse_delay_mats", False))
-            build_bucket_edge_mapping = bool(reqs.get("needs_bucket_edge_mapping", False))
-            wants_fused_sparse = bool(reqs.get("wants_fused_sparse", False))
-            wants_by_delay_sparse = bool(reqs.get("wants_by_delay_sparse", False))
-            wants_bucket_edge_mapping = bool(reqs.get("wants_bucket_edge_mapping", False))
+            build_edges_by_delay = _as_bool(reqs.get("needs_edges_by_delay"))
+            build_pre_adjacency = _as_bool(reqs.get("needs_pre_adjacency"))
+            build_sparse_delay_mats = _as_bool(reqs.get("needs_sparse_delay_mats"))
+            build_bucket_edge_mapping = _as_bool(reqs.get("needs_bucket_edge_mapping"))
+            wants_fused_sparse = _as_bool(reqs.get("wants_fused_sparse"))
+            wants_by_delay_sparse = _as_bool(reqs.get("wants_by_delay_sparse"))
+            wants_bucket_edge_mapping = _as_bool(reqs.get("wants_bucket_edge_mapping"))
             if "wants_fused_csr" in reqs:
-                wants_fused_csr = bool(reqs.get("wants_fused_csr", False))
+                wants_fused_csr = _as_bool(reqs.get("wants_fused_csr"))
             if "store_sparse_by_delay" in reqs:
-                store_sparse_by_delay_override = bool(reqs.get("store_sparse_by_delay"))
+                store_sparse_by_delay_override = _as_bool(reqs.get("store_sparse_by_delay"))
 
         if build_sparse_delay_mats and not wants_fused_sparse and not wants_by_delay_sparse:
             wants_fused_sparse = True
 
-        wants_fused_sparse = bool(
-            wants_fused_sparse or monitor_requirements.get("wants_fused_sparse", False)
-        )
-        wants_by_delay_sparse = bool(
-            wants_by_delay_sparse or monitor_requirements.get("wants_by_delay_sparse", False)
-        )
+        wants_fused_layout = _normalize_fused_layout(requirements.wants_fused_layout)
+        if wants_fused_layout in {"coo", "csr"}:
+            wants_fused_sparse = True
+        if wants_fused_layout == "csr":
+            wants_fused_csr = True
+        elif wants_fused_layout == "coo":
+            wants_fused_csr = False
+
+        wants_by_delay_sparse = bool(wants_by_delay_sparse or requirements.needs_by_delay_sparse)
         wants_bucket_edge_mapping = bool(
-            wants_bucket_edge_mapping or monitor_requirements.get("wants_bucket_edge_mapping", False)
+            wants_bucket_edge_mapping or requirements.needs_bucket_edge_mapping
         )
 
         if wants_fused_csr is None:
@@ -161,8 +164,13 @@ class TopologySubsystem:
             or wants_fused_sparse
             or wants_by_delay_sparse
             or wants_bucket_edge_mapping
+            or requirements.needs_by_delay_sparse
         )
-        build_bucket_edge_mapping = bool(build_bucket_edge_mapping or wants_bucket_edge_mapping)
+        build_bucket_edge_mapping = bool(
+            build_bucket_edge_mapping
+            or wants_bucket_edge_mapping
+            or requirements.needs_bucket_edge_mapping
+        )
 
         if proj.learning is not None:
             build_bucket_edge_mapping = True
@@ -206,6 +214,63 @@ class TopologySubsystem:
         if isinstance(device, str):
             return device.lower().strip().startswith("cpu")
         return False
+
+    def projection_network_requirements(
+        self,
+        proj: ProjectionSpec,
+        *,
+        base_requirements: NetworkRequirements,
+    ) -> NetworkRequirements:
+        merged = base_requirements
+
+        reqs = None
+        if hasattr(proj.synapse, "compilation_requirements"):
+            try:
+                reqs = proj.synapse.compilation_requirements()
+            except Exception:
+                reqs = None
+        if isinstance(reqs, Mapping):
+            wants_fused_layout = _normalize_fused_layout(_as_str(reqs.get("wants_fused_layout")))
+            if wants_fused_layout == "auto" and _as_bool(reqs.get("wants_fused_csr")):
+                wants_fused_layout = "csr"
+            ring_strategy = _normalize_ring_strategy(_as_str(reqs.get("ring_strategy")))
+            ring_dtype = _as_str(reqs.get("ring_dtype"))
+            needs_by_delay_sparse = bool(
+                _as_bool(reqs.get("wants_by_delay_sparse"))
+                or _as_bool(reqs.get("store_sparse_by_delay"))
+            )
+            needs_bucket_edge_mapping = bool(
+                _as_bool(reqs.get("needs_bucket_edge_mapping"))
+                or _as_bool(reqs.get("wants_bucket_edge_mapping"))
+            )
+            merged = merged.merge(
+                NetworkRequirements(
+                    needs_bucket_edge_mapping=needs_bucket_edge_mapping,
+                    needs_by_delay_sparse=needs_by_delay_sparse,
+                    wants_fused_layout=wants_fused_layout,
+                    ring_strategy=ring_strategy,
+                    ring_dtype=ring_dtype,
+                )
+            )
+
+        params = getattr(proj.synapse, "params", None)
+        if params is not None:
+            param_layout = _normalize_fused_layout(_as_str(getattr(params, "fused_layout", None)))
+            param_ring_strategy = _normalize_ring_strategy(
+                _as_str(getattr(params, "ring_strategy", None))
+            )
+            param_ring_dtype = _as_str(getattr(params, "ring_dtype", None))
+            param_by_delay = _as_bool(getattr(params, "store_sparse_by_delay", False))
+            merged = merged.merge(
+                NetworkRequirements(
+                    needs_by_delay_sparse=param_by_delay,
+                    wants_fused_layout=param_layout,
+                    ring_strategy=param_ring_strategy,
+                    ring_dtype=param_ring_dtype,
+                )
+            )
+
+        return merged
 
     def ensure_learning_bucket_mapping(self, proj: ProjectionSpec, topology: SynapseTopology) -> None:
         if proj.learning is None:
@@ -459,3 +524,36 @@ class TopologySubsystem:
         for proj in projections:
             if proj.pre not in names or proj.post not in names:
                 raise ValueError(f"Projection {proj.name} references unknown population")
+
+
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        value_norm = value.strip().lower()
+        if value_norm in {"1", "true", "yes", "on"}:
+            return True
+        if value_norm in {"0", "false", "no", "off"}:
+            return False
+    return False
+
+
+def _as_str(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value_str = value.strip()
+    if not value_str:
+        return None
+    return value_str
+
+
+def _normalize_fused_layout(value: str | None) -> str:
+    if value in {"auto", "coo", "csr"}:
+        return value
+    return "auto"
+
+
+def _normalize_ring_strategy(value: str | None) -> str:
+    if value in {"dense", "event_bucketed", "event_list_proto"}:
+        return value
+    return "dense"

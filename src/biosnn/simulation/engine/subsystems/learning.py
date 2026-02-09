@@ -13,10 +13,29 @@ from biosnn.core.torch_utils import require_torch
 from biosnn.simulation.network.specs import ProjectionSpec
 
 from .buffers import LearningScratch
+from .models import NetworkRequirements
 
 
 class LearningSubsystem:
     """Executes active-edge gathering and weight update application."""
+
+    def projection_network_requirements(
+        self,
+        proj: ProjectionSpec,
+        *,
+        base_requirements: NetworkRequirements,
+    ) -> NetworkRequirements:
+        params = getattr(proj.synapse, "params", None)
+        wants_by_delay_sparse = bool(getattr(params, "store_sparse_by_delay", False))
+        needs_bucket_edge_mapping = bool(
+            proj.learning is not None or getattr(params, "enable_sparse_updates", False)
+        )
+        return base_requirements.merge(
+            NetworkRequirements(
+                needs_bucket_edge_mapping=needs_bucket_edge_mapping,
+                needs_by_delay_sparse=wants_by_delay_sparse,
+            )
+        )
 
     def require_weights(self, state: Any, proj_name: str) -> Tensor:
         if not hasattr(state, "weights"):

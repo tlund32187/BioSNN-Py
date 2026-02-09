@@ -28,19 +28,68 @@
             <a id="dataLink" class="status-link" href="#" target="_blank" rel="noreferrer">Open run folder</a>
           </div>
         </div>
-        <div class="header-metrics">
-          <div class="metric">
-            <span class="label">FPS</span>
-            <span class="value" id="fps">--</span>
+        <div class="header-side">
+          <div class="header-metrics">
+            <div class="metric">
+              <span class="label">FPS</span>
+              <span class="value" id="fps">--</span>
+            </div>
+            <div class="metric">
+              <span class="label">Active Edges</span>
+              <span class="value" id="activeEdges">--</span>
+            </div>
+            <div class="metric">
+              <span class="label">Spike Rate</span>
+              <span class="value" id="spikeRate">--</span>
+            </div>
           </div>
-          <div class="metric">
-            <span class="label">Active Edges</span>
-            <span class="value" id="activeEdges">--</span>
-          </div>
-          <div class="metric">
-            <span class="label">Spike Rate</span>
-            <span class="value" id="spikeRate">--</span>
-          </div>
+          <section class="run-panel">
+            <h2>Run</h2>
+            <div class="run-controls">
+              <label>Demo
+                <select id="runDemoSelect"></select>
+              </label>
+              <label>Steps
+                <input id="runStepsInput" type="number" min="1" value="200" />
+              </label>
+              <label>Device
+                <select id="runDeviceSelect">
+                  <option value="cpu">cpu</option>
+                  <option value="cuda">cuda</option>
+                </select>
+              </label>
+              <label>Layout
+                <select id="runFusedLayoutSelect">
+                  <option value="auto">auto</option>
+                  <option value="coo">coo</option>
+                  <option value="csr">csr</option>
+                </select>
+              </label>
+              <label>Ring
+                <select id="runRingStrategySelect">
+                  <option value="dense">dense</option>
+                  <option value="event_bucketed">event_bucketed</option>
+                </select>
+              </label>
+              <label class="checkbox-inline">
+                <input id="runLearningToggle" type="checkbox" />
+                Learning
+              </label>
+              <label class="checkbox-inline">
+                <input id="runModulatorToggle" type="checkbox" />
+                Modulators
+              </label>
+            </div>
+            <div class="run-actions">
+              <button id="runStartButton" type="button">Start Run</button>
+              <button id="runStopButton" type="button">Stop</button>
+              <span id="runStateText">State: unknown</span>
+            </div>
+          </section>
+          <section class="feature-panel">
+            <h2>Feature Checklist</h2>
+            <ul id="runFeatureList"></ul>
+          </section>
         </div>
       </header>
 

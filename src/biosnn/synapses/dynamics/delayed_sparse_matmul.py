@@ -17,9 +17,11 @@ from biosnn.contracts.synapses import (
     SynapseTopology,
 )
 from biosnn.core.torch_utils import _resolve_dtype, require_torch, resolve_device_dtype
+from biosnn.synapses.buffers import BucketedEventRing
 
 _COMPARTMENT_ORDER = tuple(Compartment)
 _COMPARTMENT_TO_ID = {comp: idx for idx, comp in enumerate(_COMPARTMENT_ORDER)}
+_EventRing = BucketedEventRing
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,12 +35,16 @@ class DelayedSparseMatmulParams:
     learning_update_target: Literal["both", "fused_only"] = "both"
     fused_layout: Literal["auto", "coo", "csr"] = "auto"
     store_sparse_by_delay: bool | None = None
+    backend: Literal["spmm_fused", "event_driven"] = "spmm_fused"
+    ring_strategy: Literal["dense", "event_bucketed"] = "dense"
+    ring_capacity_max: int = 2_000_000
 
 
 @dataclass(slots=True)
 class DelayedSparseMatmulState:
     weights: Tensor
     post_ring: dict[Compartment, Tensor] | None
+    post_event_ring: dict[Compartment, _EventRing] | None
     post_out: dict[Compartment, Tensor] | None
     cursor: int
     bind_weights_to_topology: bool = True
@@ -56,6 +62,10 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
 
     def __init__(self, params: DelayedSparseMatmulParams | None = None) -> None:
         self.params = params or DelayedSparseMatmulParams()
+        self._scale_cache: dict[
+            tuple[object, object, tuple[ReceptorKind, ...], tuple[float, ...]],
+            Tensor,
+        ] = {}
 
     def init_state(self, e: int, *, ctx: StepContext) -> DelayedSparseMatmulState:
         torch = require_torch()
@@ -64,6 +74,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         return DelayedSparseMatmulState(
             weights=weights,
             post_ring=None,
+            post_event_ring=None,
             post_out=None,
             cursor=0,
             pre_activity_buf=None,
@@ -85,6 +96,9 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
             if state.post_out is not None:
                 for out in state.post_out.values():
                     out.zero_()
+            if state.post_event_ring is not None:
+                for event_ring in state.post_event_ring.values():
+                    event_ring.clear()
             state.cursor = 0
             if state.pre_activity_buf is not None:
                 state.pre_activity_buf.zero_()
@@ -96,6 +110,9 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         if state.post_out is not None:
             for out in state.post_out.values():
                 out[:] = 0.0
+        if state.post_event_ring is not None:
+            for event_ring in state.post_event_ring.values():
+                event_ring.clear()
         if state.pre_activity_buf is not None:
             state.pre_activity_buf.zero_()
         return state
@@ -114,6 +131,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         use_no_grad = _use_no_grad(ctx)
         with torch.no_grad() if use_no_grad else nullcontext():
             _ensure_supported_topology(topology)
+            _validate_backend_config(self.params)
             weights = _resolve_weights(state, topology, ctx)
             device = weights.device
             validate_shapes = _validate_shapes(ctx)
@@ -128,6 +146,16 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                 require_on_device=require_on_device,
             )
 
+            if self.params.backend == "event_driven":
+                post_drive, extras = _step_event_driven(
+                    self,
+                    state,
+                    topology,
+                    pre_spikes,
+                    device,
+                    weights,
+                )
+                return state, SynapseStepResult(post_drive=post_drive, extras=extras)
             post_drive = _step_sparse_matmul(
                 self,
                 state,
@@ -156,6 +184,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         use_no_grad = _use_no_grad(ctx)
         with torch.no_grad() if use_no_grad else nullcontext():
             _ensure_supported_topology(topology)
+            _validate_backend_config(self.params)
             weights = _resolve_weights(state, topology, ctx)
             device = weights.device
             validate_shapes = _validate_shapes(ctx)
@@ -168,6 +197,17 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                 expected_len=_infer_n_pre(topology),
                 require_on_device=require_on_device,
             )
+            if self.params.backend == "event_driven":
+                _step_event_driven_into(
+                    self,
+                    state,
+                    topology,
+                    pre_spikes,
+                    device,
+                    weights,
+                    out_drive,
+                )
+                return
             _step_sparse_matmul_into(
                 self,
                 state,
@@ -181,25 +221,47 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
     def state_tensors(self, state: DelayedSparseMatmulState) -> Mapping[str, Tensor]:
         return {"weights": state.weights}
 
-    def compilation_requirements(self) -> Mapping[str, bool]:
-        requirements: dict[str, bool] = {
+    def compilation_requirements(self) -> Mapping[str, bool | str | None]:
+        use_event_driven = self.params.backend == "event_driven"
+        wants_by_delay_sparse = bool(self.params.store_sparse_by_delay) and not use_event_driven
+        wants_fused_sparse = not use_event_driven
+        requirements: dict[str, bool | str | None] = {
             "needs_edges_by_delay": False,
-            "needs_pre_adjacency": False,
-            "needs_sparse_delay_mats": True,
+            "needs_pre_adjacency": use_event_driven,
+            "needs_sparse_delay_mats": not use_event_driven,
             "needs_bucket_edge_mapping": False,
-            "wants_fused_sparse": True,
-            "wants_by_delay_sparse": bool(self.params.store_sparse_by_delay),
+            "wants_fused_sparse": wants_fused_sparse,
+            "wants_by_delay_sparse": wants_by_delay_sparse,
             "wants_bucket_edge_mapping": bool(self.params.enable_sparse_updates),
             "wants_weights_snapshot_each_step": False,
             "wants_projection_drive_tensor": False,
+            "wants_fused_layout": self.params.fused_layout if wants_fused_sparse else "auto",
+            "ring_strategy": self.params.ring_strategy if use_event_driven else "dense",
+            "ring_dtype": self.params.ring_dtype,
         }
-        if self.params.fused_layout == "csr":
+        if wants_fused_sparse and self.params.fused_layout == "csr":
             requirements["wants_fused_csr"] = True
-        elif self.params.fused_layout == "coo":
+        elif wants_fused_sparse and self.params.fused_layout == "coo":
             requirements["wants_fused_csr"] = False
-        if self.params.store_sparse_by_delay is not None:
+        if self.params.store_sparse_by_delay is not None and not use_event_driven:
             requirements["store_sparse_by_delay"] = bool(self.params.store_sparse_by_delay)
         return requirements
+
+    def _scale_table(
+        self,
+        like: Tensor,
+        kinds: tuple[ReceptorKind, ...],
+        scale_map: Mapping[ReceptorKind, float],
+    ) -> Tensor:
+        values = tuple(float(scale_map.get(kind, 1.0)) for kind in kinds)
+        key = (like.device, like.dtype, kinds, values)
+        cached = self._scale_cache.get(key)
+        if cached is not None:
+            return cached
+        torch = require_torch()
+        table = cast(Tensor, torch.tensor(values, device=like.device, dtype=like.dtype))
+        self._scale_cache[key] = table
+        return table
 
     def apply_weight_updates(
         self,
@@ -432,6 +494,290 @@ def _step_sparse_matmul_into(
     state.cursor = (cursor + 1) % depth
 
 
+def _step_event_driven(
+    model: DelayedSparseMatmulSynapse,
+    state: DelayedSparseMatmulState,
+    topology: SynapseTopology,
+    pre_spikes: Tensor,
+    device: Any,
+    weights: Tensor,
+) -> tuple[Mapping[Compartment, Tensor], Mapping[str, Tensor]]:
+    torch = require_torch()
+    max_delay = _max_delay_steps(topology)
+    depth = max_delay + 1
+    n_post = _infer_n_post(topology)
+    ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
+    use_bucketed_ring = model.params.ring_strategy == "event_bucketed"
+    post_ring: dict[Compartment, Tensor] | None = None
+    event_ring: dict[Compartment, _EventRing] | None = None
+    if use_bucketed_ring:
+        post_out = _ensure_post_out(
+            state,
+            topology,
+            n_post,
+            device,
+            weights.dtype,
+        )
+        event_ring = _ensure_event_ring(
+            state,
+            topology,
+            depth,
+            device,
+            ring_dtype,
+            capacity_max=int(model.params.ring_capacity_max),
+        )
+    else:
+        post_ring, post_out = _ensure_post_ring(
+            state,
+            topology,
+            depth,
+            n_post,
+            device,
+            ring_dtype,
+            weights.dtype,
+        )
+
+    cursor = state.cursor % depth
+    post_drive: dict[Compartment, Tensor] = {}
+    if use_bucketed_ring:
+        assert event_ring is not None
+        for comp, bucket_ring in event_ring.items():
+            out = post_out[comp]
+            out.zero_()
+            bucket_ring.pop_into(cursor, out)
+            post_drive[comp] = out
+    else:
+        assert post_ring is not None
+        for comp, dense_ring in post_ring.items():
+            slot = dense_ring[cursor]
+            out = post_out[comp]
+            _copy_ring_slot(slot, out)
+            post_drive[comp] = out
+
+    weights = _maybe_clamp_weights(model, state, topology, weights)
+    pre_activity = _fill_pre_activity_buf(state, pre_spikes, weights, device)
+    active_pre = pre_activity.nonzero(as_tuple=False).flatten()
+    if active_pre.numel() == 0:
+        state.cursor = (cursor + 1) % depth
+        return post_drive, {"processed_edges": weights.new_zeros(())}
+
+    pre_ptr, edge_idx = _require_pre_adjacency(topology, device)
+    edges = _gather_active_edges(active_pre, pre_ptr, edge_idx)
+    if edges.numel() == 0:
+        state.cursor = (cursor + 1) % depth
+        return post_drive, {"processed_edges": weights.new_zeros(())}
+
+    edge_pre = topology.pre_idx.index_select(0, edges)
+    edge_post = topology.post_idx.index_select(0, edges)
+    edge_activity = pre_activity.index_select(0, edge_pre)
+    edge_weights = weights.index_select(0, edges)
+    edge_current = edge_activity * edge_weights
+    edge_current = _apply_receptor_scale_edges(model, topology, edges, edge_current)
+
+    delay_steps = topology.delay_steps
+    delay_vals = None if delay_steps is None else delay_steps.index_select(0, edges)
+    post_ring_opt = None if use_bucketed_ring else post_ring
+    if topology.target_compartments is None:
+        comp = topology.target_compartment
+        _route_currents_for_comp(
+            posts=edge_post,
+            currents=edge_current,
+            delays=delay_vals,
+            cursor=cursor,
+            depth=depth,
+            out=post_drive[comp],
+            dense_ring=post_ring_opt[comp] if post_ring_opt is not None else None,
+            event_ring=event_ring[comp] if event_ring is not None else None,
+            ring_dtype=ring_dtype,
+        )
+    else:
+        comp_ids = topology.target_compartments
+        if comp_ids.device != device or comp_ids.dtype != torch.long:
+            raise ValueError("target_compartments must be on the target device with dtype long")
+        comp_ids = comp_ids.index_select(0, edges)
+        for comp, out in post_drive.items():
+            comp_mask = comp_ids == _COMPARTMENT_TO_ID[comp]
+            comp_idx = comp_mask.nonzero(as_tuple=False).flatten()
+            if comp_idx.numel() == 0:
+                continue
+            comp_posts = edge_post.index_select(0, comp_idx)
+            comp_currents = edge_current.index_select(0, comp_idx)
+            comp_delays = None if delay_vals is None else delay_vals.index_select(0, comp_idx)
+            _route_currents_for_comp(
+                posts=comp_posts,
+                currents=comp_currents,
+                delays=comp_delays,
+                cursor=cursor,
+                depth=depth,
+                out=out,
+                dense_ring=post_ring_opt[comp] if post_ring_opt is not None else None,
+                event_ring=event_ring[comp] if event_ring is not None else None,
+                ring_dtype=ring_dtype,
+            )
+
+    state.cursor = (cursor + 1) % depth
+    return post_drive, {"processed_edges": weights.new_tensor(edges.numel())}
+
+
+def _step_event_driven_into(
+    model: DelayedSparseMatmulSynapse,
+    state: DelayedSparseMatmulState,
+    topology: SynapseTopology,
+    pre_spikes: Tensor,
+    device: Any,
+    weights: Tensor,
+    out_drive: MutableMapping[Compartment, Tensor],
+) -> None:
+    torch = require_torch()
+    max_delay = _max_delay_steps(topology)
+    depth = max_delay + 1
+    n_post = _infer_n_post(topology)
+    ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
+    use_bucketed_ring = model.params.ring_strategy == "event_bucketed"
+    post_ring: dict[Compartment, Tensor] | None = None
+    event_ring: dict[Compartment, _EventRing] | None = None
+    if use_bucketed_ring:
+        event_ring = _ensure_event_ring(
+            state,
+            topology,
+            depth,
+            device,
+            ring_dtype,
+            capacity_max=int(model.params.ring_capacity_max),
+        )
+    else:
+        post_ring, _ = _ensure_post_ring(
+            state,
+            topology,
+            depth,
+            n_post,
+            device,
+            ring_dtype,
+            weights.dtype,
+        )
+
+    cursor = state.cursor % depth
+    if use_bucketed_ring:
+        assert event_ring is not None
+        for comp, bucket_ring in event_ring.items():
+            if comp not in out_drive:
+                raise KeyError(f"Drive accumulator missing compartment {comp}")
+            bucket_ring.pop_into(cursor, out_drive[comp])
+    else:
+        assert post_ring is not None
+        for comp, dense_ring in post_ring.items():
+            if comp not in out_drive:
+                raise KeyError(f"Drive accumulator missing compartment {comp}")
+            _add_ring_slot(dense_ring[cursor], out_drive[comp])
+
+    weights = _maybe_clamp_weights(model, state, topology, weights)
+    pre_activity = _fill_pre_activity_buf(state, pre_spikes, weights, device)
+    active_pre = pre_activity.nonzero(as_tuple=False).flatten()
+    if active_pre.numel() == 0:
+        state.cursor = (cursor + 1) % depth
+        return
+
+    pre_ptr, edge_idx = _require_pre_adjacency(topology, device)
+    edges = _gather_active_edges(active_pre, pre_ptr, edge_idx)
+    if edges.numel() == 0:
+        state.cursor = (cursor + 1) % depth
+        return
+
+    edge_pre = topology.pre_idx.index_select(0, edges)
+    edge_post = topology.post_idx.index_select(0, edges)
+    edge_activity = pre_activity.index_select(0, edge_pre)
+    edge_weights = weights.index_select(0, edges)
+    edge_current = edge_activity * edge_weights
+    edge_current = _apply_receptor_scale_edges(model, topology, edges, edge_current)
+
+    delay_steps = topology.delay_steps
+    delay_vals = None if delay_steps is None else delay_steps.index_select(0, edges)
+    post_ring_opt = None if use_bucketed_ring else post_ring
+    if topology.target_compartments is None:
+        comp = topology.target_compartment
+        if comp not in out_drive:
+            raise KeyError(f"Drive accumulator missing compartment {comp}")
+        _route_currents_for_comp(
+            posts=edge_post,
+            currents=edge_current,
+            delays=delay_vals,
+            cursor=cursor,
+            depth=depth,
+            out=out_drive[comp],
+            dense_ring=post_ring_opt[comp] if post_ring_opt is not None else None,
+            event_ring=event_ring[comp] if event_ring is not None else None,
+            ring_dtype=ring_dtype,
+        )
+    else:
+        comp_ids = topology.target_compartments
+        if comp_ids.device != device or comp_ids.dtype != torch.long:
+            raise ValueError("target_compartments must be on the target device with dtype long")
+        comp_ids = comp_ids.index_select(0, edges)
+        for comp, out in out_drive.items():
+            comp_mask = comp_ids == _COMPARTMENT_TO_ID[comp]
+            comp_idx = comp_mask.nonzero(as_tuple=False).flatten()
+            if comp_idx.numel() == 0:
+                continue
+            comp_posts = edge_post.index_select(0, comp_idx)
+            comp_currents = edge_current.index_select(0, comp_idx)
+            comp_delays = None if delay_vals is None else delay_vals.index_select(0, comp_idx)
+            _route_currents_for_comp(
+                posts=comp_posts,
+                currents=comp_currents,
+                delays=comp_delays,
+                cursor=cursor,
+                depth=depth,
+                out=out,
+                dense_ring=post_ring_opt[comp] if post_ring_opt is not None else None,
+                event_ring=event_ring[comp] if event_ring is not None else None,
+                ring_dtype=ring_dtype,
+            )
+
+    state.cursor = (cursor + 1) % depth
+
+
+def _route_currents_for_comp(
+    *,
+    posts: Tensor,
+    currents: Tensor,
+    delays: Tensor | None,
+    cursor: int,
+    depth: int,
+    out: Tensor,
+    dense_ring: Tensor | None,
+    event_ring: _EventRing | None,
+    ring_dtype: Any,
+) -> None:
+    torch = require_torch()
+    if delays is None:
+        out.index_add_(0, posts, currents)
+        return
+    immediate_mask = delays == 0
+    immediate_idx = immediate_mask.nonzero(as_tuple=False).flatten()
+    if immediate_idx.numel() > 0:
+        out.index_add_(
+            0,
+            posts.index_select(0, immediate_idx),
+            currents.index_select(0, immediate_idx),
+        )
+    delayed_idx = (~immediate_mask).nonzero(as_tuple=False).flatten()
+    if delayed_idx.numel() == 0:
+        return
+    target_rows = torch.remainder(delays.index_select(0, delayed_idx) + cursor, depth)
+    delayed_posts = posts.index_select(0, delayed_idx)
+    delayed_vals = _as_ring_dtype(currents.index_select(0, delayed_idx), ring_dtype)
+    if event_ring is not None:
+        event_ring.schedule(target_rows, delayed_posts, delayed_vals)
+        return
+    if dense_ring is None:
+        raise RuntimeError("Delayed sparse ring target missing for delayed currents.")
+    dense_ring.index_put_(
+        (target_rows, delayed_posts),
+        delayed_vals,
+        accumulate=True,
+    )
+
+
 def _ensure_post_ring(
     state: DelayedSparseMatmulState,
     topology: SynapseTopology,
@@ -467,6 +813,54 @@ def _ensure_post_ring(
             out = torch.zeros((n_post,), device=device, dtype=out_dtype)
             state.post_out[comp] = out
     return state.post_ring, state.post_out
+
+
+def _ensure_post_out(
+    state: DelayedSparseMatmulState,
+    topology: SynapseTopology,
+    n_post: int,
+    device: Any,
+    dtype: Any,
+) -> dict[Compartment, Tensor]:
+    torch = require_torch()
+    if state.post_out is None:
+        state.post_out = {}
+    for comp in _ring_compartments(topology):
+        out = state.post_out.get(comp)
+        if out is None or out.shape != (n_post,) or out.device != device or out.dtype != dtype:
+            out = torch.zeros((n_post,), device=device, dtype=dtype)
+            state.post_out[comp] = out
+    return state.post_out
+
+
+def _ensure_event_ring(
+    state: DelayedSparseMatmulState,
+    topology: SynapseTopology,
+    depth: int,
+    device: Any,
+    ring_dtype: Any,
+    *,
+    capacity_max: int,
+) -> dict[Compartment, _EventRing]:
+    if state.post_event_ring is None:
+        state.post_event_ring = {}
+    for comp in _ring_compartments(topology):
+        ring = state.post_event_ring.get(comp)
+        if (
+            ring is None
+            or ring.depth != depth
+            or ring.device != device
+            or ring.dtype != ring_dtype
+            or ring.capacity_max != capacity_max
+        ):
+            ring = BucketedEventRing(
+                depth=depth,
+                device=device,
+                dtype=ring_dtype,
+                capacity_max=capacity_max,
+            )
+            state.post_event_ring[comp] = ring
+    return state.post_event_ring
 
 
 def _resolve_ring_dtype(ring_dtype: str | None, weights_dtype: Any, device: Any) -> Any:
@@ -527,6 +921,77 @@ def _ring_compartments(topology: SynapseTopology) -> tuple[Compartment, ...]:
                     comps.append(comp)
             return tuple(comps)
     return _COMPARTMENT_ORDER
+
+
+def _resolve_receptor_scale_map(
+    model: DelayedSparseMatmulSynapse,
+    topology: SynapseTopology,
+) -> Mapping[ReceptorKind, float] | None:
+    meta = topology.meta
+    if isinstance(meta, Mapping):
+        scale_meta = meta.get("receptor_scale")
+        if isinstance(scale_meta, Mapping):
+            return cast(Mapping[ReceptorKind, float], scale_meta)
+    return model.params.receptor_scale
+
+
+def _apply_receptor_scale_edges(
+    model: DelayedSparseMatmulSynapse,
+    topology: SynapseTopology,
+    edges: Tensor,
+    edge_current: Tensor,
+) -> Tensor:
+    if topology.receptor is None:
+        return edge_current
+    scale_map = _resolve_receptor_scale_map(model, topology)
+    if scale_map is None:
+        return edge_current
+    torch = require_torch()
+    receptor_ids = topology.receptor
+    if receptor_ids.device != edge_current.device or receptor_ids.dtype != torch.long:
+        raise ValueError("receptor ids must be on the same device with dtype long")
+    receptor_ids = receptor_ids.index_select(0, edges)
+    kinds = topology.receptor_kinds or (ReceptorKind.AMPA, ReceptorKind.NMDA, ReceptorKind.GABA)
+    table = model._scale_table(edge_current, kinds, scale_map)
+    edge_scale = table.index_select(0, receptor_ids)
+    return edge_current * edge_scale
+
+
+def _require_pre_adjacency(topology: SynapseTopology, device: Any) -> tuple[Tensor, Tensor]:
+    if not topology.meta:
+        raise ValueError(
+            "Topology meta missing pre adjacency; compile_topology(..., build_pre_adjacency=True) must be called."
+        )
+    pre_ptr = topology.meta.get("pre_ptr")
+    edge_idx = topology.meta.get("edge_idx")
+    if pre_ptr is None or edge_idx is None:
+        raise ValueError(
+            "Topology meta missing pre adjacency; compile_topology(..., build_pre_adjacency=True) must be called."
+        )
+    if pre_ptr.device != device or edge_idx.device != device:
+        raise ValueError("Adjacency tensors must be on the synapse device")
+    return cast(Tensor, pre_ptr), cast(Tensor, edge_idx)
+
+
+def _gather_active_edges(
+    active_pre: Tensor,
+    pre_ptr: Tensor,
+    edge_idx: Tensor,
+) -> Tensor:
+    torch = require_torch()
+    if active_pre.numel() == 0:
+        return cast(Tensor, torch.empty((0,), device=edge_idx.device, dtype=torch.long))
+    starts = pre_ptr.index_select(0, active_pre)
+    ends = pre_ptr.index_select(0, active_pre + 1)
+    counts = ends - starts
+    if counts.numel() == 0:
+        return cast(Tensor, torch.empty((0,), device=edge_idx.device, dtype=torch.long))
+    base = torch.repeat_interleave(starts, counts)
+    prefix = torch.cumsum(counts, 0)
+    group_start = torch.repeat_interleave(prefix - counts, counts)
+    intra = torch.arange(group_start.numel(), device=edge_idx.device) - group_start
+    edge_pos = base + intra
+    return cast(Tensor, edge_idx.index_select(0, edge_pos))
 
 
 def _sparse_mats_by_delay_by_comp(
@@ -773,6 +1238,17 @@ def _maybe_clamp_weights(
 
 def _ensure_supported_topology(topology: SynapseTopology) -> None:
     _ = topology
+
+
+def _validate_backend_config(params: DelayedSparseMatmulParams) -> None:
+    if params.backend == "event_driven":
+        if params.ring_strategy not in {"dense", "event_bucketed"}:
+            raise RuntimeError(f"Unsupported ring_strategy={params.ring_strategy}.")
+        return
+    if params.ring_strategy != "dense":
+        raise RuntimeError(
+            f"ring_strategy={params.ring_strategy} requires backend='event_driven'."
+        )
 
 
 def _as_like(

@@ -10,6 +10,8 @@ from typing import Any, Protocol, runtime_checkable
 from biosnn.contracts.neurons import Compartment, StepContext
 from biosnn.contracts.tensor import Tensor
 
+CompilationRequirementValue = bool | str | None
+
 
 class ReceptorKind(StrEnum):
     AMPA = "ampa"
@@ -90,7 +92,7 @@ class ISynapseModel(Protocol):
 class ICompilationRequirements(Protocol):
     """Optional hook for compilation requirements used by engines."""
 
-    def compilation_requirements(self) -> Mapping[str, bool]:
+    def compilation_requirements(self) -> Mapping[str, CompilationRequirementValue]:
         """Return compile flags.
 
         Expected keys (if applicable):
@@ -100,11 +102,14 @@ class ICompilationRequirements(Protocol):
         - needs_bucket_edge_mapping
         - wants_fused_sparse
         - wants_fused_csr
+        - wants_fused_layout
         - wants_by_delay_sparse
         - store_sparse_by_delay
         - wants_bucket_edge_mapping
         - wants_weights_snapshot_each_step
         - wants_projection_drive_tensor
+        - ring_strategy
+        - ring_dtype
         """
         ...
 

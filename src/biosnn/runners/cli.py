@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import threading
 import time
 import webbrowser
 from collections.abc import Callable, Mapping, Sequence
@@ -18,10 +17,17 @@ from biosnn.contracts.monitors import IMonitor
 from biosnn.core.torch_utils import require_torch
 from biosnn.experiments.demo_minimal import DemoMinimalConfig, run_demo_minimal
 from biosnn.experiments.demo_network import DemoNetworkConfig, build_network_demo
+from biosnn.experiments.demo_registry import (
+    ALLOWED_DEMOS,
+    feature_flags_for_run_spec,
+    run_spec_from_cli_args,
+)
 from biosnn.experiments.demo_runner import run_demo_from_spec
 from biosnn.experiments.demo_types import DemoModelSpec, DemoRuntimeConfig
 from biosnn.experiments.demos import FEATURE_DEMO_BUILDERS, FeatureDemoConfig, FeatureDemoName
+from biosnn.io.export.run_manifest import write_run_config, write_run_features, write_run_status
 from biosnn.learning.homeostasis import HomeostasisScope, RateEmaThresholdHomeostasisConfig
+from biosnn.runners.dashboard_server import start_dashboard_server
 
 
 def main() -> None:
@@ -34,7 +40,12 @@ def main() -> None:
     _apply_threading_torch(torch, torch_threads, torch_interop)
 
     repo_root = Path(__file__).resolve().parents[3]
-    run_dir = _make_run_dir(repo_root / "artifacts")
+    artifacts_root = (
+        Path(args.artifacts_dir).expanduser().resolve()
+        if args.artifacts_dir
+        else (repo_root / "artifacts").resolve()
+    )
+    run_dir = _make_run_dir(artifacts_root, args.run_id)
     device = _resolve_device(torch, args.device)
     _validate_ring_dtype_for_device(torch=torch, ring_dtype=args.ring_dtype, device=device)
     steps = args.steps
@@ -46,47 +57,97 @@ def main() -> None:
 
     mode = args.mode
 
-    if args.demo == "minimal":
-        run_demo_minimal(
-            DemoMinimalConfig(
-                out_dir=run_dir,
-                mode=mode,
-                n_neurons=args.n,
-                p_connect=args.p,
-                steps=steps,
-                dt=dt,
-                seed=args.seed,
-                device=device,
-                max_ring_mib=args.max_ring_mib,
-                profile=args.profile,
-                profile_steps=args.profile_steps,
-                allow_cuda_monitor_sync=args.allow_cuda_monitor_sync,
-                monitor_safe_defaults=bool(args.monitor_safe_defaults),
-                monitor_neuron_sample=args.monitor_neuron_sample,
-                monitor_edge_sample=args.monitor_edge_sample,
+    run_spec: dict[str, Any] | None = None
+    if args.demo in ALLOWED_DEMOS:
+        run_spec = run_spec_from_cli_args(args=args, device=device)
+        run_spec["run_id"] = run_dir.name
+        run_spec["run_dir"] = _run_dir_web_path(repo_root, run_dir)
+        write_run_config(run_dir, run_spec)
+        write_run_features(run_dir, feature_flags_for_run_spec(run_spec))
+        write_run_status(
+            run_dir,
+            {
+                "run_id": run_dir.name,
+                "state": "running",
+                "started_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            },
+        )
+
+    try:
+        if args.demo == "minimal":
+            run_demo_minimal(
+                DemoMinimalConfig(
+                    out_dir=run_dir,
+                    mode=mode,
+                    n_neurons=args.n,
+                    p_connect=args.p,
+                    steps=steps,
+                    dt=dt,
+                    seed=args.seed,
+                    device=device,
+                    max_ring_mib=args.max_ring_mib,
+                    profile=args.profile,
+                    profile_steps=args.profile_steps,
+                    allow_cuda_monitor_sync=args.allow_cuda_monitor_sync,
+                    monitor_safe_defaults=bool(args.monitor_safe_defaults),
+                    monitor_neuron_sample=args.monitor_neuron_sample,
+                    monitor_edge_sample=args.monitor_edge_sample,
+                )
             )
-        )
+        else:
+            builders = _demo_registry()
+            builder = builders.get(args.demo)
+            if builder is None:
+                raise ValueError(f"Unsupported demo '{args.demo}'")
+            model_spec, runtime_cfg, monitors = builder(
+                args=args,
+                run_dir=run_dir,
+                mode=cast(ModeName, mode),
+                steps=int(steps),
+                dt=float(dt),
+                device=device,
+            )
+            run_demo_from_spec(model_spec, runtime_cfg, monitors)
+    except Exception as exc:
+        if run_spec is not None:
+            write_run_status(
+                run_dir,
+                {
+                    "run_id": run_dir.name,
+                    "state": "error",
+                    "last_error": str(exc),
+                    "finished_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                },
+            )
+        raise
     else:
-        builders = _demo_registry()
-        builder = builders.get(args.demo)
-        if builder is None:
-            raise ValueError(f"Unsupported demo '{args.demo}'")
-        model_spec, runtime_cfg, monitors = builder(
-            args=args,
-            run_dir=run_dir,
-            mode=cast(ModeName, mode),
-            steps=int(steps),
-            dt=float(dt),
-            device=device,
-        )
-        run_demo_from_spec(model_spec, runtime_cfg, monitors)
+        if run_spec is not None:
+            write_run_status(
+                run_dir,
+                {
+                    "run_id": run_dir.name,
+                    "state": "done",
+                    "last_error": None,
+                    "finished_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                },
+            )
+
+    if args.no_server:
+        print("No-server mode selected; skipping dashboard server.")
+        return
 
     if not _should_launch_dashboard(mode):
         print("Fast mode selected; skipping dashboard server.")
         return
 
     port = _find_port(args.port)
-    _start_dashboard_server(repo_root, port)
+    server = start_dashboard_server(
+        repo_root=repo_root,
+        port=port,
+        artifacts_dir=artifacts_root,
+        initial_run_dir=run_dir,
+        initial_state="done",
+    )
     url = _build_dashboard_url(port, run_dir, repo_root, args.refresh_ms)
     print(f"Dashboard URL: {url}")
 
@@ -98,6 +159,12 @@ def main() -> None:
             time.sleep(1)
     except KeyboardInterrupt:
         return
+    finally:
+        controller = getattr(server, "controller", None)
+        if controller is not None and hasattr(controller, "shutdown"):
+            controller.shutdown()
+        server.shutdown()
+        server.server_close()
 
 
 ModeName = Literal["dashboard", "fast"]
@@ -354,6 +421,7 @@ def _build_network_config_from_args(
         feedforward_delay_use_ceil=args.feedforward_delay_use_ceil,
         input_drive=args.input_drive,
         drive_monitor=args.drive_monitor,
+        synapse_backend=cast(Literal["spmm_fused", "event_driven"], args.synapse_backend),
         fused_layout=cast(Literal["auto", "coo", "csr"], args.fused_layout),
         ring_dtype=cast(str | None, args.ring_dtype),
         ring_strategy=cast(Literal["dense", "event_bucketed"], args.ring_strategy),
@@ -402,6 +470,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=["auto", "coo", "csr"],
         default="auto",
         help="fused sparse layout preference for delayed_sparse_matmul synapses",
+    )
+    parser.add_argument(
+        "--synapse-backend",
+        choices=["spmm_fused", "event_driven"],
+        default="spmm_fused",
+        help="synapse backend preference for delayed_sparse_matmul",
     )
     parser.add_argument(
         "--ring-dtype",
@@ -595,16 +669,43 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--homeostasis-export-every", type=int, default=10)
     parser.add_argument("--port", type=int)
     parser.add_argument("--no-open", action="store_true")
+    parser.add_argument(
+        "--no-server",
+        action="store_true",
+        help="run simulation and exit without starting the dashboard HTTP server",
+    )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="optional explicit run folder name (used by dashboard API subprocess runs)",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        type=str,
+        default=None,
+        help="override artifacts root directory (default: <repo>/artifacts)",
+    )
     parser.add_argument("--refresh-ms", type=int, default=1200)
     return parser.parse_args(argv)
 
 
-def _make_run_dir(base: Path) -> Path:
+def _make_run_dir(base: Path, run_id: str | None = None) -> Path:
     base.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = base / f"run_{stamp}"
-    if run_dir.exists():
-        run_dir = base / f"run_{stamp}_{int(time.time())}"
+    if run_id:
+        safe_id = "".join(ch if ch.isalnum() or ch in "_-." else "_" for ch in run_id).strip("._")
+        if not safe_id:
+            raise ValueError("run_id must contain at least one valid character")
+        run_dir = base / safe_id
+        if run_dir.exists():
+            if not run_dir.is_dir():
+                raise FileExistsError(f"Run path exists and is not a directory: {run_dir}")
+            return run_dir
+    else:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = base / f"run_{stamp}"
+        if run_dir.exists():
+            run_dir = base / f"run_{stamp}_{int(time.time())}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
@@ -699,16 +800,6 @@ def _apply_threading_torch(torch: Any, threads: int | None, interop: int | None)
         torch.set_num_interop_threads(interop)
 
 
-def _start_dashboard_server(repo_root: Path, port: int) -> None:
-    def handler(*args, **kwargs):
-        return SimpleHTTPRequestHandler(*args, directory=str(repo_root), **kwargs)
-
-    server = ThreadingHTTPServer(("localhost", port), handler)
-
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-
-
 def _build_dashboard_url(port: int, run_dir: Path, repo_root: Path, refresh_ms: int) -> str:
     base = f"http://localhost:{port}/docs/dashboard/"
     def param_or_none(filename: str) -> str:
@@ -718,6 +809,7 @@ def _build_dashboard_url(port: int, run_dir: Path, repo_root: Path, refresh_ms: 
         return _dashboard_param(repo_root, run_dir, filename)
 
     query = {
+        "run": _run_dir_web_path(repo_root, run_dir),
         "topology": param_or_none("topology.json"),
         "neuron": param_or_none("neuron.csv"),
         "synapse": param_or_none("synapse.csv"),
@@ -737,6 +829,10 @@ def _dashboard_param(repo_root: Path, run_dir: Path, filename: str) -> str:
     except ValueError:
         return (run_dir / filename).as_posix()
     return (Path("/") / rel / filename).as_posix()
+
+
+def _run_dir_web_path(repo_root: Path, run_dir: Path) -> str:
+    return _dashboard_param(repo_root, run_dir, "").rstrip("/")
 
 
 def _find_port(requested: int | None) -> int:
