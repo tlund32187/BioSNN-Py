@@ -12,6 +12,7 @@ from biosnn.biophysics.models.adex_2c import AdEx2CompModel
 from biosnn.biophysics.models.base import NeuronModelBase, StateTensorSpec
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.biophysics.models.template_neuron import TemplateNeuronModel
+from biosnn.contracts.homeostasis import HomeostasisPopulation, IHomeostasisRule
 from biosnn.contracts.learning import ILearningRule, LearningBatch, LearningStepResult
 from biosnn.contracts.modulators import IModulatorField, ModulatorKind, ModulatorRelease
 from biosnn.contracts.monitors import IMonitor, StepEvent
@@ -28,6 +29,11 @@ from biosnn.contracts.synapses import (
     SynapseInputs,
     SynapseStepResult,
     SynapseTopology,
+)
+from biosnn.learning.homeostasis import (
+    HomeostasisScope,
+    RateEmaThresholdHomeostasis,
+    RateEmaThresholdHomeostasisConfig,
 )
 from biosnn.learning.rules import ThreeFactorHebbianParams, ThreeFactorHebbianRule
 from biosnn.synapses.dynamics.delayed_current import DelayedCurrentParams, DelayedCurrentSynapse
@@ -55,6 +61,9 @@ __all__ = [
     "LearningBatch",
     "LearningStepResult",
     "ILearningRule",
+    # homeostasis
+    "HomeostasisPopulation",
+    "IHomeostasisRule",
     # neuromodulators
     "ModulatorKind",
     "ModulatorRelease",
@@ -85,4 +94,8 @@ __all__ = [
     # learning rules
     "ThreeFactorHebbianParams",
     "ThreeFactorHebbianRule",
+    # homeostasis rules
+    "HomeostasisScope",
+    "RateEmaThresholdHomeostasis",
+    "RateEmaThresholdHomeostasisConfig",
 ]

@@ -11,12 +11,13 @@ from collections.abc import Sequence
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 from biosnn.core.torch_utils import require_torch
 from biosnn.experiments.demo_minimal import DemoMinimalConfig, run_demo_minimal
 from biosnn.experiments.demo_network import DemoNetworkConfig, run_demo_network
+from biosnn.learning.homeostasis import HomeostasisScope, RateEmaThresholdHomeostasisConfig
 
 
 def main() -> None:
@@ -91,6 +92,16 @@ def main() -> None:
                 relay_lateral=args.relay_lateral,
                 hidden_lateral=args.hidden_lateral,
                 weight_init=args.weight_init,
+                enable_homeostasis=bool(args.enable_homeostasis),
+                homeostasis=RateEmaThresholdHomeostasisConfig(
+                    alpha=float(args.homeostasis_alpha),
+                    eta=float(args.homeostasis_eta),
+                    r_target=float(args.homeostasis_r_target),
+                    clamp_min=float(args.homeostasis_clamp_min),
+                    clamp_max=float(args.homeostasis_clamp_max),
+                    scope=cast(HomeostasisScope, args.homeostasis_scope),
+                ),
+                homeostasis_export_every=int(args.homeostasis_export_every),
                 feedforward_delay_from_distance=args.feedforward_delay_from_distance,
                 feedforward_delay_base_velocity=args.feedforward_delay_base_velocity,
                 feedforward_delay_myelin_scale=args.feedforward_delay_myelin_scale,
@@ -320,6 +331,23 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--input-drive", type=float, default=1.0)
     parser.add_argument("--drive-monitor", action="store_true", help="write drive.csv diagnostics")
+    parser.add_argument(
+        "--enable-homeostasis",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable EMA firing-rate homeostasis (threshold adaptation)",
+    )
+    parser.add_argument("--homeostasis-alpha", type=float, default=0.01)
+    parser.add_argument("--homeostasis-eta", type=float, default=1e-3)
+    parser.add_argument("--homeostasis-r-target", type=float, default=0.05)
+    parser.add_argument("--homeostasis-clamp-min", type=float, default=0.0)
+    parser.add_argument("--homeostasis-clamp-max", type=float, default=0.050)
+    parser.add_argument(
+        "--homeostasis-scope",
+        choices=["per_population", "per_neuron"],
+        default="per_neuron",
+    )
+    parser.add_argument("--homeostasis-export-every", type=int, default=10)
     parser.add_argument("--port", type=int)
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--refresh-ms", type=int, default=1200)

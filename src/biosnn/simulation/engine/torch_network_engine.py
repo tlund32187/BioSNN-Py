@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any, SupportsInt, cast
 
 from biosnn.connectivity.topology_compile import compile_topology
+from biosnn.contracts.homeostasis import HomeostasisPopulation, IHomeostasisRule
 from biosnn.contracts.learning import LearningBatch, LearningStepResult
 from biosnn.contracts.modulators import ModulatorKind, ModulatorRelease
 from biosnn.contracts.monitors import IMonitor, Scalar, StepEvent
@@ -97,6 +98,7 @@ class TorchNetworkEngine(ISimulationEngine):
         populations: Sequence[PopulationSpec],
         projections: Sequence[ProjectionSpec],
         modulators: Sequence[ModulatorSpec] | None = None,
+        homeostasis: IHomeostasisRule | None = None,
         external_drive_fn: ExternalDriveFn | None = None,
         releases_fn: ReleasesFn | None = None,
         fast_mode: bool = False,
@@ -109,6 +111,7 @@ class TorchNetworkEngine(ISimulationEngine):
         self._pop_specs = list(populations)
         self._proj_specs = list(projections)
         self._mod_specs = list(modulators) if modulators is not None else []
+        self._homeostasis = homeostasis
         self._external_drive_fn = external_drive_fn
         self._releases_fn = releases_fn
         self._fast_mode = bool(fast_mode)
@@ -145,6 +148,7 @@ class TorchNetworkEngine(ISimulationEngine):
         self._compiled_pop_tensor_keys: dict[str, tuple[str, ...]] = {}
         self._compiled_mod_by_pop: dict[str, dict[ModulatorKind, Tensor]] = {}
         self._compiled_edge_mods_by_proj: dict[str, dict[ModulatorKind, Tensor]] = {}
+        self._homeostasis_scalars: dict[str, Tensor] = {}
         self._last_event: StepEvent | None = None
 
         self.last_projection_drive: dict[str, Mapping[Compartment, Tensor]] = {}
@@ -185,6 +189,24 @@ class TorchNetworkEngine(ISimulationEngine):
             state = spec.model.init_state(spec.n, ctx=self._ctx)
             spikes = torch.zeros((spec.n,), device=self._device, dtype=torch.bool)
             self._pop_states[spec.name] = _PopulationState(state=state, spikes=spikes)
+
+        self._homeostasis_scalars = {}
+        if self._homeostasis is not None:
+            homeo_pops = [
+                HomeostasisPopulation(
+                    name=spec.name,
+                    model=spec.model,
+                    state=self._pop_states[spec.name].state,
+                    n=spec.n,
+                )
+                for spec in self._pop_specs
+            ]
+            self._homeostasis.init(
+                homeo_pops,
+                device=self._device,
+                dtype=self._dtype,
+                ctx=self._ctx,
+            )
 
         self._proj_states.clear()
         pop_map = {spec.name: spec for spec in self._pop_specs}
@@ -474,6 +496,17 @@ class TorchNetworkEngine(ISimulationEngine):
                     spikes_concat.append(spikes)
                 neuron_tensors_by_pop[spec.name] = spec.model.state_tensors(pop_state.state)
 
+        if self._homeostasis is not None:
+            self._homeostasis_scalars = dict(
+                self._homeostasis.step(
+                    {spec.name: self._pop_states[spec.name].spikes for spec in self._pop_specs},
+                    dt=self._dt,
+                    ctx=self._ctx,
+                )
+            )
+        else:
+            self._homeostasis_scalars = {}
+
         self.last_d_weights = {}
         for runtime in self._proj_runtime_list:
             proj = runtime.spec
@@ -551,6 +584,7 @@ class TorchNetworkEngine(ISimulationEngine):
             )
         event_tensors.update(_projection_tensors(self._proj_specs, self._proj_states))
         event_tensors.update(_learning_tensors(self._proj_specs, self._proj_states))
+        event_tensors.update(_homeostasis_tensors(self._homeostasis))
         event_tensors.update(_modulator_tensors(self._mod_specs, self._mod_states))
 
         scalars: dict[str, Scalar] = {
@@ -561,6 +595,8 @@ class TorchNetworkEngine(ISimulationEngine):
         }
         for spec in self._pop_specs:
             scalars[f"spike_count/{spec.name}"] = self._pop_states[spec.name].spikes.sum()
+        if self._homeostasis_scalars:
+            scalars.update(self._homeostasis_scalars)
 
         event = StepEvent(
             t=self._t,
@@ -697,6 +733,17 @@ class TorchNetworkEngine(ISimulationEngine):
                                 value = value.to(device=view.device, dtype=view.dtype)
                             view.copy_(value)
 
+        if self._homeostasis is not None:
+            self._homeostasis_scalars = dict(
+                self._homeostasis.step(
+                    {spec.name: self._pop_states[spec.name].spikes for spec in self._pop_specs},
+                    dt=self._dt,
+                    ctx=self._ctx,
+                )
+            )
+        else:
+            self._homeostasis_scalars = {}
+
         self.last_d_weights = {}
         for runtime in self._proj_runtime_list:
             proj = runtime.spec
@@ -760,6 +807,8 @@ class TorchNetworkEngine(ISimulationEngine):
         scalars["spike_fraction_total"] = spike_fraction
         for spec in self._pop_specs:
             scalars[f"spike_count/{spec.name}"] = self._pop_states[spec.name].spikes.sum()
+        if self._homeostasis_scalars:
+            scalars.update(self._homeostasis_scalars)
 
         event = StepEvent(
             t=self._t,
@@ -849,6 +898,7 @@ class TorchNetworkEngine(ISimulationEngine):
                     fast_event_tensors[f"pop/{spec.name}/{key}"] = value
             fast_event_tensors.update(_projection_tensors(self._proj_specs, self._proj_states))
             fast_event_tensors.update(_learning_tensors(self._proj_specs, self._proj_states))
+            fast_event_tensors.update(_homeostasis_tensors(self._homeostasis))
             fast_event_tensors.update(_modulator_tensors(self._mod_specs, self._mod_states))
             self._compiled_event_tensors = fast_event_tensors
         else:
@@ -892,6 +942,7 @@ class TorchNetworkEngine(ISimulationEngine):
 
             compiled_event_tensors.update(_projection_tensors(self._proj_specs, self._proj_states))
             compiled_event_tensors.update(_learning_tensors(self._proj_specs, self._proj_states))
+            compiled_event_tensors.update(_homeostasis_tensors(self._homeostasis))
             compiled_event_tensors.update(_modulator_tensors(self._mod_specs, self._mod_states))
             self._compiled_event_tensors = compiled_event_tensors
 
@@ -1464,6 +1515,12 @@ def _learning_tensors(
         for key, value in proj.learning.state_tensors(state).items():
             tensors[f"learn/{proj.name}/{key}"] = value
     return tensors
+
+
+def _homeostasis_tensors(homeostasis: IHomeostasisRule | None) -> dict[str, Tensor]:
+    if homeostasis is None:
+        return {}
+    return dict(homeostasis.state_tensors())
 
 
 def _modulator_tensors(

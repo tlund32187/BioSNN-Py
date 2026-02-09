@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -18,12 +18,17 @@ from biosnn.connectivity.builders import (
 from biosnn.connectivity.delays import DelayParams, compute_delay_steps
 from biosnn.contracts.monitors import IMonitor, StepEvent
 from biosnn.contracts.neurons import Compartment
-from biosnn.contracts.simulation import SimulationConfig
 from biosnn.contracts.synapses import ISynapseModel
 from biosnn.core.torch_utils import require_torch
-from biosnn.io.dashboard_export import export_population_topology_json
+from biosnn.experiments.demo_runner import run_demo_from_spec
+from biosnn.experiments.demo_types import DemoModelSpec
 from biosnn.io.sinks import CsvSink
+from biosnn.learning.homeostasis import (
+    RateEmaThresholdHomeostasis,
+    RateEmaThresholdHomeostasisConfig,
+)
 from biosnn.monitors.csv import NeuronCSVMonitor
+from biosnn.monitors.metrics.homeostasis_csv import HomeostasisCSVMonitor
 from biosnn.monitors.metrics.metrics_csv import MetricsCSVMonitor
 from biosnn.monitors.metrics.scalar_utils import scalar_to_float
 from biosnn.monitors.raster.spike_events_csv import SpikeEventsCSVMonitor
@@ -132,10 +137,17 @@ class DemoNetworkConfig:
     hidden_lateral_ei_mode: Literal["balanced", "mostly_inhib"] = "balanced"
     hidden_lateral_delay_from_distance: bool = False
     hidden_lateral_delay_per_unit_steps: float = 2.0
+    enable_homeostasis: bool = False
+    homeostasis: RateEmaThresholdHomeostasisConfig = field(
+        default_factory=RateEmaThresholdHomeostasisConfig
+    )
+    homeostasis_export_every: int = 10
 
 
-def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
-    """Run a multi-population demo network and write CSV/JSON artifacts."""
+def build_network_demo(
+    cfg: DemoNetworkConfig,
+) -> tuple[DemoModelSpec, DemoNetworkConfig, list[IMonitor]]:
+    """Build a multi-population demo network and its monitors."""
 
     torch = require_torch()
     device = cfg.device
@@ -533,18 +545,6 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
         drive = torch.full((n_local,), cfg.input_drive * scale, device=device_obj, dtype=dtype_obj)
         return {Compartment.SOMA: drive}
 
-    engine = TorchNetworkEngine(
-        populations=populations,
-        projections=projections,
-        external_drive_fn=external_drive_fn,
-        fast_mode=fast_mode,
-        compiled_mode=fast_mode,
-        learning_use_scratch=fast_mode,
-        parallel_compile=cfg.parallel_compile,
-        parallel_compile_workers=cfg.parallel_compile_workers,
-        parallel_compile_torch_threads=cfg.parallel_compile_torch_threads,
-    )
-
     total_neurons = sum(pop.n for pop in populations)
     neuron_sample = _clamp_sample(cfg.neuron_sample, total_neurons, cap=64)
     edge_counts = [_edge_count(topo) for topo in topologies] or [0]
@@ -566,6 +566,10 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
         "spike_hold_left",
         "theta",
     )
+    homeostasis_rule = (
+        RateEmaThresholdHomeostasis(cfg.homeostasis) if cfg.enable_homeostasis else None
+    )
+    homeostasis_stride = max(1, int(cfg.homeostasis_export_every))
 
     monitors: list[IMonitor]
     if fast_mode:
@@ -578,6 +582,16 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
                 async_gpu=monitor_async_gpu,
             ),
         ]
+        if cfg.enable_homeostasis:
+            monitors.append(
+                HomeostasisCSVMonitor(
+                    str(out_dir / "homeostasis.csv"),
+                    stride=homeostasis_stride,
+                    append=False,
+                    flush_every=25,
+                    async_gpu=monitor_async_gpu,
+                )
+            )
     else:
         monitors = [
             NeuronCSVMonitor(
@@ -621,6 +635,16 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
                 async_gpu=monitor_async_gpu,
             )
         )
+        if cfg.enable_homeostasis:
+            monitors.append(
+                HomeostasisCSVMonitor(
+                    str(out_dir / "homeostasis.csv"),
+                    stride=homeostasis_stride,
+                    append=False,
+                    flush_every=25,
+                    async_gpu=monitor_async_gpu,
+                )
+            )
         if not cuda_device or allow_cuda_sync:
             monitors.append(
                 ProjectionWeightsCSVMonitor(
@@ -637,53 +661,30 @@ def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
             monitors.append(
                 _PopDriveCSVMonitor(
                     out_dir / "drive.csv",
-                    engine=engine,
+                    engine=None,
                     pop_names=[pop.name for pop in populations],
                     every_n_steps=1,
                     flush_every=25,
                 )
             )
 
-    engine.attach_monitors(monitors)
-    sim_config = SimulationConfig(
-        dt=cfg.dt,
-        device=device,
-        dtype=dtype,
-        seed=cfg.seed,
-        max_ring_mib=cfg.max_ring_mib,
-    )
-    engine.reset(config=sim_config)
-    engine.run(steps=cfg.steps)
-
-    if cfg.profile:
-        engine.attach_monitors([])
-        engine.reset(config=sim_config)
-        _run_profile(
-            engine=engine,
-            steps=cfg.profile_steps,
-            device=device,
-            out_path=out_dir / "profile.json",
-        )
-
-    topology_path = out_dir / "topology.json"
-    export_population_topology_json(
-        populations,
-        projections,
-        path=topology_path,
+    model_spec = DemoModelSpec(
+        populations=populations,
+        projections=projections,
+        modulators=(),
+        homeostasis=homeostasis_rule,
+        external_drive_fn=external_drive_fn,
         include_neuron_topology=True,
     )
 
-    return {
-        "out_dir": out_dir,
-        "topology": topology_path,
-        "neuron_csv": out_dir / "neuron.csv",
-        "synapse_csv": out_dir / "synapse.csv",
-        "spikes_csv": out_dir / "spikes.csv",
-        "metrics_csv": out_dir / "metrics.csv",
-        "weights_csv": out_dir / "weights.csv",
-        "steps": cfg.steps,
-        "device": device,
-    }
+    return model_spec, cfg, monitors
+
+
+def run_demo_network(cfg: DemoNetworkConfig) -> dict[str, Any]:
+    """Run a multi-population demo network and write CSV/JSON artifacts."""
+
+    model_spec, runtime_cfg, monitors = build_network_demo(cfg)
+    return run_demo_from_spec(model_spec, runtime_cfg, monitors)
 
 
 class _AggregatedSynapseCSVMonitor(IMonitor):
@@ -741,7 +742,7 @@ class _PopDriveCSVMonitor(IMonitor):
         self,
         path: Path,
         *,
-        engine: TorchNetworkEngine,
+        engine: TorchNetworkEngine | None,
         pop_names: Iterable[str],
         every_n_steps: int = 1,
         flush_every: int = 25,
@@ -753,9 +754,14 @@ class _PopDriveCSVMonitor(IMonitor):
         self._event_count = 0
         self._sink = CsvSink(path, flush_every=max(1, flush_every), append=append)
 
+    def bind_engine(self, engine: TorchNetworkEngine) -> None:
+        self._engine = engine
+
     def on_step(self, event: StepEvent) -> None:
         self._event_count += 1
         if self._event_count % self._every_n_steps != 0:
+            return
+        if self._engine is None:
             return
 
         row: dict[str, Any] = {"t": event.t, "dt": event.dt}

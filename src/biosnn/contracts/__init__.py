@@ -4,6 +4,10 @@ This package is *not* the public API surface. Only symbols re-exported from
 :mod:`biosnn.api` are considered semver-stable.
 """
 
+from biosnn.contracts.homeostasis import (
+    HomeostasisPopulation,
+    IHomeostasisRule,
+)
 from biosnn.contracts.learning import (
     ILearningRule,
     LearningBatch,
@@ -51,6 +55,9 @@ __all__ = [
     "LearningBatch",
     "LearningStepResult",
     "ILearningRule",
+    # homeostasis
+    "HomeostasisPopulation",
+    "IHomeostasisRule",
     # neuromodulation
     "ModulatorKind",
     "ModulatorRelease",
