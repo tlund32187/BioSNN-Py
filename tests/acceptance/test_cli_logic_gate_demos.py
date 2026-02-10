@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,7 @@ def test_cli_logic_gate_demos_smoke(
         "run_config.json",
         "run_features.json",
         "run_status.json",
+        "topology.json",
         "trials.csv",
         "eval.csv",
         "metrics.csv",
@@ -71,6 +73,14 @@ def test_cli_logic_gate_demos_smoke(
         path = run_dir / name
         assert path.exists(), f"Missing artifact {name} for demo {demo_name}"
         assert path.stat().st_size > 0, f"Empty artifact {name} for demo {demo_name}"
+    with (run_dir / "topology.json").open("r", encoding="utf-8") as handle:
+        topology_payload = json.load(handle)
+    node_models = {
+        str(node.get("model", "")).strip().lower()
+        for node in topology_payload.get("nodes", [])
+        if isinstance(node, dict)
+    }
+    assert "lif_3c" in node_models
 
     if demo_name == "logic_curriculum":
         with (run_dir / "trials.csv").open("r", encoding="utf-8", newline="") as handle:

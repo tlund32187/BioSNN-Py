@@ -1174,6 +1174,7 @@ def _ensure_receptor_profile_state(
     receptor_dtype = _resolve_receptor_profile_dtype(
         receptor_state_dtype=model.params.receptor_state_dtype,
         weights_dtype=weights_dtype,
+        device=device,
     )
     if state.receptor_g is None:
         state.receptor_g = {}
@@ -1251,10 +1252,14 @@ def _resolve_receptor_profile_dtype(
     *,
     receptor_state_dtype: str | None,
     weights_dtype: Any,
+    device: Any,
 ) -> Any:
-    if receptor_state_dtype is None:
-        return weights_dtype
     torch = require_torch()
+    if receptor_state_dtype is None:
+        # Large-network safety default: keep receptor state in fp16 on CUDA.
+        if device is not None and getattr(device, "type", None) == "cuda":
+            return torch.float16
+        return weights_dtype
     return _resolve_dtype(torch, receptor_state_dtype)
 
 

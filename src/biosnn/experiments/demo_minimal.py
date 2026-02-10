@@ -28,6 +28,8 @@ from biosnn.synapses.dynamics.delayed_current import (
     DelayedCurrentSynapse,
 )
 
+from .profile_utils import maybe_write_profile_trace
+
 
 @dataclass(slots=True)
 class DemoMinimalConfig:
@@ -181,7 +183,8 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
     if cfg.profile:
         engine.attach_monitors([])
         engine.reset(config=sim_config)
-        _run_profile(
+        maybe_write_profile_trace(
+            enabled=True,
             engine=engine,
             steps=cfg.profile_steps,
             device=device,
@@ -219,26 +222,5 @@ def _edge_count(topology: Any) -> int:
         return len(pre_idx)
     except TypeError:
         return 0
-
-
-def _run_profile(*, engine: TorchSimulationEngine, steps: int, device: str, out_path: Path) -> None:
-    torch = require_torch()
-    try:
-        from torch.profiler import ProfilerActivity, profile
-    except Exception:
-        print("Profiler unavailable; skipping profile run.")
-        return
-
-    activities = [ProfilerActivity.CPU]
-    if device == "cuda" and torch.cuda.is_available():
-        activities.append(ProfilerActivity.CUDA)
-
-    with profile(activities=activities) as prof:
-        for _ in range(max(1, steps)):
-            engine.step()
-        if device == "cuda" and torch.cuda.is_available():
-            torch.cuda.synchronize()
-    prof.export_chrome_trace(str(out_path))
-
 
 __all__ = ["DemoMinimalConfig", "run_demo_minimal"]

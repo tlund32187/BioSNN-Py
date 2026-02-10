@@ -1614,12 +1614,13 @@ function drawNeuronNetwork() {
     const weight = edge.weight || 0;
     const color = weight >= 0 ? theme.excit : theme.inhib;
     const distance = edgeDistances ? edgeDistances[idx] : null;
-    let alpha = Math.min(0.6, Math.abs(weight)) + 0.1;
+    let alpha = 0.18 + Math.min(0.45, Math.sqrt(Math.abs(weight)));
     if (edgeSettings.edgeOpacityByDistance && distance !== null && dMax > dMin) {
       const t = (distance - dMin) / (dMax - dMin + 1e-9);
-      const localityAlpha = 0.10 + 0.90 * Math.pow(1 - clamp01(t), 2);
+      const localityAlpha = 0.35 + 0.65 * Math.pow(1 - clamp01(t), 2);
       alpha *= localityAlpha;
     }
+    alpha = Math.max(0.12, Math.min(1.0, alpha));
     ctx.strokeStyle = color;
     ctx.globalAlpha = alpha;
     const x1 = from.x * width;
@@ -3388,6 +3389,9 @@ function buildRunSpecFromControls() {
   const ringStrategy = runNodes.ringStrategySelect?.value || base.ring_strategy || "dense";
   const learningEnabled = Boolean(runNodes.learningToggle?.checked);
   const modEnabled = Boolean(runNodes.modulatorToggle?.checked);
+  const baseModKinds = Array.isArray(base.modulators?.kinds)
+    ? base.modulators.kinds.map((item) => String(item).trim()).filter(Boolean)
+    : [];
   return {
     ...base,
     demo_id: runNodes.demoSelect?.value || base.demo_id || "network",
@@ -3403,7 +3407,7 @@ function buildRunSpecFromControls() {
     modulators: {
       ...(base.modulators || {}),
       enabled: modEnabled,
-      kinds: modEnabled ? (base.modulators?.kinds || ["dopamine"]) : [],
+      kinds: modEnabled ? (baseModKinds.length > 0 ? baseModKinds : ["dopamine"]) : [],
     },
   };
 }

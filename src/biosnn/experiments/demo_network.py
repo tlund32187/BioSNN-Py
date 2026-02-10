@@ -107,6 +107,7 @@ class DemoNetworkConfig:
     synapse_backend: Literal["spmm_fused", "event_driven"] = "spmm_fused"
     fused_layout: Literal["auto", "coo", "csr"] = "auto"
     ring_dtype: str | None = None
+    receptor_state_dtype: str | None = None
     ring_strategy: Literal["dense", "event_bucketed"] = "dense"
     store_sparse_by_delay: bool | None = None
     neuron_sample: int = 32
@@ -167,7 +168,12 @@ class DemoNetworkConfig:
     enable_vision_monitors: bool = False
     vision_tensor_key: str = "pop/Input0/v_soma"
     vision_frame_dtype: Literal["uint8", "float16"] = "uint8"
+    vision_compile: bool = False
+    vision_max_side: int = 64
+    vision_max_elements: int = 16_384
     vision_export_every: int = 1
+    modgrid_max_side: int = 64
+    modgrid_max_elements: int = 16_384
     modgrid_export_every: int = 10
     receptor_export_every: int = 10
 
@@ -296,6 +302,7 @@ def build_network_demo(
         syn_params_sparse = DelayedSparseMatmulParams(
             init_weight=cfg.weight_init,
             ring_dtype=cfg.ring_dtype,
+            receptor_state_dtype=cfg.receptor_state_dtype,
             fused_layout=cfg.fused_layout,
             store_sparse_by_delay=cfg.store_sparse_by_delay,
             backend=sparse_backend,
@@ -746,11 +753,21 @@ def build_network_demo(
                 )
             )
         if cfg.enable_vision_monitors and run_mode == "dashboard":
+            modgrid_max_side = max(1, int(cfg.modgrid_max_side))
+            vision_max_side = max(1, int(cfg.vision_max_side))
+            modgrid_max_elements = max(1, int(cfg.modgrid_max_elements))
+            vision_max_elements = max(1, int(cfg.vision_max_elements))
+            if cfg.monitor_safe_defaults:
+                modgrid_max_side = min(modgrid_max_side, 64)
+                vision_max_side = min(vision_max_side, 64)
+                modgrid_max_elements = min(modgrid_max_elements, 16_384)
+                vision_max_elements = min(vision_max_elements, 16_384)
             monitors.append(
                 ModulatorGridJsonMonitor(
                     out_dir / "modgrid.json",
                     every_n_steps=max(1, int(cfg.modgrid_export_every)),
-                    max_side=64,
+                    max_side=modgrid_max_side,
+                    max_elements=modgrid_max_elements,
                     allow_cuda_sync=allow_cuda_sync,
                 )
             )
@@ -768,9 +785,11 @@ def build_network_demo(
                     out_dir / "vision.json",
                     tensor_key=cfg.vision_tensor_key,
                     every_n_steps=max(1, int(cfg.vision_export_every)),
-                    max_side=64,
+                    max_side=vision_max_side,
+                    max_elements=vision_max_elements,
                     output_dtype=cfg.vision_frame_dtype,
                     allow_cuda_sync=allow_cuda_sync,
+                    compile_pipeline=bool(cfg.vision_compile),
                 )
             )
 

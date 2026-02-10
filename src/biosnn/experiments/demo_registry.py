@@ -656,10 +656,21 @@ def feature_flags_for_run_spec(
         known_max_delay = 0
     elif demo_id == "delay_impulse":
         known_max_delay = int(spec["delay_steps"])
-    elif demo_id in {"learning_gate", "dopamine_plasticity", "logic_curriculum"} or demo_id in _LOGIC_DEMO_TO_GATE:
+    elif demo_id in {"learning_gate", "dopamine_plasticity"}:
         known_max_delay = 0
+    elif demo_id == "logic_curriculum" or demo_id in _LOGIC_DEMO_TO_GATE:
+        known_max_delay = int(spec["delay_steps"])
     else:
         known_max_delay = None
+
+    logic_uses_internal_dopamine = (
+        (demo_id == "logic_curriculum" or demo_id in _LOGIC_DEMO_TO_GATE)
+        and bool(spec["learning"]["enabled"])
+        and str(spec["learning"]["rule"]).strip().lower() == "rstdp"
+    )
+    mod_kinds = [str(kind).strip() for kind in spec["modulators"]["kinds"] if str(kind).strip()]
+    if logic_uses_internal_dopamine and "dopamine" not in mod_kinds:
+        mod_kinds.append("dopamine")
 
     ring_len = (known_max_delay + 1) if known_max_delay is not None else None
     monitor_mode = cast(RunMonitorMode, spec["monitor_mode"])
@@ -677,8 +688,8 @@ def feature_flags_for_run_spec(
             "ring_len": ring_len,
         },
         "modulators": {
-            "enabled": bool(spec["modulators"]["enabled"]),
-            "kinds": list(spec["modulators"]["kinds"]),
+            "enabled": bool(spec["modulators"]["enabled"]) or logic_uses_internal_dopamine,
+            "kinds": mod_kinds,
             "pulse_step": int(spec["modulators"]["pulse_step"]),
             "amount": float(spec["modulators"]["amount"]),
         },

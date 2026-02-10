@@ -8,11 +8,11 @@ from typing import Any, cast
 
 from biosnn.contracts.monitors import IMonitor
 from biosnn.contracts.simulation import SimulationConfig
-from biosnn.core.torch_utils import require_torch
 from biosnn.io.dashboard_export import export_population_topology_json
 from biosnn.simulation.engine import TorchNetworkEngine
 
 from .demo_types import DemoModelSpec, DemoRuntimeConfig
+from .profile_utils import maybe_write_profile_trace
 
 
 def run_demo_from_spec(
@@ -80,7 +80,8 @@ def run_demo_from_spec(
     if runtime_config.profile:
         engine.attach_monitors([])
         engine.reset(config=sim_config)
-        _run_profile(
+        maybe_write_profile_trace(
+            enabled=True,
             engine=engine,
             steps=runtime_config.profile_steps,
             device=runtime_config.device,
@@ -117,26 +118,5 @@ def run_demo_from_spec(
         "steps": runtime_config.steps,
         "device": runtime_config.device,
     }
-
-
-def _run_profile(*, engine: TorchNetworkEngine, steps: int, device: str, out_path: Path) -> None:
-    torch = require_torch()
-    try:
-        from torch.profiler import ProfilerActivity, profile
-    except Exception:
-        print("Profiler unavailable; skipping profile run.")
-        return
-
-    activities = [ProfilerActivity.CPU]
-    if device == "cuda" and torch.cuda.is_available():
-        activities.append(ProfilerActivity.CUDA)
-
-    with profile(activities=activities) as prof:
-        for _ in range(max(1, steps)):
-            engine.step()
-        if device == "cuda" and torch.cuda.is_available():
-            torch.cuda.synchronize()
-    prof.export_chrome_trace(str(out_path))
-
 
 __all__ = ["run_demo_from_spec"]

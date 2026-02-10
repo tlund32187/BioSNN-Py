@@ -221,6 +221,7 @@ class DashboardRunController:
             if run_id in self._stop_requested_run_ids:
                 self._stop_requested_run_ids.remove(run_id)
                 stop_requested = True
+        last_error: str | None
         if stop_requested:
             finished_state = "stopped"
             last_error = "Run stopped by user."

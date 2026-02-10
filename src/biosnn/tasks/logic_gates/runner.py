@@ -15,6 +15,7 @@ from biosnn.contracts.learning import LearningBatch
 from biosnn.contracts.modulators import ModulatorKind
 from biosnn.contracts.neurons import Compartment, StepContext
 from biosnn.core.torch_utils import require_torch
+from biosnn.io.dashboard_export import export_population_topology_json
 from biosnn.io.sinks import CsvSink
 from biosnn.learning.rules import RStdpEligibilityParams, RStdpEligibilityRule
 
@@ -23,6 +24,7 @@ from .datasets import LogicGate, coerce_gate, make_truth_table, sample_case_indi
 from .encoding import INPUT_NEURON_INDICES, OUTPUT_NEURON_INDICES, decode_output, encode_inputs
 from .evaluators import PassTracker, eval_accuracy
 from .surrogate_train import train_logic_gate_surrogate
+from .topologies import build_logic_gate_ff, build_logic_gate_xor
 
 DEFAULT_CURRICULUM_GATES: tuple[LogicGate, ...] = (
     LogicGate.OR,
@@ -151,6 +153,12 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
     targets_flat = targets.reshape(4)
     encoded_inputs = _build_encoded_input_table(inputs, dt=cfg.dt)
     topology_name = _topology_name_for_gate(gate)
+    _write_logic_topology_json(
+        run_dir=run_dir,
+        topology_name=topology_name,
+        gate=gate,
+        seed=cfg.seed,
+    )
     if cfg.learning_mode == "surrogate":
         return _run_logic_gate_surrogate(
             cfg=cfg,
@@ -579,6 +587,12 @@ def run_logic_gate_curriculum(
     t0 = perf_counter()
     phase_results: list[dict[str, Any]] = []
     final_gate = gate_sequence[-1]
+    _write_logic_topology_json(
+        run_dir=run_dir,
+        topology_name="xor_ff2",
+        gate=final_gate,
+        seed=cfg.seed,
+    )
 
     print(
         f"[logic-curriculum] run_dir={run_dir} gates={[gate.value for gate in gate_sequence]} "
@@ -1836,6 +1850,33 @@ def _resolve_curriculum_run_dir(
 def _default_artifacts_root() -> Path:
     repo_root = Path(__file__).resolve().parents[4]
     return repo_root / "artifacts" / "logic_gates"
+
+
+def _write_logic_topology_json(
+    *,
+    run_dir: Path,
+    topology_name: str,
+    gate: LogicGate,
+    seed: int,
+) -> None:
+    try:
+        if topology_name == "xor_ff2":
+            _, topology, _ = build_logic_gate_xor(device="cpu", seed=seed)
+        else:
+            _, topology, _ = build_logic_gate_ff(gate, device="cpu", seed=seed)
+        weights_by_projection: dict[str, Any] = {}
+        for projection in topology.projections:
+            if projection.topology.weights is not None:
+                weights_by_projection[projection.name] = projection.topology.weights
+        export_population_topology_json(
+            topology.populations,
+            topology.projections,
+            path=run_dir / "topology.json",
+            weights_by_projection=weights_by_projection,
+            include_neuron_topology=True,
+        )
+    except Exception as exc:  # pragma: no cover - export failures should not stop training
+        print(f"[logic-gate] warning: failed to export topology.json: {exc}")
 
 
 __all__ = ["run_logic_gate", "run_logic_gate_curriculum"]

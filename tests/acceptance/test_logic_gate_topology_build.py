@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from biosnn.biophysics.models.lif_3c import LIF3CompModel
 from biosnn.contracts.simulation import SimulationConfig
 from biosnn.tasks.logic_gates import (
     LogicGate,
@@ -47,6 +48,8 @@ def test_logic_gate_topology_build_xor_runs_cpu() -> None:
 
 def _assert_sparse_projection_topologies(topology) -> None:
     pop_sizes = {pop.name: pop.n for pop in topology.populations}
+    for pop in topology.populations:
+        assert isinstance(pop.model, LIF3CompModel)
 
     for proj in topology.projections:
         topo = proj.topology

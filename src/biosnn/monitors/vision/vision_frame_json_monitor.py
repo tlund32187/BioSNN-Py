@@ -25,8 +25,10 @@ class VisionFrameJsonMonitor(IMonitor):
         tensor_key: str = "vision/frame",
         every_n_steps: int = 1,
         max_side: int = 64,
+        max_elements: int = 16_384,
         output_dtype: Literal["uint8", "float16"] = "uint8",
         allow_cuda_sync: bool = False,
+        compile_pipeline: bool = False,
         write_initial: bool = True,
     ) -> None:
         self._path = Path(path)
@@ -34,10 +36,25 @@ class VisionFrameJsonMonitor(IMonitor):
         self._tensor_key = str(tensor_key)
         self._every_n_steps = max(1, int(every_n_steps))
         self._max_side = max(1, int(max_side))
+        self._max_elements = max(1, int(max_elements))
         self._output_dtype = output_dtype
         self._allow_cuda_sync = bool(allow_cuda_sync)
+        self._compile_pipeline = bool(compile_pipeline)
         self._warned_cuda = False
         self._event_count = 0
+        self._compiled_uint8_pipeline: Any | None = None
+
+        if self._compile_pipeline:
+            torch = require_torch()
+            compile_fn = getattr(torch, "compile", None)
+            if callable(compile_fn):
+                try:
+                    self._compiled_uint8_pipeline = compile_fn(
+                        _to_uint8,
+                        mode="reduce-overhead",
+                    )
+                except Exception:
+                    self._compiled_uint8_pipeline = None
 
         if write_initial:
             self._write_payload(
@@ -149,7 +166,17 @@ class VisionFrameJsonMonitor(IMonitor):
         if self._output_dtype == "float16":
             output = sample.to(dtype=torch.float16)
         else:
-            output = _to_uint8(sample)
+            if callable(self._compiled_uint8_pipeline):
+                try:
+                    output = self._compiled_uint8_pipeline(sample)
+                except Exception:
+                    output = _to_uint8(sample)
+            else:
+                output = _to_uint8(sample)
+        output = _downsample_to_max_elements(
+            output,
+            max_elements=self._max_elements,
+        )
         if hasattr(output, "to") and getattr(output.device, "type", None) != "cpu":
             output = output.to("cpu")
         return output
@@ -177,14 +204,60 @@ def _to_uint8(value: Tensor) -> Tensor:
     sample = value.to(dtype=torch.float32)
     min_val = sample.min()
     max_val = sample.max()
-    if float((max_val - min_val).abs().item()) < 1e-12:
+    min_scalar = scalar_to_float(min_val)
+    max_scalar = scalar_to_float(max_val)
+    if abs(max_scalar - min_scalar) < 1e-12:
         normalized = torch.zeros_like(sample)
-    elif float(min_val.item()) < 0.0 or float(max_val.item()) > 1.0:
+    elif min_scalar < 0.0 or max_scalar > 1.0:
         normalized = (sample - min_val) / (max_val - min_val)
     else:
         normalized = torch.clamp(sample, 0.0, 1.0)
     out = torch.clamp(normalized * 255.0, min=0.0, max=255.0).round().to(dtype=torch.uint8)
     return cast(Tensor, out)
+
+
+def _downsample_to_max_elements(value: Tensor, *, max_elements: int) -> Tensor:
+    torch = require_torch()
+    output = value
+    if int(output.numel()) <= int(max_elements):
+        return output
+    while int(output.numel()) > int(max_elements):
+        if output.ndim == 2:
+            h, w = int(output.shape[-2]), int(output.shape[-1])
+            if h <= 1 and w <= 1:
+                break
+            target_h = max(1, h // 2)
+            target_w = max(1, w // 2)
+            output = torch.nn.functional.interpolate(
+                output.unsqueeze(0).unsqueeze(0).to(dtype=torch.float32),
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0).squeeze(0)
+            if value.dtype == torch.uint8:
+                output = torch.clamp(output, 0.0, 255.0).round().to(dtype=torch.uint8)
+            else:
+                output = output.to(dtype=value.dtype)
+            continue
+        if output.ndim == 3:
+            h, w = int(output.shape[-2]), int(output.shape[-1])
+            if h <= 1 and w <= 1:
+                break
+            target_h = max(1, h // 2)
+            target_w = max(1, w // 2)
+            output = torch.nn.functional.interpolate(
+                output.unsqueeze(0).to(dtype=torch.float32),
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
+            if value.dtype == torch.uint8:
+                output = torch.clamp(output, 0.0, 255.0).round().to(dtype=torch.uint8)
+            else:
+                output = output.to(dtype=value.dtype)
+            continue
+        break
+    return output
 
 
 __all__ = ["VisionFrameJsonMonitor"]

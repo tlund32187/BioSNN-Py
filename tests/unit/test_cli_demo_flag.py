@@ -31,8 +31,15 @@ def test_cli_demo_flag_defaults():
     assert args.da_step == 10
     assert args.fused_layout == "auto"
     assert args.ring_dtype is None
+    assert args.receptor_state_dtype is None
     assert args.ring_strategy == "dense"
     assert args.store_sparse_by_delay is None
+    assert args.large_network_safety is False
+    assert args.vision_compile is False
+    assert args.vision_max_side == 64
+    assert args.vision_max_elements == 16384
+    assert args.modgrid_max_side == 64
+    assert args.modgrid_max_elements == 16384
 
     args = cli._parse_args(["--demo", "minimal"])
     assert args.demo == "minimal"
@@ -109,10 +116,22 @@ def test_cli_demo_flag_defaults():
             "csr",
             "--ring-dtype",
             "bfloat16",
+            "--receptor-state-dtype",
+            "float16",
             "--ring-strategy",
             "event_bucketed",
             "--store-sparse-by-delay",
             "true",
+            "--large-network-safety",
+            "--vision-compile",
+            "--vision-max-side",
+            "48",
+            "--vision-max-elements",
+            "12000",
+            "--modgrid-max-side",
+            "40",
+            "--modgrid-max-elements",
+            "8000",
         ]
     )
     assert args.torch_threads == "4"
@@ -141,14 +160,57 @@ def test_cli_demo_flag_defaults():
     assert args.logic_debug_every == 5
     assert args.fused_layout == "csr"
     assert args.ring_dtype == "bfloat16"
+    assert args.receptor_state_dtype == "float16"
     assert args.ring_strategy == "event_bucketed"
     assert args.store_sparse_by_delay is True
+    assert args.large_network_safety is True
+    assert args.vision_compile is True
+    assert args.vision_max_side == 48
+    assert args.vision_max_elements == 12000
+    assert args.modgrid_max_side == 40
+    assert args.modgrid_max_elements == 8000
 
     args = cli._parse_args(["--ring-dtype", "none"])
     assert args.ring_dtype is None
+    args = cli._parse_args(["--receptor-state-dtype", "none"])
+    assert args.receptor_state_dtype is None
 
     args = cli._parse_args(["--store-sparse-by-delay", "false"])
     assert args.store_sparse_by_delay is False
+
+
+def test_large_network_safety_overrides() -> None:
+    args = cli._parse_args(
+        [
+            "--large-network-safety",
+            "--monitor-neuron-sample",
+            "5000",
+            "--monitor-edge-sample",
+            "200000",
+            "--vision-max-side",
+            "300",
+            "--vision-max-elements",
+            "999999",
+            "--modgrid-max-side",
+            "400",
+            "--modgrid-max-elements",
+            "888888",
+        ]
+    )
+    assert args.allow_cuda_monitor_sync is None
+    assert args.receptor_state_dtype is None
+
+    cli._apply_large_network_safety_overrides(args=args, device="cuda")
+
+    assert args.monitor_safe_defaults is True
+    assert args.allow_cuda_monitor_sync is False
+    assert args.receptor_state_dtype == "float16"
+    assert args.monitor_neuron_sample == 512
+    assert args.monitor_edge_sample == 20000
+    assert args.vision_max_side == 64
+    assert args.vision_max_elements == 16384
+    assert args.modgrid_max_side == 64
+    assert args.modgrid_max_elements == 16384
 
 
 def test_cli_dashboard_mode_gate():

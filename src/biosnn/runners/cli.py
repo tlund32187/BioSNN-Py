@@ -59,6 +59,7 @@ def main() -> None:
     )
     run_dir = _make_run_dir(artifacts_root, args.run_id)
     device = _resolve_device(torch, args.device)
+    _apply_large_network_safety_overrides(args=args, device=device)
     _validate_ring_dtype_for_device(torch=torch, ring_dtype=args.ring_dtype, device=device)
     steps = args.steps
     dt = args.dt
@@ -729,8 +730,14 @@ def _build_network_config_from_args(
         synapse_backend=cast(Literal["spmm_fused", "event_driven"], args.synapse_backend),
         fused_layout=cast(Literal["auto", "coo", "csr"], args.fused_layout),
         ring_dtype=cast(str | None, args.ring_dtype),
+        receptor_state_dtype=cast(str | None, args.receptor_state_dtype),
         ring_strategy=cast(Literal["dense", "event_bucketed"], args.ring_strategy),
         store_sparse_by_delay=cast(bool | None, args.store_sparse_by_delay),
+        vision_compile=bool(args.vision_compile),
+        vision_max_side=max(1, int(args.vision_max_side)),
+        vision_max_elements=max(1, int(args.vision_max_elements)),
+        modgrid_max_side=max(1, int(args.modgrid_max_side)),
+        modgrid_max_elements=max(1, int(args.modgrid_max_elements)),
     )
 
 
@@ -800,6 +807,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="ring buffer dtype: none, float32, float16, or bfloat16",
     )
     parser.add_argument(
+        "--receptor-state-dtype",
+        type=_parse_ring_dtype,
+        default=None,
+        help=(
+            "receptor state dtype for multi-receptor sparse synapses: "
+            "none, float32, float16, or bfloat16"
+        ),
+    )
+    parser.add_argument(
         "--ring-strategy",
         choices=["dense", "event_bucketed"],
         default="dense",
@@ -820,6 +836,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="enable safety rails for large CSV monitors (default: enabled)",
     )
     parser.add_argument(
+        "--large-network-safety",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "enable conservative large-network safety overrides "
+            "(monitor sync off, bounded monitor payloads, fp16 receptor state on CUDA)"
+        ),
+    )
+    parser.add_argument(
         "--monitor-neuron-sample",
         type=int,
         default=512,
@@ -836,6 +861,36 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="allow CUDA monitors that require CPU sync (e.g., spike events)",
+    )
+    parser.add_argument(
+        "--vision-compile",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable torch.compile for vision monitor conversion pipeline",
+    )
+    parser.add_argument(
+        "--vision-max-side",
+        type=int,
+        default=64,
+        help="max side length for vision monitor exports",
+    )
+    parser.add_argument(
+        "--vision-max-elements",
+        type=int,
+        default=16384,
+        help="max element count for vision monitor exports",
+    )
+    parser.add_argument(
+        "--modgrid-max-side",
+        type=int,
+        default=64,
+        help="max side length for modulator grid monitor exports",
+    )
+    parser.add_argument(
+        "--modgrid-max-elements",
+        type=int,
+        default=16384,
+        help="max element count for modulator grid monitor exports",
     )
     parser.add_argument(
         "--parallel-compile",
@@ -1153,6 +1208,27 @@ def _parse_true_false(value: str | None) -> bool:
     if normalized in {"false", "0", "no", "n", "off"}:
         return False
     raise ValueError(f"Invalid boolean literal: {value}")
+
+
+def _apply_large_network_safety_overrides(*, args: argparse.Namespace, device: str) -> None:
+    if not bool(getattr(args, "large_network_safety", False)):
+        return
+
+    args.monitor_safe_defaults = True
+
+    if getattr(args, "allow_cuda_monitor_sync", None) is None:
+        args.allow_cuda_monitor_sync = False
+
+    args.monitor_neuron_sample = max(1, min(int(args.monitor_neuron_sample), 512))
+    args.monitor_edge_sample = max(1, min(int(args.monitor_edge_sample), 20_000))
+
+    args.vision_max_side = max(1, min(int(args.vision_max_side), 64))
+    args.modgrid_max_side = max(1, min(int(args.modgrid_max_side), 64))
+    args.vision_max_elements = max(1, min(int(args.vision_max_elements), 16_384))
+    args.modgrid_max_elements = max(1, min(int(args.modgrid_max_elements), 16_384))
+
+    if device == "cuda" and getattr(args, "receptor_state_dtype", None) is None:
+        args.receptor_state_dtype = "float16"
 
 
 def _validate_ring_dtype_for_device(*, torch: Any, ring_dtype: str | None, device: str) -> None:

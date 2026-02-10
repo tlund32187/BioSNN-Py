@@ -120,6 +120,8 @@ def _build_population_nodes(pop_specs: Sequence[Any]) -> list[dict[str, Any]]:
     for idx, pop in enumerate(pop_specs):
         layer = _pop_layer(pop)
         if layer is None:
+            layer = _infer_layer_from_role(_pop_meta_value(pop, "role"))
+        if layer is None:
             layer = _infer_layer_from_name(_pop_name(pop), idx)
         raw_layers.append(layer)
 
@@ -416,11 +418,22 @@ def _to_positions_list(tensor: Any) -> list[list[float]] | None:
 
 def _infer_layer_from_name(name: str, idx: int) -> int | None:
     lowered = name.lower()
-    if "input" in lowered:
+    if "input" in lowered or lowered == "in":
         return 0
     if "hidden" in lowered:
         return 1
     if "output" in lowered or lowered.startswith("out"):
+        return 2
+    return None
+
+
+def _infer_layer_from_role(role: Any) -> int | None:
+    lowered = str(role or "").strip().lower()
+    if lowered == "input":
+        return 0
+    if lowered == "hidden":
+        return 1
+    if lowered == "output":
         return 2
     return None
 

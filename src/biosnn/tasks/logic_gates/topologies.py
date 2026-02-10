@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from biosnn.biophysics.models.glif import GLIFModel
+from biosnn.biophysics.models.lif_3c import LIF3CompModel
 from biosnn.contracts.neurons import Compartment
 from biosnn.contracts.synapses import SynapseTopology
 from biosnn.core.torch_utils import require_torch
@@ -60,9 +60,11 @@ def build_logic_gate_ff(
     out_pos = _line_positions(n=2, x=2.0, device=resolved_device, dtype=dtype)
 
     populations = (
-        PopulationSpec(name="In", model=GLIFModel(), n=4, positions=in_pos, meta={"role": "input"}),
-        PopulationSpec(name="Hidden", model=GLIFModel(), n=16, positions=hidden_pos, meta={"role": "hidden"}),
-        PopulationSpec(name="Out", model=GLIFModel(), n=2, positions=out_pos, meta={"role": "output"}),
+        PopulationSpec(name="In", model=LIF3CompModel(), n=4, positions=in_pos, meta={"role": "input"}),
+        PopulationSpec(
+            name="Hidden", model=LIF3CompModel(), n=16, positions=hidden_pos, meta={"role": "hidden"}
+        ),
+        PopulationSpec(name="Out", model=LIF3CompModel(), n=2, positions=out_pos, meta={"role": "output"}),
     )
 
     in_to_hidden_topo = _build_fixed_fanin_topology(
@@ -199,10 +201,10 @@ def build_logic_gate_xor(
     out_pos = _line_positions(n=2, x=3.0, device=resolved_device, dtype=dtype)
 
     populations = (
-        PopulationSpec(name="In", model=GLIFModel(), n=4, positions=in_pos, meta={"role": "input"}),
-        PopulationSpec(name="Hidden0", model=GLIFModel(), n=16, positions=h1_pos, meta={"role": "hidden"}),
-        PopulationSpec(name="Hidden1", model=GLIFModel(), n=16, positions=h2_pos, meta={"role": "hidden"}),
-        PopulationSpec(name="Out", model=GLIFModel(), n=2, positions=out_pos, meta={"role": "output"}),
+        PopulationSpec(name="In", model=LIF3CompModel(), n=4, positions=in_pos, meta={"role": "input"}),
+        PopulationSpec(name="Hidden0", model=LIF3CompModel(), n=16, positions=h1_pos, meta={"role": "hidden"}),
+        PopulationSpec(name="Hidden1", model=LIF3CompModel(), n=16, positions=h2_pos, meta={"role": "hidden"}),
+        PopulationSpec(name="Out", model=LIF3CompModel(), n=2, positions=out_pos, meta={"role": "output"}),
     )
 
     in_to_h1 = _build_fixed_fanin_topology(

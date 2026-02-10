@@ -24,6 +24,7 @@ class ModulatorGridJsonMonitor(IMonitor):
         *,
         every_n_steps: int = 1,
         max_side: int = 64,
+        max_elements: int = 16_384,
         allow_cuda_sync: bool = False,
         modulator_names: list[str] | None = None,
         write_initial: bool = True,
@@ -32,6 +33,7 @@ class ModulatorGridJsonMonitor(IMonitor):
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._every_n_steps = max(1, int(every_n_steps))
         self._max_side = max(1, int(max_side))
+        self._max_elements = max(1, int(max_elements))
         self._allow_cuda_sync = bool(allow_cuda_sync)
         self._modulator_names = {name.strip() for name in modulator_names or [] if name.strip()}
         self._warned_cuda = False
@@ -124,6 +126,10 @@ class ModulatorGridJsonMonitor(IMonitor):
             )
 
         output = sample.squeeze(0)
+        output = _downsample_to_max_elements(
+            output,
+            max_elements=self._max_elements,
+        )
         if hasattr(output, "to") and getattr(output.device, "type", None) != "cpu":
             output = output.to("cpu")
         return output.tolist()
@@ -152,6 +158,42 @@ def _parse_mod_grid_key(key: str) -> str | None:
         name = parts[1].strip()
         return name or None
     return None
+
+
+def _downsample_to_max_elements(value: Tensor, *, max_elements: int) -> Tensor:
+    torch = require_torch()
+    output = value
+    if int(output.numel()) <= int(max_elements):
+        return output
+    while int(output.numel()) > int(max_elements):
+        if output.ndim == 2:
+            h, w = int(output.shape[-2]), int(output.shape[-1])
+            if h <= 1 and w <= 1:
+                break
+            target_h = max(1, h // 2)
+            target_w = max(1, w // 2)
+            output = torch.nn.functional.interpolate(
+                output.unsqueeze(0).unsqueeze(0),
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0).squeeze(0)
+            continue
+        if output.ndim == 3:
+            h, w = int(output.shape[-2]), int(output.shape[-1])
+            if h <= 1 and w <= 1:
+                break
+            target_h = max(1, h // 2)
+            target_w = max(1, w // 2)
+            output = torch.nn.functional.interpolate(
+                output.unsqueeze(0),
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
+            continue
+        break
+    return output
 
 
 __all__ = ["ModulatorGridJsonMonitor"]

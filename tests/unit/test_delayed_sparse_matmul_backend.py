@@ -11,6 +11,7 @@ from biosnn.synapses.dynamics.delayed_sparse_matmul import (
     DelayedSparseMatmulSynapse,
     _nonempty_mats_by_comp,
 )
+from biosnn.synapses.receptors import profile_exc_ampa_nmda
 
 pytestmark = pytest.mark.unit
 
@@ -216,3 +217,72 @@ def test_sparse_matmul_fused_matches_per_delay(device):
     torch.testing.assert_close(result.post_drive[Compartment.SOMA], expected_drive[Compartment.SOMA])
     assert state.post_ring is not None
     torch.testing.assert_close(state.post_ring[Compartment.SOMA], expected_ring[Compartment.SOMA])
+
+
+def test_sparse_matmul_receptor_profile_dtype_defaults_cpu_to_weights() -> None:
+    ctx = StepContext(device="cpu", dtype="float32")
+    topology = SynapseTopology(
+        pre_idx=torch.tensor([0], dtype=torch.long),
+        post_idx=torch.tensor([0], dtype=torch.long),
+        delay_steps=torch.tensor([0], dtype=torch.int32),
+        target_compartment=Compartment.SOMA,
+        weights=torch.tensor([0.2], dtype=torch.float32),
+    )
+    topology = compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_sparse_delay_mats=True,
+    )
+    model = DelayedSparseMatmulSynapse(
+        DelayedSparseMatmulParams(
+            init_weight=1.0,
+            receptor_profile=profile_exc_ampa_nmda(),
+        )
+    )
+    state = model.init_state(1, ctx=ctx)
+    state, _ = model.step(
+        state,
+        topology,
+        SynapseInputs(pre_spikes=torch.tensor([1.0], dtype=torch.float32)),
+        dt=1e-3,
+        t=0.0,
+        ctx=ctx,
+    )
+
+    assert state.receptor_profile_dtype == torch.float32
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_sparse_matmul_receptor_profile_dtype_defaults_cuda_to_fp16() -> None:
+    ctx = StepContext(device="cuda", dtype="float32")
+    topology = SynapseTopology(
+        pre_idx=torch.tensor([0], dtype=torch.long, device="cuda"),
+        post_idx=torch.tensor([0], dtype=torch.long, device="cuda"),
+        delay_steps=torch.tensor([0], dtype=torch.int32, device="cuda"),
+        target_compartment=Compartment.SOMA,
+        weights=torch.tensor([0.2], dtype=torch.float32, device="cuda"),
+    )
+    topology = compile_topology(
+        topology,
+        device=ctx.device,
+        dtype=ctx.dtype,
+        build_sparse_delay_mats=True,
+    )
+    model = DelayedSparseMatmulSynapse(
+        DelayedSparseMatmulParams(
+            init_weight=1.0,
+            receptor_profile=profile_exc_ampa_nmda(),
+        )
+    )
+    state = model.init_state(1, ctx=ctx)
+    state, _ = model.step(
+        state,
+        topology,
+        SynapseInputs(pre_spikes=torch.tensor([1.0], dtype=torch.float32, device="cuda")),
+        dt=1e-3,
+        t=0.0,
+        ctx=ctx,
+    )
+
+    assert state.receptor_profile_dtype == torch.float16

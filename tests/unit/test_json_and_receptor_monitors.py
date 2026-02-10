@@ -40,6 +40,33 @@ def test_modulator_grid_json_monitor_writes_downsampled_grid(tmp_path: Path) -> 
     assert len(grid[0][0]) <= 64
 
 
+def test_modulator_grid_json_monitor_respects_max_elements(tmp_path: Path) -> None:
+    path = tmp_path / "modgrid_limited.json"
+    monitor = ModulatorGridJsonMonitor(
+        path,
+        every_n_steps=1,
+        max_side=256,
+        max_elements=256,
+        allow_cuda_sync=True,
+    )
+    monitor.on_step(
+        StepEvent(
+            t=0.1,
+            dt=1e-3,
+            tensors={"mod/dopamine/grid": torch.ones((2, 128, 128), dtype=torch.float32)},
+            scalars={"step": 8},
+        )
+    )
+    monitor.close()
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    grid = payload["grids"]["dopamine"]
+    channels = len(grid)
+    h = len(grid[0]) if channels else 0
+    w = len(grid[0][0]) if h else 0
+    assert channels * h * w <= 256
+
+
 def test_receptor_summary_csv_monitor_writes_expected_columns(tmp_path: Path) -> None:
     path = tmp_path / "receptors.csv"
     monitor = ReceptorSummaryCsvMonitor(path, stride=1, include_max=True, allow_cuda_sync=True)
@@ -106,3 +133,29 @@ def test_vision_frame_json_monitor_writes_frame_payload(tmp_path: Path) -> None:
     assert len(shape) == 3
     assert shape[1] <= 64
     assert shape[2] <= 64
+
+
+def test_vision_frame_json_monitor_respects_max_elements(tmp_path: Path) -> None:
+    path = tmp_path / "vision_limited.json"
+    monitor = VisionFrameJsonMonitor(
+        path,
+        tensor_key="vision/frame",
+        every_n_steps=1,
+        max_side=256,
+        max_elements=512,
+        output_dtype="uint8",
+        allow_cuda_sync=True,
+    )
+    monitor.on_step(
+        StepEvent(
+            t=0.3,
+            dt=1e-3,
+            tensors={"vision/frame": torch.linspace(0.0, 1.0, steps=256 * 256).reshape(1, 256, 256)},
+            scalars={"step": 10},
+        )
+    )
+    monitor.close()
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    shape = payload["shape"]
+    assert shape[0] * shape[1] * shape[2] <= 512

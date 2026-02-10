@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import cast
 
 from biosnn.contracts.learning import ILearningRule
-from biosnn.contracts.modulators import ModulatorKind, ModulatorRelease
+from biosnn.contracts.modulators import IModulatorField, ModulatorKind, ModulatorRelease
 from biosnn.contracts.neurons import Compartment, StepContext
 from biosnn.contracts.simulation import SimulationConfig
 from biosnn.contracts.synapses import SynapseTopology
@@ -197,6 +197,7 @@ def build_learning_gate_engine(
         sparse_learning=True,
     )
 
+    field: IModulatorField
     if use_grid_field:
         field = GridDiffusion2DField(
             params=GridDiffusion2DParams(
