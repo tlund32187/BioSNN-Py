@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,15 @@ from .datasets import LogicGate, coerce_gate, make_truth_table, sample_case_indi
 from .encoding import INPUT_NEURON_INDICES, OUTPUT_NEURON_INDICES, decode_output, encode_inputs
 from .evaluators import PassTracker, eval_accuracy
 from .surrogate_train import train_logic_gate_surrogate
+
+DEFAULT_CURRICULUM_GATES: tuple[LogicGate, ...] = (
+    LogicGate.OR,
+    LogicGate.AND,
+    LogicGate.NOR,
+    LogicGate.NAND,
+    LogicGate.XOR,
+    LogicGate.XNOR,
+)
 
 
 @dataclass(slots=True)
@@ -225,6 +235,36 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
         f"trials={cfg.steps} mode={cfg.learning_mode} device={device} "
         f"topology={topology_name}"
     )
+
+    initial_eval_acc, initial_confusion = eval_accuracy(
+        predictions,
+        targets_flat,
+        report_confusion=True,
+    )
+    if rstdp_runtime is not None:
+        init_w_min, init_w_max, init_w_mean = _tensor_stats(rstdp_runtime.weights)
+        init_elig = float(rstdp_runtime.state.eligibility.abs().mean().item())
+    else:
+        init_w_min, init_w_max, init_w_mean = float("nan"), float("nan"), float("nan")
+        init_elig = 0.0
+    eval_sink.write_row(
+        {
+            "trial": 0,
+            "eval_accuracy": float(initial_eval_acc),
+            "sample_accuracy": 0.0,
+            "trial_acc_rolling": 0.0,
+            "mean_eligibility_abs": init_elig,
+            "mean_abs_dw": 0.0,
+            "weights_min": init_w_min,
+            "weights_max": init_w_max,
+            "weights_mean": init_w_mean,
+            "perfect_streak": 0,
+            "high_streak": 0,
+            "passed": 0,
+        }
+    )
+    confusion_sink.write_row({"trial": 0, **initial_confusion})
+    print(f"[logic-gate] trial=0/{cfg.steps} eval_acc={float(initial_eval_acc):.3f} (pre-training)")
 
     try:
         for trial_idx, case_idx in enumerate(case_sequence, start=1):
@@ -440,6 +480,349 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
         "trials_csv": run_dir / "trials.csv",
         "eval_csv": run_dir / "eval.csv",
         "confusion_csv": run_dir / "confusion.csv",
+    }
+
+
+def run_logic_gate_curriculum(
+    cfg: LogicGateRunConfig,
+    *,
+    gates: Sequence[LogicGate | str] | None = None,
+    phase_steps: int | None = None,
+    replay_ratio: float = 0.35,
+) -> dict[str, Any]:
+    """Run multiple logic gates sequentially without resetting R-STDP state."""
+
+    if cfg.learning_mode != "rstdp":
+        raise ValueError("Curriculum mode requires learning_mode='rstdp'.")
+
+    torch = require_torch()
+    gate_sequence = tuple(coerce_gate(gate) for gate in (gates or DEFAULT_CURRICULUM_GATES))
+    if not gate_sequence:
+        raise ValueError("At least one gate is required for curriculum mode.")
+    replay_ratio = float(replay_ratio)
+    if replay_ratio < 0.0 or replay_ratio > 1.0:
+        raise ValueError("replay_ratio must be in [0.0, 1.0].")
+
+    device = _resolve_device(torch, cfg.device)
+    run_dir = _resolve_curriculum_run_dir(cfg, gates=gate_sequence)
+    phase_trials = int(cfg.steps if phase_steps is None else phase_steps)
+    if phase_trials <= 0:
+        raise ValueError("phase_steps must be > 0.")
+
+    torch.manual_seed(int(cfg.seed))
+    if device == "cuda" and torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(cfg.seed))
+    sampling_generator = torch.Generator(device="cpu")
+    sampling_generator.manual_seed(int(cfg.seed))
+
+    inputs, _ = make_truth_table(LogicGate.AND, device=device, dtype="float32")
+    encoded_inputs = _build_encoded_input_table(inputs, dt=cfg.dt)
+    targets_by_gate: dict[LogicGate, Any] = {}
+    for gate in gate_sequence:
+        _, gate_targets = make_truth_table(gate, device=device, dtype=inputs.dtype)
+        targets_by_gate[gate] = gate_targets.reshape(4)
+    runtime = _init_rstdp_runtime(
+        gate=LogicGate.XOR,
+        device=device,
+        dtype=inputs.dtype,
+        seed=cfg.seed,
+        n_cases=int(inputs.shape[0]),
+        n_inputs=int(encoded_inputs.shape[1]),
+        topology_name="xor_ff2",
+    )
+    case_scores = torch.zeros((4,), device=inputs.device, dtype=inputs.dtype)
+    predictions = torch.zeros((4,), device=inputs.device, dtype=inputs.dtype)
+    _predict_all_cases_rstdp(
+        runtime=runtime,
+        encoded_inputs=encoded_inputs,
+        predictions_out=predictions,
+        scores_out=case_scores,
+    )
+
+    trial_sink = CsvSink(run_dir / "trials.csv", flush_every=max(1, cfg.export_every))
+    eval_sink = CsvSink(run_dir / "eval.csv", flush_every=1)
+    confusion_sink = CsvSink(run_dir / "confusion.csv", flush_every=1)
+    phase_sink = CsvSink(run_dir / "phase_summary.csv", flush_every=1)
+    last_trials: deque[dict[str, Any]] | None = (
+        deque(maxlen=cfg.dump_last_trials_n) if cfg.dump_last_trials_csv else None
+    )
+
+    output_spike_counts = torch.zeros((2,), device=inputs.device, dtype=inputs.dtype)
+    input_drive_buf = torch.zeros((4,), device=inputs.device, dtype=inputs.dtype)
+    hidden_step_spikes = torch.zeros((int(runtime.hidden_size),), device=inputs.device, dtype=inputs.dtype)
+    hidden_spike_counts = torch.zeros_like(hidden_step_spikes)
+    debug_every = max(1, int(cfg.debug_every))
+    last_trials_csv: Path | None = None
+    last_pred: int | None = None
+    rolling_correct: deque[int] = deque(maxlen=100)
+    sampled_correct_total = 0
+    global_trial = 0
+    t0 = perf_counter()
+    phase_results: list[dict[str, Any]] = []
+    final_gate = gate_sequence[-1]
+
+    print(
+        f"[logic-curriculum] run_dir={run_dir} gates={[gate.value for gate in gate_sequence]} "
+        f"phase_trials={phase_trials} replay_ratio={replay_ratio:.2f} "
+        f"device={device} mode={cfg.learning_mode} topology=xor_ff2"
+    )
+
+    try:
+        for phase_idx, gate in enumerate(gate_sequence, start=1):
+            targets_flat = targets_by_gate[gate]
+            train_gate_idx = _build_curriculum_gate_indices(
+                phase_index=phase_idx - 1,
+                phase_trials=phase_trials,
+                replay_ratio=replay_ratio,
+                device="cpu",
+            )
+            phase_correct = 0
+            phase_gate_correct = 0
+            phase_gate_sample_count = 0
+            tracker = PassTracker(gate)
+            first_pass_local: int | None = None
+            phase_eval_last = 0.0
+            case_indices = sample_case_indices(
+                phase_trials,
+                method=cfg.sampling_method,
+                generator=sampling_generator,
+                device="cpu",
+            )
+            case_sequence = [int(value) for value in case_indices.tolist()]
+
+            print(f"[logic-curriculum] phase={phase_idx}/{len(gate_sequence)} gate={gate.value}")
+
+            for local_trial, case_idx in enumerate(case_sequence, start=1):
+                global_trial += 1
+                active_gate = gate_sequence[int(train_gate_idx[local_trial - 1].item())]
+                train_targets_flat = targets_by_gate[active_gate]
+                target_value = train_targets_flat[case_idx]
+                input_drive_buf.copy_(encoded_inputs[case_idx])
+                output_spike_counts.zero_()
+                hidden_spike_counts.zero_()
+                hidden_step_spikes.zero_()
+
+                pred_bit, mean_abs_dw_online = _run_rstdp_trial_forward(
+                    runtime=runtime,
+                    input_drive=input_drive_buf,
+                    sim_steps_per_trial=cfg.sim_steps_per_trial,
+                    dt=cfg.dt,
+                    hidden_step_spikes=hidden_step_spikes,
+                    hidden_spike_counts=hidden_spike_counts,
+                    last_pred=last_pred,
+                )
+                output_spike_counts.copy_(runtime.output_spike_counts)
+
+                target_bit = int((target_value >= 0.5).item())
+                correct = int(pred_bit == target_bit)
+                phase_correct += correct
+                if active_gate == gate:
+                    phase_gate_correct += correct
+                    phase_gate_sample_count += 1
+                sampled_correct_total += correct
+                rolling_correct.append(correct)
+                trial_acc_rolling = sum(rolling_correct) / float(len(rolling_correct))
+
+                reward_signal = _reward_signal(correct=bool(correct), pred_bit=pred_bit, last_pred=last_pred)
+                mean_abs_dw_dopa, dopamine_pulse = _apply_rstdp_dopamine(
+                    runtime=runtime,
+                    reward_signal=reward_signal,
+                    pred_bit=pred_bit,
+                    target_bit=target_bit,
+                    dt=cfg.dt,
+                )
+                mean_abs_dw_trial = _mean_nonzero(mean_abs_dw_online, mean_abs_dw_dopa)
+                _predict_all_cases_rstdp(
+                    runtime=runtime,
+                    encoded_inputs=encoded_inputs,
+                    predictions_out=predictions,
+                    scores_out=case_scores,
+                )
+
+                mean_eligibility = float(runtime.state.eligibility.abs().mean().item())
+                weights_min, weights_max, weights_mean = _tensor_stats(runtime.weights)
+                hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(cfg.sim_steps_per_trial)
+                tie_behavior = int(output_spike_counts[0].item() == output_spike_counts[1].item())
+                no_spikes = int(float(output_spike_counts.sum().item()) <= 0.0)
+
+                trial_row = {
+                    "phase": phase_idx,
+                    "gate": gate.value,
+                    "train_gate": active_gate.value,
+                    "phase_trial": local_trial,
+                    "trial": global_trial,
+                    "sim_step_end": global_trial * cfg.sim_steps_per_trial,
+                    "case_idx": case_idx,
+                    "x0": float(inputs[case_idx, 0].item()),
+                    "x1": float(inputs[case_idx, 1].item()),
+                    "in_bit0_0_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit0_0"]].item()),
+                    "in_bit0_1_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit0_1"]].item()),
+                    "in_bit1_0_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit1_0"]].item()),
+                    "in_bit1_1_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit1_1"]].item()),
+                    "out_spikes_0": float(output_spike_counts[OUTPUT_NEURON_INDICES["class_0"]].item()),
+                    "out_spikes_1": float(output_spike_counts[OUTPUT_NEURON_INDICES["class_1"]].item()),
+                    "hidden_mean_spikes": hidden_mean_spikes,
+                    "dopamine_pulse": dopamine_pulse,
+                    "trial_acc_rolling": trial_acc_rolling,
+                    "mean_eligibility_abs": mean_eligibility,
+                    "mean_abs_dw": mean_abs_dw_trial,
+                    "weights_min": weights_min,
+                    "weights_max": weights_max,
+                    "weights_mean": weights_mean,
+                    "tie_wta": tie_behavior,
+                    "no_output_spikes": no_spikes,
+                    "target": target_bit,
+                    "pred": pred_bit,
+                    "correct": correct,
+                }
+                trial_sink.write_row(trial_row)
+                if last_trials is not None:
+                    last_trials.append(dict(trial_row))
+
+                if cfg.debug and (
+                    local_trial == 1 or local_trial == phase_trials or local_trial % debug_every == 0
+                ):
+                    hidden_top_k = _top_k_active_neurons(hidden_spike_counts, k=cfg.debug_top_k)
+                    hidden_top_k_str = _format_top_k(hidden_top_k)
+                    print(
+                        f"[logic-curriculum][debug] phase={phase_idx} gate={gate.value} "
+                        f"trial={local_trial}/{phase_trials} "
+                        f"train_gate={active_gate.value} "
+                        f"input=({int(inputs[case_idx, 0].item())},{int(inputs[case_idx, 1].item())}) "
+                        f"target={target_bit} pred={pred_bit} "
+                        f"out=[{output_spike_counts[0].item():.1f},{output_spike_counts[1].item():.1f}] "
+                        f"hidden_mean={hidden_mean_spikes:.3f} hidden_topk={hidden_top_k_str} "
+                        f"dopamine={dopamine_pulse:+.2f} tie={tie_behavior} no_spikes={no_spikes}"
+                    )
+
+                phase_eval_last = float(eval_accuracy(predictions, targets_flat))
+                tracker.update(phase_eval_last)
+                if tracker.passed and first_pass_local is None:
+                    first_pass_local = local_trial
+
+                if (local_trial % cfg.export_every) == 0 or local_trial == phase_trials:
+                    sample_acc_phase = phase_correct / float(local_trial)
+                    sample_acc_phase_gate = (
+                        phase_gate_correct / float(phase_gate_sample_count)
+                        if phase_gate_sample_count > 0
+                        else 0.0
+                    )
+                    sample_acc_global = sampled_correct_total / float(global_trial)
+                    eval_acc_full, confusion = eval_accuracy(
+                        predictions, targets_flat, report_confusion=True
+                    )
+                    eval_sink.write_row(
+                        {
+                            "phase": phase_idx,
+                            "gate": gate.value,
+                            "phase_trial": local_trial,
+                            "trial": global_trial,
+                            "eval_accuracy": eval_acc_full,
+                            "sample_accuracy": sample_acc_phase,
+                            "sample_accuracy_phase_gate": sample_acc_phase_gate,
+                            "sample_accuracy_global": sample_acc_global,
+                            "trial_acc_rolling": trial_acc_rolling,
+                            "mean_eligibility_abs": mean_eligibility,
+                            "mean_abs_dw": mean_abs_dw_trial,
+                            "weights_min": weights_min,
+                            "weights_max": weights_max,
+                            "weights_mean": weights_mean,
+                            "perfect_streak": tracker.perfect_streak,
+                            "high_streak": tracker.high_streak,
+                            "passed": int(tracker.passed),
+                        }
+                    )
+                    confusion_sink.write_row(
+                        {
+                            "phase": phase_idx,
+                            "gate": gate.value,
+                            "phase_trial": local_trial,
+                            "trial": global_trial,
+                            **confusion,
+                        }
+                    )
+                    print(
+                        f"[logic-curriculum] phase={phase_idx} gate={gate.value} "
+                        f"trial={local_trial}/{phase_trials} global={global_trial} "
+                        f"eval_acc={eval_acc_full:.3f} sample_acc={sample_acc_phase:.3f} "
+                        f"gate_sample_acc={sample_acc_phase_gate:.3f} "
+                        f"roll_acc={trial_acc_rolling:.3f} pass={tracker.passed}"
+                    )
+                    if cfg.debug:
+                        print(f"[logic-curriculum] gate={gate.value} confusion={confusion}")
+
+                last_pred = pred_bit
+
+            phase_duration = perf_counter() - t0
+            phase_sample_acc = phase_correct / float(phase_trials)
+            phase_current_gate_sample_acc = (
+                phase_gate_correct / float(phase_gate_sample_count)
+                if phase_gate_sample_count > 0
+                else 0.0
+            )
+            phase_replay_trials = max(0, phase_trials - phase_gate_sample_count)
+            phase_row = {
+                "phase": phase_idx,
+                "gate": gate.value,
+                "phase_trials": phase_trials,
+                "phase_gate_trials": phase_gate_sample_count,
+                "replay_trials": phase_replay_trials,
+                "replay_ratio": replay_ratio,
+                "global_trial_end": global_trial,
+                "eval_accuracy": phase_eval_last,
+                "sample_accuracy": phase_sample_acc,
+                "sample_accuracy_phase_gate": phase_current_gate_sample_acc,
+                "passed": int(tracker.passed),
+                "first_pass_phase_trial": first_pass_local if first_pass_local is not None else "",
+                "elapsed_s_since_start": phase_duration,
+            }
+            phase_sink.write_row(phase_row)
+            phase_results.append(dict(phase_row))
+    finally:
+        trial_sink.close()
+        eval_sink.close()
+        confusion_sink.close()
+        phase_sink.close()
+
+    if last_trials is not None and len(last_trials) > 0:
+        last_trials_csv = run_dir / f"trials_last_{cfg.dump_last_trials_n}.csv"
+        last_sink = CsvSink(last_trials_csv, flush_every=1)
+        try:
+            for row in last_trials:
+                last_sink.write_row(row)
+        finally:
+            last_sink.close()
+
+    elapsed_s = perf_counter() - t0
+    final_eval_by_gate: dict[str, float] = {}
+    for gate in gate_sequence:
+        final_eval_by_gate[gate.value] = float(eval_accuracy(predictions, targets_by_gate[gate]))
+
+    return {
+        "out_dir": run_dir,
+        "device": device,
+        "learning_mode": cfg.learning_mode,
+        "topology": "xor_ff2",
+        "gates": [gate.value for gate in gate_sequence],
+        "phase_steps": phase_trials,
+        "replay_ratio": replay_ratio,
+        "total_steps": global_trial,
+        "sim_steps_per_trial": cfg.sim_steps_per_trial,
+        "inputs": inputs,
+        "preds": predictions,
+        "case_scores": case_scores,
+        "final_eval_by_gate": final_eval_by_gate,
+        "final_gate": final_gate.value,
+        "elapsed_s": elapsed_s,
+        "phase_results": phase_results,
+        "input_neuron_indices": dict(INPUT_NEURON_INDICES),
+        "output_neuron_indices": dict(OUTPUT_NEURON_INDICES),
+        "debug_every": cfg.debug_every,
+        "last_trials_csv": last_trials_csv,
+        "trials_csv": run_dir / "trials.csv",
+        "eval_csv": run_dir / "eval.csv",
+        "confusion_csv": run_dir / "confusion.csv",
+        "phase_summary_csv": run_dir / "phase_summary.csv",
     }
 
 
@@ -1248,6 +1631,37 @@ def _format_top_k(top_k: list[tuple[int, float]]) -> str:
     return ",".join(f"{idx}:{value:.1f}" for idx, value in top_k)
 
 
+def _build_curriculum_gate_indices(
+    *,
+    phase_index: int,
+    phase_trials: int,
+    replay_ratio: float,
+    device: str = "cpu",
+) -> Any:
+    torch = require_torch()
+    if phase_index < 0:
+        raise ValueError("phase_index must be >= 0")
+    if phase_trials <= 0:
+        raise ValueError("phase_trials must be > 0")
+    if replay_ratio < 0.0 or replay_ratio > 1.0:
+        raise ValueError("replay_ratio must be in [0.0, 1.0].")
+
+    gate_idx = torch.full((phase_trials,), phase_index, device=device, dtype=torch.long)
+    if phase_index == 0 or replay_ratio <= 0.0:
+        return gate_idx
+
+    max_replay = phase_trials - 1 if phase_trials > 1 else 0
+    replay_count = min(max_replay, int(round(phase_trials * replay_ratio)))
+    if replay_count <= 0:
+        return gate_idx
+
+    stride = max(1, phase_trials // replay_count)
+    replay_positions = torch.arange(0, phase_trials, stride, device=device, dtype=torch.long)[:replay_count]
+    replay_gates = torch.arange(replay_count, device=device, dtype=torch.long).remainder(phase_index)
+    gate_idx.scatter_(0, replay_positions, replay_gates)
+    return gate_idx
+
+
 def _resolve_device(torch: Any, requested: str) -> str:
     if requested == "cuda" and not torch.cuda.is_available():
         return "cpu"
@@ -1276,9 +1690,30 @@ def _resolve_run_dir(cfg: LogicGateRunConfig, *, gate: LogicGate) -> Path:
     return run_dir
 
 
+def _resolve_curriculum_run_dir(
+    cfg: LogicGateRunConfig,
+    *,
+    gates: Sequence[LogicGate],
+) -> Path:
+    if cfg.out_dir is not None:
+        out_dir = Path(cfg.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return out_dir
+
+    base = Path(cfg.artifacts_root) if cfg.artifacts_root is not None else _default_artifacts_root()
+    base.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    gate_suffix = "_".join(gate.value for gate in gates[:3])
+    run_dir = base / f"run_{stamp}_curriculum_{gate_suffix}"
+    if run_dir.exists():
+        run_dir = base / f"run_{stamp}_{int(time.time())}_curriculum"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
 def _default_artifacts_root() -> Path:
     repo_root = Path(__file__).resolve().parents[4]
     return repo_root / "artifacts" / "logic_gates"
 
 
-__all__ = ["run_logic_gate"]
+__all__ = ["run_logic_gate", "run_logic_gate_curriculum"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 import sys
 import threading
@@ -80,6 +81,7 @@ class DashboardRunController:
         self._last_error: str | None = None
         self._started_at: str | None = None
         self._finished_at: str | None = None
+        self._stop_requested_run_ids: set[str] = set()
         if initial_run_dir is not None:
             self._run_id = initial_run_dir.name
             self._run_dir = initial_run_dir
@@ -143,6 +145,7 @@ class DashboardRunController:
             self._last_error = None
             self._started_at = _now_iso()
             self._finished_at = None
+            self._stop_requested_run_ids.discard(run_id)
 
             watcher = threading.Thread(
                 target=self._watch_process,
@@ -165,6 +168,8 @@ class DashboardRunController:
             if process is None or process.poll() is not None:
                 self._process = None
                 return {"stopped": False, "reason": "no-active-run"}
+            if run_id is not None:
+                self._stop_requested_run_ids.add(run_id)
 
             process.terminate()
             terminated = True
@@ -211,8 +216,17 @@ class DashboardRunController:
     ) -> None:
         stdout, stderr = process.communicate()
         return_code = int(process.returncode or 0)
-        last_error = _tail_text(stderr) if return_code != 0 else None
-        finished_state = "done" if return_code == 0 else "error"
+        stop_requested = False
+        with self._lock:
+            if run_id in self._stop_requested_run_ids:
+                self._stop_requested_run_ids.remove(run_id)
+                stop_requested = True
+        if stop_requested:
+            finished_state = "stopped"
+            last_error = "Run stopped by user."
+        else:
+            last_error = _tail_text(stderr) if return_code != 0 else None
+            finished_state = "done" if return_code == 0 else "error"
         finished_at = _now_iso()
         with self._lock:
             if self._process is process:
@@ -342,6 +356,16 @@ class DashboardServerHandler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class _ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            with suppress(OSError):
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def start_dashboard_server(
     *,
     repo_root: Path,
@@ -368,7 +392,7 @@ def start_dashboard_server(
             **kwargs,
         )
 
-    server = ThreadingHTTPServer(("localhost", port), handler)
+    server = _ExclusiveThreadingHTTPServer(("localhost", port), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     server.controller = controller  # type: ignore[attr-defined]

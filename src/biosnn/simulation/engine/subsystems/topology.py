@@ -55,14 +55,18 @@ class TopologySubsystem:
         meta = dict(topology.meta) if topology.meta else {}
         updated = False
 
-        if n_pre is not None and "n_pre" not in meta:
-            meta["n_pre"] = int(n_pre)
-            updated = True
-        if n_post is not None and "n_post" not in meta:
-            meta["n_post"] = int(n_post)
-            updated = True
+        if n_pre is not None:
+            n_pre_i = int(n_pre)
+            if int(meta.get("n_pre", -1)) != n_pre_i:
+                meta["n_pre"] = n_pre_i
+                updated = True
+        if n_post is not None:
+            n_post_i = int(n_post)
+            if int(meta.get("n_post", -1)) != n_post_i:
+                meta["n_post"] = n_post_i
+                updated = True
 
-        if topology.delay_steps is not None and "max_delay_steps" not in meta:
+        if topology.delay_steps is not None:
             delay_steps = topology.delay_steps
             max_delay = 0
             if hasattr(delay_steps, "numel") and delay_steps.numel():
@@ -80,7 +84,11 @@ class TopologySubsystem:
                         max_delay = int(cast(SupportsInt, max_list))
                 else:
                     max_delay = int(max_val)
-            meta["max_delay_steps"] = max_delay
+            if int(meta.get("max_delay_steps", -1)) != max_delay:
+                meta["max_delay_steps"] = max_delay
+                updated = True
+        elif int(meta.get("max_delay_steps", 0)) != 0:
+            meta["max_delay_steps"] = 0
             updated = True
 
         if updated:

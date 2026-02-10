@@ -2,10 +2,20 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "BioSNN: run (placeholder runner)",
+      "name": "BioSNN: run dashboard (venv/API)",
       "type": "python",
       "request": "launch",
       "module": "biosnn.runners.cli",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "console": "integratedTerminal",
+      "args": [
+        "--demo",
+        "network",
+        "--device",
+        "cpu",
+        "--port",
+        "8011"
+      ],
       "justMyCode": true
     },
     {

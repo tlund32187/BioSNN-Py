@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
+import socket
 import time
 import webbrowser
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Literal, cast
 from urllib.parse import quote
@@ -28,6 +29,17 @@ from biosnn.experiments.demos import FEATURE_DEMO_BUILDERS, FeatureDemoConfig, F
 from biosnn.io.export.run_manifest import write_run_config, write_run_features, write_run_status
 from biosnn.learning.homeostasis import HomeostasisScope, RateEmaThresholdHomeostasisConfig
 from biosnn.runners.dashboard_server import start_dashboard_server
+from biosnn.tasks.logic_gates import LogicGateRunConfig, run_logic_gate, run_logic_gate_curriculum
+
+LOGIC_DEMO_TO_GATE: dict[str, str] = {
+    "logic_and": "and",
+    "logic_or": "or",
+    "logic_xor": "xor",
+    "logic_nand": "nand",
+    "logic_nor": "nor",
+    "logic_xnor": "xnor",
+}
+LOGIC_CURRICULUM_DEMO = "logic_curriculum"
 
 
 def main() -> None:
@@ -95,19 +107,36 @@ def main() -> None:
                 )
             )
         else:
-            builders = _demo_registry()
-            builder = builders.get(args.demo)
-            if builder is None:
-                raise ValueError(f"Unsupported demo '{args.demo}'")
-            model_spec, runtime_cfg, monitors = builder(
-                args=args,
-                run_dir=run_dir,
-                mode=cast(ModeName, mode),
-                steps=int(steps),
-                dt=float(dt),
-                device=device,
-            )
-            run_demo_from_spec(model_spec, runtime_cfg, monitors)
+            if args.demo in LOGIC_DEMO_TO_GATE:
+                _run_logic_gate_demo_from_cli(
+                    args=args,
+                    run_dir=run_dir,
+                    steps=int(steps),
+                    dt=float(dt),
+                    device=device,
+                )
+            elif args.demo == LOGIC_CURRICULUM_DEMO:
+                _run_logic_curriculum_demo_from_cli(
+                    args=args,
+                    run_dir=run_dir,
+                    steps=int(steps),
+                    dt=float(dt),
+                    device=device,
+                )
+            else:
+                builders = _demo_registry()
+                builder = builders.get(args.demo)
+                if builder is None:
+                    raise ValueError(f"Unsupported demo '{args.demo}'")
+                model_spec, runtime_cfg, monitors = builder(
+                    args=args,
+                    run_dir=run_dir,
+                    mode=cast(ModeName, mode),
+                    steps=int(steps),
+                    dt=float(dt),
+                    device=device,
+                )
+                run_demo_from_spec(model_spec, runtime_cfg, monitors)
     except Exception as exc:
         if run_spec is not None:
             write_run_status(
@@ -176,11 +205,176 @@ DemoBuilder = Callable[..., DemoBuildResult]
 def _demo_registry() -> Mapping[str, DemoBuilder]:
     return {
         "network": _build_network_demo_from_cli,
+        "pruning_sparse": _build_pruning_sparse_demo_from_cli,
+        "neurogenesis_sparse": _build_neurogenesis_sparse_demo_from_cli,
         "propagation_impulse": _build_propagation_impulse_demo_from_cli,
         "delay_impulse": _build_delay_impulse_demo_from_cli,
         "learning_gate": _build_learning_gate_demo_from_cli,
         "dopamine_plasticity": _build_dopamine_plasticity_demo_from_cli,
     }
+
+
+def _run_logic_gate_demo_from_cli(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    steps: int,
+    dt: float,
+    device: str,
+) -> dict[str, Any]:
+    demo_gate = LOGIC_DEMO_TO_GATE.get(str(args.demo).strip().lower(), "and")
+    gate = str(getattr(args, "logic_gate", demo_gate) or demo_gate).strip().lower()
+    if gate not in {"and", "or", "xor", "nand", "nor", "xnor"}:
+        gate = demo_gate
+    learning_mode = str(getattr(args, "logic_learning_mode", "rstdp")).strip().lower()
+    if learning_mode not in {"rstdp", "surrogate", "none"}:
+        learning_mode = "rstdp"
+    sampling_method = str(getattr(args, "logic_sampling_method", "sequential")).strip().lower()
+    if sampling_method not in {"sequential", "random_balanced"}:
+        sampling_method = "sequential"
+
+    result = run_logic_gate(
+        LogicGateRunConfig(
+            gate=gate,
+            seed=123 if args.seed is None else int(args.seed),
+            steps=int(steps),
+            dt=float(dt),
+            sim_steps_per_trial=max(1, int(args.logic_sim_steps_per_trial)),
+            device=device,
+            learning_mode=cast(Any, learning_mode),
+            debug=bool(getattr(args, "logic_debug", False)),
+            debug_every=max(1, int(getattr(args, "logic_debug_every", 25))),
+            export_every=25,
+            sampling_method=cast(Any, sampling_method),
+            out_dir=run_dir,
+        )
+    )
+    _write_logic_metrics_csv_from_eval(run_dir)
+    print(
+        "[logic-gate] "
+        f"gate={result.get('gate')} mode={result.get('learning_mode')} "
+        f"eval_acc={result.get('eval_accuracy')} passed={result.get('passed')}"
+    )
+    return result
+
+
+def _run_logic_curriculum_demo_from_cli(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    steps: int,
+    dt: float,
+    device: str,
+) -> dict[str, Any]:
+    gates_raw = str(getattr(args, "logic_curriculum_gates", "or,and,nor,nand,xor,xnor"))
+    gate_list = [token.strip().lower() for token in gates_raw.split(",") if token.strip()]
+    if not gate_list:
+        gate_list = ["or", "and", "nor", "nand", "xor", "xnor"]
+
+    learning_mode = str(getattr(args, "logic_learning_mode", "rstdp")).strip().lower()
+    if learning_mode != "rstdp":
+        print(
+            f"[logic-curriculum] overriding learning_mode={learning_mode!r} to 'rstdp' "
+            "for persistent cross-gate learning."
+        )
+        learning_mode = "rstdp"
+
+    sampling_method = str(getattr(args, "logic_sampling_method", "sequential")).strip().lower()
+    if sampling_method not in {"sequential", "random_balanced"}:
+        sampling_method = "sequential"
+    replay_ratio = float(getattr(args, "logic_curriculum_replay_ratio", 0.35))
+    if replay_ratio < 0.0:
+        replay_ratio = 0.0
+    if replay_ratio > 1.0:
+        replay_ratio = 1.0
+
+    result = run_logic_gate_curriculum(
+        LogicGateRunConfig(
+            gate=gate_list[0],
+            seed=123 if args.seed is None else int(args.seed),
+            steps=int(steps),
+            dt=float(dt),
+            sim_steps_per_trial=max(1, int(args.logic_sim_steps_per_trial)),
+            device=device,
+            learning_mode=cast(Any, learning_mode),
+            debug=bool(getattr(args, "logic_debug", False)),
+            debug_every=max(1, int(getattr(args, "logic_debug_every", 25))),
+            export_every=25,
+            sampling_method=cast(Any, sampling_method),
+            out_dir=run_dir,
+        ),
+        gates=gate_list,
+        phase_steps=int(steps),
+        replay_ratio=replay_ratio,
+    )
+    _write_logic_metrics_csv_from_eval(run_dir)
+    print(
+        "[logic-curriculum] "
+        f"gates={result.get('gates')} final_eval={result.get('final_eval_by_gate')}"
+    )
+    return result
+
+
+def _write_logic_metrics_csv_from_eval(run_dir: Path) -> None:
+    eval_path = run_dir / "eval.csv"
+    if not eval_path.exists():
+        return
+    rows: list[dict[str, str]] = []
+    with eval_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            trial_raw = (row.get("trial") or "").strip()
+            eval_raw = (row.get("eval_accuracy") or "").strip()
+            sample_raw = (row.get("sample_accuracy") or eval_raw).strip()
+            global_raw = (row.get("sample_accuracy_global") or "").strip()
+            rolling_raw = (row.get("trial_acc_rolling") or "").strip()
+            loss_raw = (row.get("loss") or "").strip()
+            if not trial_raw:
+                continue
+            # Curriculum rows include sample_accuracy_global; this is the true
+            # overall task accuracy across gates/replay and should drive dashboard curves.
+            train_out = global_raw or sample_raw
+            eval_out = global_raw or eval_raw
+            loss_out = loss_raw
+            if not loss_out and eval_out:
+                try:
+                    loss_out = str(max(0.0, 1.0 - float(eval_out)))
+                except ValueError:
+                    loss_out = ""
+            rows.append(
+                {
+                    "step": trial_raw,
+                    "t": trial_raw,
+                    "phase": (row.get("phase") or "").strip(),
+                    "gate": (row.get("gate") or "").strip(),
+                    "train_accuracy": train_out,
+                    "eval_accuracy": eval_out,
+                    "gate_eval_accuracy": eval_raw,
+                    "sample_accuracy_global": global_raw,
+                    "loss": loss_out,
+                    "trial_acc_rolling": rolling_raw,
+                }
+            )
+    metrics_path = run_dir / "metrics.csv"
+    with metrics_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "step",
+                "t",
+                "phase",
+                "gate",
+                "train_accuracy",
+                "eval_accuracy",
+                "gate_eval_accuracy",
+                "sample_accuracy_global",
+                "loss",
+                "trial_acc_rolling",
+            ],
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def _build_network_demo_from_cli(
@@ -221,6 +415,75 @@ def _build_propagation_impulse_demo_from_cli(
         dt=dt,
         device=device,
     )
+
+
+def _build_pruning_sparse_demo_from_cli(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    mode: ModeName,
+    steps: int,
+    dt: float,
+    device: str,
+) -> DemoBuildResult:
+    pruning_steps = 5000 if int(steps) == 500 else int(steps)
+    cfg = _build_network_config_from_args(
+        args=args,
+        run_dir=run_dir,
+        mode=mode,
+        steps=pruning_steps,
+        dt=dt,
+        device=device,
+    )
+    cfg.enable_pruning = True
+    cfg.pruning_verbose = True
+    cfg.input_to_relay_p = max(float(cfg.input_to_relay_p), 0.6)
+    cfg.relay_to_hidden_p = max(float(cfg.relay_to_hidden_p), 0.35)
+    cfg.hidden_to_output_p = max(float(cfg.hidden_to_output_p), 0.35)
+    print(
+        "Pruning demo settings: "
+        f"steps={cfg.steps}, "
+        f"interval={cfg.prune_interval_steps}, "
+        f"w_min={cfg.w_min}, "
+        f"usage_min={cfg.usage_min}, "
+        f"k_min_out={cfg.k_min_out}, "
+        f"k_min_in={cfg.k_min_in}, "
+        f"max_fraction={cfg.max_prune_fraction_per_interval}"
+    )
+    return build_network_demo(cfg)
+
+
+def _build_neurogenesis_sparse_demo_from_cli(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    mode: ModeName,
+    steps: int,
+    dt: float,
+    device: str,
+) -> DemoBuildResult:
+    neuro_steps = 2000 if int(steps) == 500 else int(steps)
+    cfg = _build_network_config_from_args(
+        args=args,
+        run_dir=run_dir,
+        mode=mode,
+        steps=neuro_steps,
+        dt=dt,
+        device=device,
+    )
+    cfg.enable_neurogenesis = True
+    cfg.neurogenesis_verbose = True
+    cfg.input_drive = min(float(cfg.input_drive), 0.35)
+    print(
+        "Neurogenesis demo settings: "
+        f"steps={cfg.steps}, "
+        f"interval={cfg.growth_interval_steps}, "
+        f"add_neurons={cfg.add_neurons_per_event}, "
+        f"newborn_mult={cfg.newborn_plasticity_multiplier}, "
+        f"newborn_duration={cfg.newborn_duration_steps}, "
+        f"max_total={cfg.max_total_neurons}"
+    )
+    return build_network_demo(cfg)
 
 
 def _build_delay_impulse_demo_from_cli(
@@ -410,6 +673,22 @@ def _build_network_config_from_args(
             scope=cast(HomeostasisScope, args.homeostasis_scope),
         ),
         homeostasis_export_every=int(args.homeostasis_export_every),
+        enable_pruning=bool(args.enable_pruning),
+        prune_interval_steps=max(1, int(args.prune_interval_steps)),
+        usage_alpha=float(args.prune_usage_alpha),
+        w_min=float(args.prune_w_min),
+        usage_min=float(args.prune_usage_min),
+        k_min_out=max(0, int(args.prune_k_min_out)),
+        k_min_in=max(0, int(args.prune_k_min_in)),
+        max_prune_fraction_per_interval=float(args.prune_max_fraction),
+        pruning_verbose=bool(args.prune_verbose),
+        enable_neurogenesis=bool(args.enable_neurogenesis),
+        growth_interval_steps=max(1, int(args.growth_interval_steps)),
+        add_neurons_per_event=max(1, int(args.add_neurons_per_event)),
+        newborn_plasticity_multiplier=float(args.newborn_plasticity_multiplier),
+        newborn_duration_steps=max(1, int(args.newborn_duration_steps)),
+        max_total_neurons=max(1, int(args.max_total_neurons)),
+        neurogenesis_verbose=bool(args.neurogenesis_verbose),
         feedforward_delay_from_distance=args.feedforward_delay_from_distance,
         feedforward_delay_base_velocity=args.feedforward_delay_base_velocity,
         feedforward_delay_myelin_scale=args.feedforward_delay_myelin_scale,
@@ -436,15 +715,25 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=[
             "minimal",
             "network",
+            "pruning_sparse",
+            "neurogenesis_sparse",
             "propagation_impulse",
             "delay_impulse",
             "learning_gate",
             "dopamine_plasticity",
+            "logic_curriculum",
+            "logic_and",
+            "logic_or",
+            "logic_xor",
+            "logic_nand",
+            "logic_nor",
+            "logic_xnor",
         ],
         default=_default_demo(),
         help=(
-            "demo to run: minimal, network, propagation_impulse, delay_impulse, "
-            "learning_gate, dopamine_plasticity"
+            "demo to run: minimal, network, pruning_sparse, neurogenesis_sparse, propagation_impulse, "
+            "delay_impulse, learning_gate, dopamine_plasticity, logic_curriculum, logic_and, logic_or, "
+            "logic_xor, logic_nand, logic_nor, logic_xnor"
         ),
     )
     parser.add_argument(
@@ -564,6 +853,43 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--learning_lr", type=float, default=0.1)
     parser.add_argument("--da_amount", type=float, default=1.0)
     parser.add_argument("--da_step", type=int, default=10)
+    parser.add_argument(
+        "--logic-gate",
+        choices=["and", "or", "xor", "nand", "nor", "xnor"],
+        default=None,
+        help="logic gate override for logic_* demos (default follows selected demo)",
+    )
+    parser.add_argument(
+        "--logic-learning-mode",
+        choices=["rstdp", "surrogate", "none"],
+        default="rstdp",
+        help="learning mode for logic_* demos",
+    )
+    parser.add_argument("--logic-sim-steps-per-trial", type=int, default=10)
+    parser.add_argument(
+        "--logic-curriculum-gates",
+        type=str,
+        default="or,and,nor,nand,xor,xnor",
+        help="comma-separated gate sequence for logic_curriculum demo",
+    )
+    parser.add_argument(
+        "--logic-curriculum-replay-ratio",
+        type=float,
+        default=0.35,
+        help="fraction of curriculum trials per phase used for replay of previous gates (0..1)",
+    )
+    parser.add_argument(
+        "--logic-sampling-method",
+        choices=["sequential", "random_balanced"],
+        default="sequential",
+    )
+    parser.add_argument(
+        "--logic-debug",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable per-trial debug logs for logic_* demos",
+    )
+    parser.add_argument("--logic-debug-every", type=int, default=25)
     parser.add_argument("--n", type=int, default=100, help="number of neurons")
     parser.add_argument("--p", type=float, default=0.05, help="connection probability")
     parser.add_argument("--dt", type=float, default=1e-3)
@@ -667,6 +993,42 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="per_neuron",
     )
     parser.add_argument("--homeostasis-export-every", type=int, default=10)
+    parser.add_argument(
+        "--enable-pruning",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable activity-based structural pruning",
+    )
+    parser.add_argument("--prune-interval-steps", type=int, default=250)
+    parser.add_argument("--prune-usage-alpha", type=float, default=0.01)
+    parser.add_argument("--prune-w-min", type=float, default=0.05)
+    parser.add_argument("--prune-usage-min", type=float, default=0.01)
+    parser.add_argument("--prune-k-min-out", type=int, default=1)
+    parser.add_argument("--prune-k-min-in", type=int, default=1)
+    parser.add_argument("--prune-max-fraction", type=float, default=0.10)
+    parser.add_argument(
+        "--prune-verbose",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="print prune summaries at prune boundaries",
+    )
+    parser.add_argument(
+        "--enable-neurogenesis",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable online neurogenesis for hidden populations",
+    )
+    parser.add_argument("--growth-interval-steps", type=int, default=500)
+    parser.add_argument("--add-neurons-per-event", type=int, default=4)
+    parser.add_argument("--newborn-plasticity-multiplier", type=float, default=1.5)
+    parser.add_argument("--newborn-duration-steps", type=int, default=250)
+    parser.add_argument("--max-total-neurons", type=int, default=20000)
+    parser.add_argument(
+        "--neurogenesis-verbose",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="print growth summaries at neurogenesis boundaries",
+    )
     parser.add_argument("--port", type=int)
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument(
@@ -849,8 +1211,10 @@ def _find_port(requested: int | None) -> int:
 
 def _port_available(port: int) -> bool:
     try:
-        server = ThreadingHTTPServer(("localhost", port), SimpleHTTPRequestHandler)
-        server.server_close()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            sock.bind(("localhost", port))
         return True
     except OSError:
         return False

@@ -51,6 +51,10 @@ class ProjectionWeightsCSVMonitor(IMonitor):
         else:
             self._max_edges_sample = max_edges_sample
         self._projections = [_normalize_projection(proj) for proj in projections]
+        self._engine: Any | None = None
+
+    def bind_engine(self, engine: Any) -> None:
+        self._engine = engine
 
     def on_step(self, event: StepEvent) -> None:
         step = int(scalar_to_float(event.scalars.get("step", 0))) if event.scalars else 0
@@ -60,17 +64,41 @@ class ProjectionWeightsCSVMonitor(IMonitor):
             return
 
         torch = require_torch()
+        topology_by_name: dict[str, Any] = {}
+        if self._engine is not None:
+            proj_specs = getattr(self._engine, "_proj_specs", None)
+            if isinstance(proj_specs, list):
+                for spec in proj_specs:
+                    name = getattr(spec, "name", None)
+                    topology = getattr(spec, "topology", None)
+                    if isinstance(name, str) and topology is not None:
+                        topology_by_name[name] = topology
         for proj in self._projections:
             name = proj.name
             key = f"proj/{name}/weights"
             weights = event.tensors.get(key)
             if weights is None:
                 continue
-            pre_idx = proj.pre_idx
-            post_idx = proj.post_idx
-            edge_count = int(pre_idx.shape[0])
+            topology = topology_by_name.get(name)
+            if topology is not None:
+                pre_idx = topology.pre_idx
+                post_idx = topology.post_idx
+            else:
+                pre_idx = proj.pre_idx
+                post_idx = proj.post_idx
+            edge_count = min(
+                int(pre_idx.shape[0]),
+                int(post_idx.shape[0]),
+                int(weights.shape[0]),
+            )
             if edge_count == 0:
                 continue
+            pre_idx = pre_idx[:edge_count]
+            post_idx = post_idx[:edge_count]
+            if pre_idx.device != weights.device:
+                pre_idx = pre_idx.to(device=weights.device, dtype=torch.long)
+            if post_idx.device != weights.device:
+                post_idx = post_idx.to(device=weights.device, dtype=torch.long)
 
             if edge_count <= self._max_edges_full:
                 indices = torch.arange(edge_count, device=weights.device)

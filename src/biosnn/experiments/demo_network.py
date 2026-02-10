@@ -147,6 +147,22 @@ class DemoNetworkConfig:
         default_factory=RateEmaThresholdHomeostasisConfig
     )
     homeostasis_export_every: int = 10
+    enable_pruning: bool = False
+    prune_interval_steps: int = 250
+    usage_alpha: float = 0.01
+    w_min: float = 0.01
+    usage_min: float = 0.01
+    k_min_out: int = 0
+    k_min_in: int = 0
+    max_prune_fraction_per_interval: float = 0.1
+    pruning_verbose: bool = False
+    enable_neurogenesis: bool = False
+    growth_interval_steps: int = 500
+    add_neurons_per_event: int = 4
+    newborn_plasticity_multiplier: float = 1.5
+    newborn_duration_steps: int = 250
+    max_total_neurons: int = 20000
+    neurogenesis_verbose: bool = False
 
 
 def build_network_demo(
@@ -615,6 +631,22 @@ def build_network_demo(
                     async_gpu=monitor_async_gpu,
                 )
             )
+        if cfg.enable_pruning:
+            monitors.append(
+                _PruningEdgeCountCSVMonitor(
+                    out_dir / "edge_count.csv",
+                    stride=max(1, int(cfg.prune_interval_steps)),
+                    flush_every=25,
+                )
+            )
+        if cfg.enable_neurogenesis:
+            monitors.append(
+                _NeurogenesisCSVMonitor(
+                    out_dir / "neurogenesis.csv",
+                    stride=max(1, int(cfg.growth_interval_steps)),
+                    flush_every=25,
+                )
+            )
     else:
         monitors = [
             NeuronCSVMonitor(
@@ -677,6 +709,22 @@ def build_network_demo(
                     max_edges_sample=weights_cap,
                     safe_max_edges_sample=safe_edge_sample,
                     append=False,
+                    flush_every=25,
+                )
+            )
+        if cfg.enable_pruning:
+            monitors.append(
+                _PruningEdgeCountCSVMonitor(
+                    out_dir / "edge_count.csv",
+                    stride=max(1, int(cfg.prune_interval_steps)),
+                    flush_every=25,
+                )
+            )
+        if cfg.enable_neurogenesis:
+            monitors.append(
+                _NeurogenesisCSVMonitor(
+                    out_dir / "neurogenesis.csv",
+                    stride=max(1, int(cfg.growth_interval_steps)),
                     flush_every=25,
                 )
             )
@@ -821,6 +869,112 @@ class _PopDriveCSVMonitor(IMonitor):
         return MonitorRequirements(
             needs_scalars=True,
         )
+
+    def flush(self) -> None:
+        self._sink.flush()
+
+    def close(self) -> None:
+        self._sink.close()
+
+
+class _PruningEdgeCountCSVMonitor(IMonitor):
+    name = "csv_pruning_edge_count"
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        stride: int = 1,
+        flush_every: int = 25,
+        append: bool = False,
+    ) -> None:
+        self._stride = max(1, int(stride))
+        self._event_count = 0
+        self._sink = CsvSink(path, flush_every=max(1, int(flush_every)), append=append)
+
+    def on_step(self, event: StepEvent) -> None:
+        self._event_count += 1
+        if self._event_count % self._stride != 0:
+            return
+        if not event.scalars:
+            return
+        edge_total = event.scalars.get("prune/edges_total")
+        edges_pruned = event.scalars.get("prune/edges_pruned_interval")
+        projections_pruned = event.scalars.get("prune/projections_pruned_interval")
+        if edge_total is None:
+            return
+        step_val = event.scalars.get("step")
+        row: dict[str, Any] = {
+            "step": int(scalar_to_float(step_val)) if step_val is not None else "",
+            "t": event.t,
+            "edges_total": scalar_to_float(edge_total),
+            "edges_pruned_interval": scalar_to_float(edges_pruned) if edges_pruned is not None else 0.0,
+            "projections_pruned_interval": scalar_to_float(projections_pruned)
+            if projections_pruned is not None
+            else 0.0,
+        }
+        self._sink.write_row(row)
+
+    def requirements(self) -> MonitorRequirements:
+        return MonitorRequirements(needs_scalars=True)
+
+    def flush(self) -> None:
+        self._sink.flush()
+
+    def close(self) -> None:
+        self._sink.close()
+
+
+class _NeurogenesisCSVMonitor(IMonitor):
+    name = "csv_neurogenesis"
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        stride: int = 1,
+        flush_every: int = 25,
+        append: bool = False,
+    ) -> None:
+        self._stride = max(1, int(stride))
+        self._event_count = 0
+        self._sink = CsvSink(path, flush_every=max(1, int(flush_every)), append=append)
+
+    def on_step(self, event: StepEvent) -> None:
+        self._event_count += 1
+        if self._event_count % self._stride != 0:
+            return
+        if not event.scalars:
+            return
+        total = event.scalars.get("neurogenesis/total_neurons")
+        if total is None:
+            return
+        step_val = event.scalars.get("step")
+        row: dict[str, Any] = {
+            "step": int(scalar_to_float(step_val)) if step_val is not None else "",
+            "t": event.t,
+            "total_neurons": scalar_to_float(total),
+            "added_neurons_interval": scalar_to_float(
+                event.scalars.get("neurogenesis/added_neurons_interval", 0.0)
+            ),
+            "added_edges_interval": scalar_to_float(
+                event.scalars.get("neurogenesis/added_edges_interval", 0.0)
+            ),
+            "events_total": scalar_to_float(
+                event.scalars.get("neurogenesis/events_total", 0.0)
+            ),
+            "trigger_score": scalar_to_float(
+                event.scalars.get("neurogenesis/trigger_score", 0.0)
+            ),
+            "target_activity_ema": scalar_to_float(
+                event.scalars.get("neurogenesis/target_activity_ema", 0.0)
+            ),
+            "grew": scalar_to_float(event.scalars.get("neurogenesis/grew", 0.0)),
+        }
+        self._sink.write_row(row)
+
+    def requirements(self) -> MonitorRequirements:
+        return MonitorRequirements(needs_scalars=True)
 
     def flush(self) -> None:
         self._sink.flush()

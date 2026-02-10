@@ -47,6 +47,14 @@ def test_cli_demo_flag_defaults():
     assert args.demo == "learning_gate"
     args = cli._parse_args(["--demo", "dopamine_plasticity"])
     assert args.demo == "dopamine_plasticity"
+    args = cli._parse_args(["--demo", "logic_curriculum"])
+    assert args.demo == "logic_curriculum"
+    args = cli._parse_args(["--demo", "logic_and"])
+    assert args.demo == "logic_and"
+    args = cli._parse_args(["--demo", "logic_or"])
+    assert args.demo == "logic_or"
+    args = cli._parse_args(["--demo", "logic_xor"])
+    assert args.demo == "logic_xor"
 
     args = cli._parse_args(["--mode", "fast"])
     assert args.mode == "fast"
@@ -80,6 +88,21 @@ def test_cli_demo_flag_defaults():
             "2.5",
             "--da_step",
             "9",
+            "--logic-gate",
+            "xor",
+            "--logic-learning-mode",
+            "surrogate",
+            "--logic-sim-steps-per-trial",
+            "12",
+            "--logic-sampling-method",
+            "random_balanced",
+            "--logic-curriculum-gates",
+            "or,and,xor",
+            "--logic-curriculum-replay-ratio",
+            "0.6",
+            "--logic-debug",
+            "--logic-debug-every",
+            "5",
             "--fused-layout",
             "csr",
             "--ring-dtype",
@@ -106,6 +129,14 @@ def test_cli_demo_flag_defaults():
     assert args.learning_lr == 0.2
     assert args.da_amount == 2.5
     assert args.da_step == 9
+    assert args.logic_gate == "xor"
+    assert args.logic_learning_mode == "surrogate"
+    assert args.logic_sim_steps_per_trial == 12
+    assert args.logic_sampling_method == "random_balanced"
+    assert args.logic_curriculum_gates == "or,and,xor"
+    assert args.logic_curriculum_replay_ratio == 0.6
+    assert args.logic_debug is True
+    assert args.logic_debug_every == 5
     assert args.fused_layout == "csr"
     assert args.ring_dtype == "bfloat16"
     assert args.ring_strategy == "event_bucketed"

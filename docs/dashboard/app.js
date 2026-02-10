@@ -67,6 +67,14 @@ const runNodes = {
   featureList: document.getElementById("runFeatureList"),
 };
 
+const taskNodes = {
+  title: document.getElementById("taskTitle"),
+  chip: document.getElementById("taskChip"),
+  summary: document.getElementById("taskSummary"),
+  table: document.getElementById("taskTruthTable"),
+  takeaway: document.getElementById("taskTakeaway"),
+};
+
 const theme = {
   background: "#0f1529",
   grid: "rgba(255,255,255,0.06)",
@@ -122,6 +130,9 @@ const dataConfig = (() => {
     return path.endsWith("/") ? path.slice(0, -1) : path;
   };
   const runPath = normalizeRunPath(runParam);
+  const apiParamRaw = params.get("api");
+  const apiParam = apiParamRaw ? String(apiParamRaw).trim().toLowerCase() : "";
+  const apiDisabled = apiParam === "0" || apiParam === "false" || apiParam === "off" || apiParam === "no";
   const pathFromRun = (filename) => (runPath ? `${runPath}/${filename}` : null);
   const topologyJson = readParam("topology", pathFromRun("topology.json") || "data/topology.json");
   const neuronCsv = readParam("neuron", pathFromRun("neuron.csv") || "data/neuron.csv");
@@ -129,6 +140,9 @@ const dataConfig = (() => {
   const spikesCsv = readParam("spikes", pathFromRun("spikes.csv") || "data/spikes.csv");
   const metricsCsv = readParam("metrics", pathFromRun("metrics.csv") || "data/metrics.csv");
   const weightsCsv = readParam("weights", pathFromRun("weights.csv") || "data/weights.csv");
+  const trialsCsv = readParam("trials", pathFromRun("trials.csv"));
+  const evalCsv = readParam("eval", pathFromRun("eval.csv"));
+  const confusionCsv = readParam("confusion", pathFromRun("confusion.csv"));
   return {
     runPath,
     neuronCsv,
@@ -136,11 +150,14 @@ const dataConfig = (() => {
     spikesCsv,
     metricsCsv,
     weightsCsv,
+    trialsCsv,
+    evalCsv,
+    confusionCsv,
     topologyJson,
     runConfigJson: pathFromRun("run_config.json"),
     runFeaturesJson: pathFromRun("run_features.json"),
     runStatusJson: pathFromRun("run_status.json"),
-    useApi: runParam == null,
+    useApi: !apiDisabled,
     refreshMs: Number(params.get("refresh") || 1200),
     totalSteps: Number(params.get("total_steps") || params.get("steps") || 0),
   };
@@ -152,6 +169,9 @@ const dataState = {
   spikesRows: null,
   metricsRows: null,
   weightsRows: null,
+  trialsRows: null,
+  evalRows: null,
+  confusionRows: null,
   weightsIndex: null,
   topology: null,
   topologyMode: "neurons",
@@ -181,6 +201,425 @@ const runState = {
   activeRunPath: dataConfig.runPath || null,
   lastAppliedRunId: null,
 };
+
+const FALLBACK_DEMO_DEFINITIONS = [
+  {
+    id: "network",
+    name: "Network",
+    defaults: { demo_id: "network", steps: 500, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: false }, modulators: { enabled: false, kinds: [] } },
+  },
+  {
+    id: "pruning_sparse",
+    name: "Pruning Sparse",
+    defaults: { demo_id: "pruning_sparse", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: false }, modulators: { enabled: false, kinds: [] } },
+  },
+  {
+    id: "neurogenesis_sparse",
+    name: "Neurogenesis Sparse",
+    defaults: { demo_id: "neurogenesis_sparse", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: false }, modulators: { enabled: false, kinds: [] } },
+  },
+  {
+    id: "propagation_impulse",
+    name: "Propagation Impulse",
+    defaults: { demo_id: "propagation_impulse", steps: 120, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: false }, modulators: { enabled: false, kinds: [] } },
+  },
+  {
+    id: "delay_impulse",
+    name: "Delay Impulse",
+    defaults: { demo_id: "delay_impulse", steps: 120, delay_steps: 3, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: false }, modulators: { enabled: false, kinds: [] } },
+  },
+  {
+    id: "learning_gate",
+    name: "Learning Gate",
+    defaults: { demo_id: "learning_gate", steps: 200, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "three_factor_hebbian", lr: 0.1 }, modulators: { enabled: false, kinds: [] } },
+  },
+  {
+    id: "dopamine_plasticity",
+    name: "Dopamine Plasticity",
+    defaults: { demo_id: "dopamine_plasticity", steps: 220, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "three_factor_hebbian", lr: 0.1 }, modulators: { enabled: true, kinds: ["dopamine"], pulse_step: 50, amount: 1.0 } },
+  },
+  {
+    id: "logic_curriculum",
+    name: "Logic Curriculum",
+    defaults: { demo_id: "logic_curriculum", steps: 2500, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_curriculum_gates: "or,and,nor,nand,xor,xnor", logic_curriculum_replay_ratio: 0.35 },
+  },
+  {
+    id: "logic_and",
+    name: "Logic AND",
+    defaults: { demo_id: "logic_and", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "and", logic_learning_mode: "rstdp" },
+  },
+  {
+    id: "logic_or",
+    name: "Logic OR",
+    defaults: { demo_id: "logic_or", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "or", logic_learning_mode: "rstdp" },
+  },
+  {
+    id: "logic_xor",
+    name: "Logic XOR",
+    defaults: { demo_id: "logic_xor", steps: 20000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "xor", logic_learning_mode: "rstdp" },
+  },
+  {
+    id: "logic_nand",
+    name: "Logic NAND",
+    defaults: { demo_id: "logic_nand", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "nand", logic_learning_mode: "rstdp" },
+  },
+  {
+    id: "logic_nor",
+    name: "Logic NOR",
+    defaults: { demo_id: "logic_nor", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "nor", logic_learning_mode: "rstdp" },
+  },
+  {
+    id: "logic_xnor",
+    name: "Logic XNOR",
+    defaults: { demo_id: "logic_xnor", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "xnor", logic_learning_mode: "rstdp" },
+  },
+];
+
+function deepClone(value) {
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return value;
+  }
+}
+
+function fallbackDemos() {
+  return FALLBACK_DEMO_DEFINITIONS.map((demo) => deepClone(demo));
+}
+
+function normalizeDemoDefinitions(rawDemos) {
+  if (!Array.isArray(rawDemos)) return [];
+  const fallbackById = new Map(FALLBACK_DEMO_DEFINITIONS.map((demo) => [String(demo.id), demo]));
+  return rawDemos
+    .map((demo) => {
+      const id = String(demo?.id || "").trim();
+      if (!id) return null;
+      const fallback = fallbackById.get(id);
+      const fallbackDefaults = fallback?.defaults || { demo_id: id };
+      const incomingDefaults = demo?.defaults && typeof demo.defaults === "object" ? demo.defaults : {};
+      return {
+        id,
+        name: String(demo?.name || fallback?.name || id),
+        defaults: { ...deepClone(fallbackDefaults), ...deepClone(incomingDefaults), demo_id: id },
+      };
+    })
+    .filter(Boolean);
+}
+
+function renderDemoSelectOptions(demos) {
+  if (!runNodes.demoSelect) return;
+  const selected = runNodes.demoSelect.value;
+  while (runNodes.demoSelect.firstChild) {
+    runNodes.demoSelect.removeChild(runNodes.demoSelect.firstChild);
+  }
+  demos.forEach((demo) => {
+    const option = document.createElement("option");
+    option.value = String(demo.id);
+    option.textContent = String(demo.name || demo.id);
+    runNodes.demoSelect.appendChild(option);
+  });
+  if (selected && demos.some((demo) => String(demo.id) === String(selected))) {
+    runNodes.demoSelect.value = selected;
+    return;
+  }
+  if (demos.length > 0) {
+    runNodes.demoSelect.value = String(demos[0].id);
+    populateRunControlsFromSpec(demos[0].defaults || {});
+  }
+}
+
+const LOGIC_GATE_DEMO_TO_GATE = {
+  logic_and: "and",
+  logic_or: "or",
+  logic_xor: "xor",
+  logic_nand: "nand",
+  logic_nor: "nor",
+  logic_xnor: "xnor",
+};
+
+const LOGIC_GATES = new Set(["and", "or", "xor", "nand", "nor", "xnor"]);
+const LOGIC_TRUTH_ROWS = [
+  [0, 0],
+  [0, 1],
+  [1, 0],
+  [1, 1],
+];
+
+function parseNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseInteger(value) {
+  const n = parseNumber(value);
+  return n === null ? null : Math.trunc(n);
+}
+
+function normalizeGateToken(value) {
+  const token = String(value || "")
+    .trim()
+    .toLowerCase();
+  return LOGIC_GATES.has(token) ? token : null;
+}
+
+function findLastRow(rows, predicate = null) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  for (let idx = rows.length - 1; idx >= 0; idx -= 1) {
+    const row = rows[idx];
+    if (!predicate || predicate(row)) return row;
+  }
+  return null;
+}
+
+function resolveDemoId() {
+  const fromConfig = String(dataState.runConfig?.demo_id || "").trim();
+  if (fromConfig) return fromConfig;
+  const fromSelect = String(runNodes.demoSelect?.value || "").trim();
+  if (fromSelect) return fromSelect;
+  return null;
+}
+
+function resolveLogicGateName() {
+  const preferred = [
+    latestValue(dataState.evalRows, "gate"),
+    latestValue(dataState.trialsRows, "train_gate"),
+    latestValue(dataState.trialsRows, "gate"),
+    latestValue(dataState.metricsRows, "gate"),
+    dataState.runFeatures?.logic_gate,
+    dataState.runConfig?.logic_gate,
+  ];
+  for (const candidate of preferred) {
+    const gate = normalizeGateToken(candidate);
+    if (gate) return gate;
+  }
+  const demoId = resolveDemoId();
+  if (demoId && LOGIC_GATE_DEMO_TO_GATE[demoId]) {
+    return LOGIC_GATE_DEMO_TO_GATE[demoId];
+  }
+  return null;
+}
+
+function isLogicCurriculumRun() {
+  const demoId = resolveDemoId();
+  if (demoId === "logic_curriculum") return true;
+  const configured = String(dataState.runConfig?.logic_curriculum_gates || "").trim();
+  return configured.length > 0;
+}
+
+function resolveDisplayedLogicGate() {
+  if (!isLogicCurriculumRun()) {
+    return resolveLogicGateName();
+  }
+  const lastEvalRow = findLastRow(dataState.evalRows, (row) => normalizeGateToken(row?.gate));
+  const evalGate = normalizeGateToken(lastEvalRow?.gate);
+  if (evalGate) return evalGate;
+  const lastTrialGate = findLastRow(
+    dataState.trialsRows,
+    (row) => normalizeGateToken(row?.train_gate || row?.gate)
+  );
+  return (
+    normalizeGateToken(lastTrialGate?.train_gate) ||
+    normalizeGateToken(lastTrialGate?.gate) ||
+    resolveLogicGateName()
+  );
+}
+
+function gateTargetBit(gate, x0, x1) {
+  const a = Number(x0) > 0 ? 1 : 0;
+  const b = Number(x1) > 0 ? 1 : 0;
+  switch (gate) {
+    case "and":
+      return a & b;
+    case "or":
+      return a | b;
+    case "xor":
+      return a ^ b;
+    case "nand":
+      return 1 - (a & b);
+    case "nor":
+      return 1 - (a | b);
+    case "xnor":
+      return 1 - (a ^ b);
+    default:
+      return null;
+  }
+}
+
+function logicPassCriterionText(gate) {
+  if (gate === "xor") {
+    return "Pass criterion: 1.0 for 500 evals or >=0.99 for 2000 evals.";
+  }
+  if (gate === "and" || gate === "or") {
+    return "Pass criterion: 1.0 for 200 evals or >=0.99 for 500 evals.";
+  }
+  return "Use eval accuracy and confusion to confirm stable truth-table behavior.";
+}
+
+function renderTaskPanel() {
+  if (!taskNodes.summary || !taskNodes.table || !taskNodes.takeaway || !taskNodes.title || !taskNodes.chip) {
+    return;
+  }
+  const curriculum = isLogicCurriculumRun();
+  const gate = resolveDisplayedLogicGate();
+  if (!gate) {
+    taskNodes.title.textContent = "Demo Task";
+    taskNodes.chip.textContent = "Run summary";
+    taskNodes.summary.textContent = "This run does not expose a logic-gate truth table.";
+    taskNodes.table.innerHTML = '<p class="task-empty">Truth-table rows appear for logic demos.</p>';
+    const train = latestValue(dataState.metricsRows, "train_accuracy");
+    const evalAcc = latestValue(dataState.metricsRows, "eval_accuracy");
+    taskNodes.takeaway.textContent = `Train=${train ?? "--"} | Eval=${evalAcc ?? "--"}`;
+    return;
+  }
+
+  const latestEvalRow = findLastRow(
+    dataState.evalRows,
+    (row) => normalizeGateToken(row?.gate) === gate
+  );
+  const latestTrialRow = findLastRow(
+    dataState.trialsRows,
+    (row) => normalizeGateToken(row?.train_gate || row?.gate) === gate
+  );
+  const currentPhase = parseInteger(latestEvalRow?.phase) ?? parseInteger(latestTrialRow?.phase);
+  const lastTrainGate =
+    normalizeGateToken(latestTrialRow?.train_gate) || normalizeGateToken(latestTrialRow?.gate);
+
+  taskNodes.title.textContent = `Logic Gate: ${gate.toUpperCase()}`;
+  taskNodes.chip.textContent = curriculum ? "Curriculum phase" : "Truth table";
+  if (curriculum && currentPhase !== null) {
+    taskNodes.chip.textContent = `Phase ${currentPhase}`;
+  }
+
+  const latestByCase = new Map();
+  const historyByCase = new Map();
+  const scopedTrials = (dataState.trialsRows || []).filter((row) => {
+    if (!curriculum) return true;
+    const rowGate = normalizeGateToken(row?.train_gate || row?.gate);
+    return rowGate === gate;
+  });
+  scopedTrials.forEach((row) => {
+    let caseIdx = parseInteger(row.case_idx);
+    if (caseIdx === null) {
+      const x0 = parseInteger(row.x0);
+      const x1 = parseInteger(row.x1);
+      if (x0 !== null && x1 !== null) {
+        caseIdx = x0 * 2 + x1;
+      }
+    }
+    if (caseIdx === null || caseIdx < 0 || caseIdx > 3) return;
+    latestByCase.set(caseIdx, row);
+    if (!historyByCase.has(caseIdx)) {
+      historyByCase.set(caseIdx, []);
+    }
+    historyByCase.get(caseIdx).push(row);
+  });
+
+  const bodyRows = LOGIC_TRUTH_ROWS.map(([x0, x1], idx) => {
+    const row = latestByCase.get(idx) || null;
+    const target = gateTargetBit(gate, x0, x1);
+    const pred = parseInteger(row?.pred);
+    const out0 = parseNumber(row?.out_spikes_0);
+    const out1 = parseNumber(row?.out_spikes_1);
+    const total = (out0 ?? 0) + (out1 ?? 0);
+    const instantConfidence =
+      total > 0
+        ? Math.min(1, Math.abs((out1 ?? 0) - (out0 ?? 0)) / total)
+        : pred !== null
+          ? 0
+          : null;
+    const history = historyByCase.get(idx) || [];
+    const recentHistory = history.slice(-24);
+    const recentCorrect = recentHistory
+      .map((item) => parseInteger(item.correct))
+      .filter((item) => item === 0 || item === 1);
+    const empiricalConfidence =
+      recentCorrect.length > 0
+        ? recentCorrect.reduce((acc, value) => acc + Number(value), 0) / recentCorrect.length
+        : null;
+    const confidence = empiricalConfidence ?? instantConfidence;
+    const correct = pred !== null && target !== null ? pred === target : null;
+    return {
+      x0,
+      x1,
+      target,
+      pred,
+      confidence,
+      empiricalConfidence,
+      correct,
+    };
+  });
+
+  const scopedEvalRows = (dataState.evalRows || []).filter((row) => {
+    if (!curriculum) return true;
+    return normalizeGateToken(row?.gate) === gate;
+  });
+  const latestEval =
+    parseNumber(latestValue(scopedEvalRows, "eval_accuracy")) ??
+    parseNumber(latestValue(dataState.metricsRows, "eval_accuracy"));
+  const latestTrain =
+    parseNumber(latestValue(scopedEvalRows, curriculum ? "sample_accuracy_phase_gate" : "sample_accuracy")) ??
+    parseNumber(latestValue(dataState.metricsRows, "train_accuracy")) ??
+    parseNumber(latestValue(scopedTrials, "trial_acc_rolling"));
+  const latestLoss = parseNumber(latestValue(dataState.metricsRows, "loss"));
+  const passedFlag =
+    parseInteger(latestValue(scopedEvalRows, "passed")) === 1 ||
+    parseInteger(latestValue(dataState.metricsRows, "passed")) === 1;
+  const solved = passedFlag || (latestEval !== null && latestEval >= 0.99);
+
+  const coveredCases = bodyRows.filter((row) => row.pred !== null).length;
+  const curriculumSuffix =
+    curriculum
+      ? ` | Phase gate ${gate.toUpperCase()}` +
+        (lastTrainGate ? ` | Last train gate ${lastTrainGate.toUpperCase()}` : "")
+      : "";
+  taskNodes.summary.textContent =
+    `Eval ${latestEval !== null ? latestEval.toFixed(3) : "--"} | ` +
+    `Train ${latestTrain !== null ? latestTrain.toFixed(3) : "--"} | ` +
+    `Loss ${latestLoss !== null ? latestLoss.toFixed(3) : "--"} | ` +
+    `${solved ? "SOLVED" : "IN PROGRESS"} (${coveredCases}/4 cases observed)` +
+    curriculumSuffix;
+
+  taskNodes.table.innerHTML = `
+    <table class="task-truth-table">
+      <thead>
+        <tr>
+          <th>Input</th>
+          <th>Target</th>
+          <th>Pred</th>
+          <th>Confidence</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${bodyRows
+          .map((row) => {
+            const predClass =
+              row.pred === null
+                ? "task-pred-missing"
+                : row.correct
+                  ? "task-pred-ok"
+                  : "task-pred-bad";
+            const predText = row.pred === null ? "--" : String(row.pred);
+            const confText = row.confidence === null ? "--" : `${(row.confidence * 100).toFixed(1)}%`;
+            return `
+              <tr>
+                <td>(${row.x0}, ${row.x1})</td>
+                <td>${row.target ?? "--"}</td>
+                <td class="${predClass}">${predText}</td>
+                <td class="task-conf">${confText}</td>
+              </tr>
+            `;
+          })
+          .join("")}
+      </tbody>
+    </table>
+  `;
+
+  taskNodes.takeaway.textContent =
+    "Confidence is recent per-case correctness (fallback: WTA margin). " +
+    "Train is sampled trial accuracy; Eval is full 4-case truth-table accuracy." +
+    (curriculum ? " Curriculum eval can oscillate at phase switches and replay trials." : " ") +
+    logicPassCriterionText(gate);
+}
 
 const NEURON_SHOW_ALL_CAP = 512;
 const NEURON_EDGE_SAMPLE_CAP = 600;
@@ -953,9 +1392,7 @@ function distanceForEdge(posById, edge) {
 }
 
 function buildRaster(rows, cols) {
-  const data = Array.from({ length: rows }, () =>
-    Array.from({ length: cols }, () => (Math.random() < 0.05 ? 1 : 0))
-  );
+  const data = Array.from({ length: rows }, () => Array.from({ length: cols }, () => 0));
   return { rows, cols, data };
 }
 
@@ -992,9 +1429,8 @@ function updateMetrics() {
   metricNodes.activeEdges.textContent = network.edges.length.toString();
 
   const spikeRateValue = latestValue(dataState.metricsRows, "spike_fraction_total");
-  metricNodes.spikeRate.textContent = spikeRateValue
-    ? `${(Number(spikeRateValue) * 100).toFixed(1)}%`
-    : `${(Math.random() * 60 + 20).toFixed(1)} Hz`;
+  metricNodes.spikeRate.textContent =
+    spikeRateValue !== null ? `${(Number(spikeRateValue) * 100).toFixed(1)}%` : "--";
 
   const learningDisabled = isLearningDisabled(dataState.metricsRows);
   const stepValue =
@@ -1010,28 +1446,34 @@ function updateMetrics() {
         : `Step: ${stepNumber}`
       : "Step: --";
 
+  const weightMean =
+    latestValue(dataState.synapseRows, "weights_mean") ??
+    latestValue(dataState.trialsRows, "weights_mean");
+  const avgSpike =
+    latestValue(dataState.metricsRows, "spike_fraction_total") ??
+    latestValue(dataState.trialsRows, "hidden_mean_spikes");
+  const activeNeurons =
+    latestValue(dataState.neuronRows, "active_neurons") ??
+    latestValue(dataState.trialsRows, "hidden_mean_spikes");
+
   const metrics = [
     [
       "Current Accuracy",
       learningDisabled
         ? "Learning disabled"
-        : latestValue(dataState.metricsRows, "train_accuracy") || "0.0%",
+        : latestValue(dataState.metricsRows, "train_accuracy") ?? latestValue(dataState.evalRows, "sample_accuracy") ?? "--",
     ],
     [
       "Weight Mean",
-      latestValue(dataState.synapseRows, "weights_mean")
-        ? `${latestValue(dataState.synapseRows, "weights_mean").toFixed(3)}`
-        : `${(Math.random() * 0.6 + 0.2).toFixed(3)} +/- ${(Math.random() * 0.3).toFixed(3)}`,
+      weightMean !== null ? `${Number(weightMean).toFixed(3)}` : "--",
     ],
     [
       "Avg Spike Rate",
-      latestValue(dataState.metricsRows, "spike_fraction_total")
-        ? `${(Number(latestValue(dataState.metricsRows, "spike_fraction_total")) * 100).toFixed(1)}%`
-        : `${(Math.random() * 120 + 60).toFixed(1)} Hz`,
+      avgSpike !== null ? `${(Number(avgSpike) * 100).toFixed(1)}%` : "--",
     ],
     [
       "Active Neurons",
-      latestValue(dataState.neuronRows, "active_neurons") || `${Math.floor(Math.random() * 12) + 28}/45`,
+      activeNeurons !== null ? String(activeNeurons) : "--",
     ],
     [
       "Progress",
@@ -1059,11 +1501,6 @@ function updateRaster() {
       raster = nextRaster;
       return;
     }
-  }
-  for (let r = 0; r < raster.rows; r += 1) {
-    const row = raster.data[r];
-    row.shift();
-    row.push(Math.random() < 0.08 + r / (raster.rows * 50) ? 1 : 0);
   }
 }
 
@@ -1356,6 +1793,16 @@ function drawRaster() {
     drawSpikeRasterFromEvents(dataState.spikesRows);
     return;
   }
+  if (!dataState.neuronRows || dataState.neuronRows.length === 0) {
+    const ctxUnavailable = setupCanvas(canvases.raster);
+    if (!ctxUnavailable) return;
+    const rect = canvases.raster.getBoundingClientRect();
+    ctxUnavailable.fillStyle = theme.background;
+    ctxUnavailable.fillRect(0, 0, rect.width, rect.height);
+    ctxUnavailable.fillStyle = theme.muted;
+    ctxUnavailable.fillText("Spike events unavailable for this run.", 12, 20);
+    return;
+  }
   const ctx = setupCanvas(canvases.raster);
   if (!ctx) return;
   const { width, height } = canvases.raster.getBoundingClientRect();
@@ -1382,12 +1829,18 @@ function drawHeatmap(canvas, rows, cols, values) {
   ctx.fillStyle = theme.background;
   ctx.fillRect(0, 0, width, height);
 
+  if (!values || values.length === 0) {
+    ctx.fillStyle = theme.muted;
+    ctx.fillText("Weights unavailable for this run.", 12, 20);
+    return;
+  }
+
   const cellW = width / cols;
   const cellH = height / rows;
   let idx = 0;
   for (let r = 0; r < rows; r += 1) {
     for (let c = 0; c < cols; c += 1) {
-      const value = values ? values[idx % values.length] : Math.random();
+      const value = values[idx % values.length];
       const color = heatColor(value);
       ctx.fillStyle = color;
       ctx.fillRect(c * cellW, r * cellH, cellW - 1, cellH - 1);
@@ -1477,7 +1930,12 @@ function drawHistogram(canvas, values) {
   ctx.fillRect(0, 0, width, height);
 
   const bins = 18;
-  const raw = values && values.length ? values : Array.from({ length: bins }, () => Math.random());
+  if (!values || values.length === 0) {
+    ctx.fillStyle = theme.muted;
+    ctx.fillText("Weight distribution unavailable.", 12, 20);
+    return;
+  }
+  const raw = values;
   const bucket = Array.from({ length: bins }, () => 0);
   raw.forEach((value) => {
     const idx = Math.min(bins - 1, Math.floor(((value + 1) / 2) * bins));
@@ -1503,6 +1961,18 @@ function drawStateSpace() {
   ctx.fillStyle = theme.background;
   ctx.fillRect(0, 0, width, height);
 
+  if (!dataState.topology) {
+    ctx.fillStyle = theme.muted;
+    ctx.fillText("State projection unavailable for this run.", 12, 20);
+    return;
+  }
+  const nodes = network?.nodes || [];
+  if (!nodes.length) {
+    ctx.fillStyle = theme.muted;
+    ctx.fillText("State projection unavailable for this run.", 12, 20);
+    return;
+  }
+
   ctx.strokeStyle = theme.grid;
   for (let i = 1; i < 4; i += 1) {
     ctx.beginPath();
@@ -1515,15 +1985,22 @@ function drawStateSpace() {
     ctx.stroke();
   }
 
-  for (let i = 0; i < 80; i += 1) {
-    const x = Math.random() * width;
-    const y = Math.random() * height;
-    ctx.fillStyle = i % 3 === 0 ? theme.output : i % 2 === 0 ? theme.hidden : theme.input;
-    ctx.globalAlpha = 0.6;
+  nodes.forEach((node) => {
+    const x = Number(node.x ?? 0.5) * width;
+    const y = Number(node.y ?? 0.5) * height;
+    const role = inferRoleFromPopName(node.pop || "");
+    if (role === "input" || role === "input_relay") {
+      ctx.fillStyle = theme.input;
+    } else if (role === "output") {
+      ctx.fillStyle = theme.output;
+    } else {
+      ctx.fillStyle = theme.hidden;
+    }
+    ctx.globalAlpha = 0.75;
     ctx.beginPath();
-    ctx.arc(x, y, 2.2, 0, Math.PI * 2);
+    ctx.arc(x, y, 2.4, 0, Math.PI * 2);
     ctx.fill();
-  }
+  });
   ctx.globalAlpha = 1;
 }
 
@@ -1533,6 +2010,12 @@ async function refreshData() {
       return Promise.resolve({ data: null, error: null, url: "(disabled)", disabled: true });
     }
     return loadCsv(path);
+  };
+  const loadOptionalCsvMaybe = (path) => {
+    if (!path) {
+      return Promise.resolve({ data: null, error: null, url: "(disabled)", disabled: true });
+    }
+    return loadCsv(path, { optional: true });
   };
   const loadJsonMaybe = (path) => {
     if (!path) {
@@ -1552,6 +2035,9 @@ async function refreshData() {
     spikesRes,
     metricsRes,
     weightsRes,
+    trialsRes,
+    evalRes,
+    confusionRes,
     topologyRes,
     runConfigRes,
     runFeaturesRes,
@@ -1562,7 +2048,10 @@ async function refreshData() {
     loadCsvMaybe(dataConfig.spikesCsv),
     loadCsvMaybe(dataConfig.metricsCsv),
     loadCsvMaybe(dataConfig.weightsCsv),
-    loadJsonMaybe(dataConfig.topologyJson),
+    loadOptionalCsvMaybe(dataConfig.trialsCsv),
+    loadOptionalCsvMaybe(dataConfig.evalCsv),
+    loadOptionalCsvMaybe(dataConfig.confusionCsv),
+    loadOptionalJsonMaybe(dataConfig.topologyJson),
     loadOptionalJsonMaybe(dataConfig.runConfigJson),
     loadOptionalJsonMaybe(dataConfig.runFeaturesJson),
     loadOptionalJsonMaybe(dataConfig.runStatusJson),
@@ -1573,6 +2062,9 @@ async function refreshData() {
   const spikesRows = spikesRes.data;
   const metricsRows = metricsRes.data;
   const weightsRows = weightsRes.data;
+  const trialsRows = trialsRes.data;
+  const evalRows = evalRes.data;
+  const confusionRows = confusionRes.data;
   const topology = topologyRes.data;
 
   dataState.neuronRows = neuronRows;
@@ -1580,13 +2072,26 @@ async function refreshData() {
   dataState.spikesRows = spikesRows;
   dataState.metricsRows = metricsRows;
   dataState.weightsRows = weightsRows;
+  dataState.trialsRows = trialsRows;
+  dataState.evalRows = evalRows;
+  dataState.confusionRows = confusionRows;
   dataState.weightsIndex = weightsRows ? buildWeightsIndex(weightsRows) : null;
   dataState.topology = topology;
   dataState.runConfig = runConfigRes.data;
   dataState.runFeatures = runFeaturesRes.data;
   dataState.runStatus = runStatusRes.data || dataState.runStatus;
   dataState.totalSteps = getTotalSteps();
-  dataState.live = Boolean(neuronRows || synapseRows || spikesRows || metricsRows || weightsRows || topology);
+  dataState.live = Boolean(
+    neuronRows ||
+      synapseRows ||
+      spikesRows ||
+      metricsRows ||
+      weightsRows ||
+      trialsRows ||
+      evalRows ||
+      confusionRows ||
+      topology
+  );
   dataState.lastUpdated = new Date();
 
   updateDataStatus([
@@ -1595,6 +2100,9 @@ async function refreshData() {
     spikesRes,
     metricsRes,
     weightsRes,
+    trialsRes,
+    evalRes,
+    confusionRes,
     topologyRes,
     runConfigRes,
     runFeaturesRes,
@@ -1609,6 +2117,14 @@ async function refreshData() {
     }
   }
   renderFeatureChecklist(dataState.runFeatures);
+  renderTaskPanel();
+  if (
+    !runState.apiAvailable &&
+    runStatusRes.data &&
+    typeof runStatusRes.data === "object"
+  ) {
+    setRunStateText(runStatusRes.data);
+  }
 
   if (topology) {
     if (topology.mode === "population") {
@@ -1646,15 +2162,21 @@ async function refreshData() {
   refreshWeightSelectors();
 }
 
-async function loadCsv(path) {
+async function loadCsv(path, { optional = false } = {}) {
   try {
     const response = await fetch(`${path}?ts=${Date.now()}`);
     if (!response.ok) {
+      if (optional && response.status === 404) {
+        return { data: null, error: null, url: path, disabled: true };
+      }
       return { data: null, error: `${response.status} ${response.statusText}`, url: path };
     }
     const text = await response.text();
     return { data: parseCsv(text), error: null, url: path };
   } catch (error) {
+    if (optional) {
+      return { data: null, error: null, url: path, disabled: true };
+    }
     return { data: null, error: String(error), url: path };
   }
 }
@@ -2127,7 +2649,10 @@ function drawAccuracyChart() {
   ctx.fillStyle = theme.background;
   ctx.fillRect(0, 0, width, height);
 
-  const rows = dataState.metricsRows;
+  const rows =
+    dataState.metricsRows && dataState.metricsRows.length
+      ? dataState.metricsRows
+      : dataState.evalRows;
   if (!rows || rows.length === 0) {
     ctx.fillStyle = theme.muted;
     ctx.fillText("Accuracy unavailable", 12, 20);
@@ -2149,8 +2674,24 @@ function drawAccuracyChart() {
   }
 
   const smooth = Math.max(1, Number(uiControls.smoothWindow?.value || 1));
-  const train = rows.map((row) => Number(row.train_accuracy || row.trainAcc || ""));
-  const evalAcc = rows.map((row) => Number(row.eval_accuracy || row.evalAcc || ""));
+  const demoId = resolveDemoId();
+  const isCurriculum = demoId === "logic_curriculum";
+  const train = rows.map((row) =>
+    Number(
+      (isCurriculum ? row.sample_accuracy_global : null) ??
+        row.train_accuracy ??
+        row.trainAcc ??
+        ""
+    )
+  );
+  const evalAcc = rows.map((row) =>
+    Number(
+      (isCurriculum ? row.sample_accuracy_global : null) ??
+        row.eval_accuracy ??
+        row.evalAcc ??
+        ""
+    )
+  );
   const fallback = rows.map((row) => Number(row.spike_fraction_total || 0));
 
   const trainSeries = train.some((v) => !Number.isNaN(v)) ? smoothSeries(train, smooth) : fallback;
@@ -2163,13 +2704,25 @@ function drawAccuracyChart() {
 
   const last = rows[rows.length - 1];
   if (metricNodes.trainAccLatest) {
-    metricNodes.trainAccLatest.textContent = last.train_accuracy || "--";
+    const trainLatest = parseNumber(
+      (isCurriculum ? last.sample_accuracy_global : null) ??
+        last.train_accuracy ??
+        last.trainAcc ??
+        last.sample_accuracy
+    );
+    metricNodes.trainAccLatest.textContent = trainLatest !== null ? trainLatest.toFixed(4) : "--";
   }
   if (metricNodes.evalAccLatest) {
-    metricNodes.evalAccLatest.textContent = last.eval_accuracy || "--";
+    const evalLatest = parseNumber(
+      (isCurriculum ? last.sample_accuracy_global : null) ??
+        last.eval_accuracy ??
+        last.evalAcc
+    );
+    metricNodes.evalAccLatest.textContent = evalLatest !== null ? evalLatest.toFixed(4) : "--";
   }
   if (metricNodes.lossLatest) {
-    metricNodes.lossLatest.textContent = last.loss || "--";
+    const lossLatest = parseNumber(last.loss);
+    metricNodes.lossLatest.textContent = lossLatest !== null ? lossLatest.toFixed(4) : "--";
   }
 }
 
@@ -2294,12 +2847,26 @@ function applyRunDirectory(runPath, { updateUrl = false } = {}) {
   dataConfig.spikesCsv = `${normalized}/spikes.csv`;
   dataConfig.metricsCsv = `${normalized}/metrics.csv`;
   dataConfig.weightsCsv = `${normalized}/weights.csv`;
+  dataConfig.trialsCsv = `${normalized}/trials.csv`;
+  dataConfig.evalCsv = `${normalized}/eval.csv`;
+  dataConfig.confusionCsv = `${normalized}/confusion.csv`;
   dataConfig.runConfigJson = `${normalized}/run_config.json`;
   dataConfig.runFeaturesJson = `${normalized}/run_features.json`;
   dataConfig.runStatusJson = `${normalized}/run_status.json`;
   updateDataLink();
   if (updateUrl) {
     const url = new URL(window.location.href);
+    [
+      "topology",
+      "neuron",
+      "synapse",
+      "spikes",
+      "metrics",
+      "weights",
+      "trials",
+      "eval",
+      "confusion",
+    ].forEach((key) => url.searchParams.delete(key));
     url.searchParams.set("run", normalized);
     window.history.replaceState({}, "", url.toString());
   }
@@ -2316,7 +2883,7 @@ function setRunStateText(status) {
 }
 
 function setRunControlsEnabled(enabled) {
-  const controls = [
+  const selectionControls = [
     runNodes.demoSelect,
     runNodes.stepsInput,
     runNodes.deviceSelect,
@@ -2324,11 +2891,18 @@ function setRunControlsEnabled(enabled) {
     runNodes.ringStrategySelect,
     runNodes.learningToggle,
     runNodes.modulatorToggle,
+  ];
+  selectionControls.forEach((control) => {
+    if (control) control.disabled = false;
+  });
+
+  const actionControls = [
     runNodes.startButton,
     runNodes.stopButton,
   ];
-  controls.forEach((control) => {
-    if (control) control.disabled = !enabled;
+  actionControls.forEach((control) => {
+    if (!control) return;
+    control.disabled = !enabled;
   });
 }
 
@@ -2421,20 +2995,37 @@ function buildRunSpecFromControls() {
 }
 
 async function apiJson(path, options) {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timeoutId = controller
+    ? setTimeout(() => {
+        controller.abort();
+      }, 2500)
+    : null;
   try {
-    const response = await fetch(path, options);
+    const response = await fetch(path, {
+      ...(options || {}),
+      signal: controller ? controller.signal : undefined,
+      cache: "no-store",
+    });
     if (!response.ok) {
       return null;
     }
     return await response.json();
   } catch {
     return null;
+  } finally {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
   }
 }
 
 async function refreshDashboardApiBootstrap() {
   if (!dataConfig.useApi) {
-    setRunStateText({ state: "query-run" });
+    runState.demos = fallbackDemos();
+    renderDemoSelectOptions(runState.demos);
+    runState.apiAvailable = false;
+    setRunStateText({ state: "api-disabled" });
     setRunControlsEnabled(false);
     return;
   }
@@ -2442,25 +3033,19 @@ async function refreshDashboardApiBootstrap() {
   const statusPayload = await apiJson("/api/run/status");
   if (!demosPayload || !Array.isArray(demosPayload.demos)) {
     runState.apiAvailable = false;
+    runState.demos = fallbackDemos();
+    renderDemoSelectOptions(runState.demos);
     setRunStateText({ state: "api-unavailable" });
     setRunControlsEnabled(false);
     return;
   }
   runState.apiAvailable = true;
   setRunControlsEnabled(true);
-  runState.demos = demosPayload.demos;
-  if (runNodes.demoSelect) {
-    const selected = runNodes.demoSelect.value;
-    runNodes.demoSelect.innerHTML = runState.demos
-      .map((demo) => `<option value="${demo.id}">${demo.name || demo.id}</option>`)
-      .join("");
-    if (selected && runState.demos.some((demo) => demo.id === selected)) {
-      runNodes.demoSelect.value = selected;
-    } else if (runState.demos.length > 0) {
-      runNodes.demoSelect.value = runState.demos[0].id;
-      populateRunControlsFromSpec(runState.demos[0].defaults || {});
-    }
+  runState.demos = normalizeDemoDefinitions(demosPayload.demos);
+  if (runState.demos.length === 0) {
+    runState.demos = fallbackDemos();
   }
+  renderDemoSelectOptions(runState.demos);
   if (statusPayload && typeof statusPayload === "object") {
     runState.status = statusPayload;
     dataState.runStatus = statusPayload;
@@ -2469,13 +3054,18 @@ async function refreshDashboardApiBootstrap() {
     if (!queryRun && statusPayload.run_dir) {
       applyRunDirectory(statusPayload.run_dir, { updateUrl: false });
     }
+  } else {
+    setRunStateText({ state: "api-ready" });
   }
 }
 
 async function refreshDashboardRunStatus() {
   if (!runState.apiAvailable) return;
   const statusPayload = await apiJson("/api/run/status");
-  if (!statusPayload) return;
+  if (!statusPayload) {
+    setRunStateText({ state: "api-ready" });
+    return;
+  }
   runState.status = statusPayload;
   dataState.runStatus = statusPayload;
   setRunStateText(statusPayload);
@@ -2486,7 +3076,10 @@ async function refreshDashboardRunStatus() {
 }
 
 async function onStartRunClick() {
-  if (!runState.apiAvailable) return;
+  if (!runState.apiAvailable) {
+    setRunStateText({ state: dataConfig.useApi ? "api-unavailable" : "api-disabled" });
+    return;
+  }
   const spec = buildRunSpecFromControls();
   const payload = await apiJson("/api/run", {
     method: "POST",
@@ -2505,7 +3098,10 @@ async function onStartRunClick() {
 }
 
 async function onStopRunClick() {
-  if (!runState.apiAvailable) return;
+  if (!runState.apiAvailable) {
+    setRunStateText({ state: dataConfig.useApi ? "api-unavailable" : "api-disabled" });
+    return;
+  }
   await apiJson("/api/run/stop", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2570,7 +3166,36 @@ function extractWeightSamples() {
   return edges.map((edge) => edge.w);
 }
 
+function computeLogicSpikeRatesFromTrials() {
+  if (!dataState.trialsRows || dataState.trialsRows.length === 0) return null;
+  const windowTrials = Math.max(20, Number(uiControls.rasterWindow?.value || 200));
+  const trials = dataState.trialsRows.slice(-windowTrials);
+  if (trials.length === 0) return null;
+
+  let out0Total = 0;
+  let out1Total = 0;
+  let hiddenRateTotal = 0;
+  trials.forEach((row) => {
+    out0Total += Number(row.out_spikes_0 || 0);
+    out1Total += Number(row.out_spikes_1 || 0);
+    hiddenRateTotal += Number(row.hidden_mean_spikes || 0);
+  });
+
+  const simSteps = Math.max(
+    1,
+    Number(dataState.runConfig?.logic_sim_steps_per_trial || dataState.runConfig?.sim_steps_per_trial || 1)
+  );
+  const denom = trials.length * simSteps;
+  return {
+    labels: ["output_0", "output_1", "hidden_mean"],
+    rates: [out0Total / denom, out1Total / denom, hiddenRateTotal / trials.length],
+  };
+}
+
 function computePerPopSpikeRates() {
+  if ((!dataState.spikesRows || dataState.spikesRows.length === 0) && dataState.trialsRows?.length) {
+    return computeLogicSpikeRatesFromTrials();
+  }
   if (!dataState.spikesRows || dataState.spikesRows.length === 0) return null;
   const lastRow = dataState.spikesRows[dataState.spikesRows.length - 1];
   const maxStep = Number(lastRow.step || 0);
@@ -2631,6 +3256,16 @@ function tick(now) {
   drawStateSpace();
 
   requestAnimationFrame(tick);
+}
+
+try {
+  runState.demos = fallbackDemos();
+  renderDemoSelectOptions(runState.demos);
+  setRunStateText({ state: "initializing" });
+  renderTaskPanel();
+} catch (error) {
+  console.error("Failed to pre-populate demo list", error);
+  setRunStateText({ state: "ui-error" });
 }
 
 window.addEventListener("resize", resizeAll);
@@ -2732,4 +3367,8 @@ async function bootstrapDashboard() {
   requestAnimationFrame(tick);
 }
 
-bootstrapDashboard();
+bootstrapDashboard().catch((error) => {
+  console.error("Dashboard bootstrap failed", error);
+  setRunStateText({ state: "ui-error" });
+  setRunControlsEnabled(false);
+});

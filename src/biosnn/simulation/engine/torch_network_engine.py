@@ -25,6 +25,14 @@ from biosnn.contracts.synapses import (
 )
 from biosnn.contracts.tensor import Tensor
 from biosnn.core.torch_utils import require_torch, resolve_device_dtype
+from biosnn.plasticity.structural import (
+    NeurogenesisConfig,
+    NeurogenesisDecision,
+    NeurogenesisManager,
+    ProjectionPruneDecision,
+    StructuralPlasticityManager,
+    StructuralPruningConfig,
+)
 from biosnn.simulation.engine.subsystems import (
     BufferSubsystem,
     CompiledNetworkPlan,
@@ -167,6 +175,11 @@ class TorchNetworkEngine(ISimulationEngine):
         self._compiled_mod_by_pop: dict[str, dict[ModulatorKind, Tensor]] = {}
         self._compiled_edge_mods_by_proj: dict[str, dict[ModulatorKind, Tensor]] = {}
         self._homeostasis_scalars: dict[str, Tensor] = {}
+        self._structural_scalars: dict[str, Scalar] = {}
+        self._structural_manager: StructuralPlasticityManager | None = None
+        self._neurogenesis_scalars: dict[str, Scalar] = {}
+        self._neurogenesis_manager: NeurogenesisManager | None = None
+        self._max_ring_mib: float | None = 2048.0
         self._last_event: StepEvent | None = None
 
         self.last_projection_drive: dict[str, Mapping[Compartment, Tensor]] = {}
@@ -215,6 +228,39 @@ class TorchNetworkEngine(ISimulationEngine):
             seed=config.seed,
             rng=None,
         )
+        self._max_ring_mib = config.max_ring_mib
+        self._structural_scalars = {}
+        self._neurogenesis_scalars = {}
+        if bool(config.enable_pruning):
+            self._structural_manager = StructuralPlasticityManager(
+                StructuralPruningConfig(
+                    enabled=True,
+                    prune_interval_steps=max(1, int(config.prune_interval_steps)),
+                    usage_alpha=float(config.usage_alpha),
+                    w_min=float(config.w_min),
+                    usage_min=float(config.usage_min),
+                    k_min_out=max(0, int(config.k_min_out)),
+                    k_min_in=max(0, int(config.k_min_in)),
+                    max_prune_fraction_per_interval=float(config.max_prune_fraction_per_interval),
+                    verbose=bool(config.pruning_verbose),
+                )
+            )
+        else:
+            self._structural_manager = None
+        if bool(config.enable_neurogenesis):
+            self._neurogenesis_manager = NeurogenesisManager(
+                NeurogenesisConfig(
+                    enabled=True,
+                    growth_interval_steps=max(1, int(config.growth_interval_steps)),
+                    add_neurons_per_event=max(1, int(config.add_neurons_per_event)),
+                    newborn_plasticity_multiplier=float(config.newborn_plasticity_multiplier),
+                    newborn_duration_steps=max(1, int(config.newborn_duration_steps)),
+                    max_total_neurons=max(1, int(config.max_total_neurons)),
+                    verbose=bool(config.neurogenesis_verbose),
+                )
+            )
+        else:
+            self._neurogenesis_manager = None
 
         if config.seed is not None:
             torch.manual_seed(config.seed)
@@ -368,6 +414,16 @@ class TorchNetworkEngine(ISimulationEngine):
             fast_mode=self._fast_mode,
             compiled_mode=self._compiled_mode,
         )
+        if self._structural_manager is not None:
+            self._structural_manager.reset(
+                self._proj_specs,
+                device=self._device,
+                dtype=self._dtype,
+            )
+            self._structural_scalars = dict(self._structural_manager.scalars())
+        if self._neurogenesis_manager is not None:
+            self._neurogenesis_manager.reset(self._pop_specs)
+            self._neurogenesis_scalars = dict(self._neurogenesis_manager.scalars())
 
     def _build_projection_plans(self) -> list[_CompiledProjectionPlan]:
         plans: list[_CompiledProjectionPlan] = []
@@ -588,6 +644,7 @@ class TorchNetworkEngine(ISimulationEngine):
             self._homeostasis_scalars = {}
 
         self.last_d_weights = {}
+        active_edges_by_proj: dict[str, Tensor | None] = {}
         for runtime in self._proj_runtime_list:
             proj = runtime.spec
             if runtime.learning is None:
@@ -616,6 +673,11 @@ class TorchNetworkEngine(ISimulationEngine):
                 t=self._t,
                 ctx=self._ctx,
             )
+            res = self._apply_newborn_plasticity_scale(
+                proj=proj,
+                result=res,
+                active_edges=active_edges,
+            )
             runtime.state.learning_state = new_state
             self._learning_subsystem.apply_learning_update(
                 weights=weights,
@@ -627,6 +689,9 @@ class TorchNetworkEngine(ISimulationEngine):
             )
             self._learning_subsystem.apply_weight_clamp(weights, proj)
             self.last_d_weights[proj.name] = res.d_weights
+            active_edges_by_proj[proj.name] = active_edges
+
+        self._update_structural_plasticity(active_edges_by_proj=active_edges_by_proj)
 
         if no_monitors:
             event = StepEvent(t=self._t, dt=self._dt)
@@ -635,7 +700,12 @@ class TorchNetworkEngine(ISimulationEngine):
             step_now = self._step
             self._t += self._dt
             self._step += 1
-            return {"step": float(step_now), "t": float(t_now)}
+            return {
+                "step": float(step_now),
+                "t": float(t_now),
+                **self._structural_scalars,
+                **self._neurogenesis_scalars,
+            }
 
         event_tensors: dict[str, Tensor] = {}
         if self._fast_mode:
@@ -702,6 +772,10 @@ class TorchNetworkEngine(ISimulationEngine):
             scalars[f"spike_count/{spec.name}"] = self._pop_states[spec.name].spikes.sum()
         if self._homeostasis_scalars:
             scalars.update(self._homeostasis_scalars)
+        if self._structural_scalars:
+            scalars.update(self._structural_scalars)
+        if self._neurogenesis_scalars:
+            scalars.update(self._neurogenesis_scalars)
 
         event = StepEvent(
             t=self._t,
@@ -858,6 +932,7 @@ class TorchNetworkEngine(ISimulationEngine):
             self._homeostasis_scalars = {}
 
         self.last_d_weights = {}
+        active_edges_by_proj: dict[str, Tensor | None] = {}
         for runtime in self._proj_runtime_list:
             proj = runtime.spec
             if runtime.learning is None:
@@ -886,6 +961,11 @@ class TorchNetworkEngine(ISimulationEngine):
                 t=self._t,
                 ctx=self._ctx,
             )
+            res = self._apply_newborn_plasticity_scale(
+                proj=proj,
+                result=res,
+                active_edges=active_edges,
+            )
             runtime.state.learning_state = new_state
             self._learning_subsystem.apply_learning_update(
                 weights=weights,
@@ -897,6 +977,9 @@ class TorchNetworkEngine(ISimulationEngine):
             )
             self._learning_subsystem.apply_weight_clamp(weights, proj)
             self.last_d_weights[proj.name] = res.d_weights
+            active_edges_by_proj[proj.name] = active_edges
+
+        self._update_structural_plasticity(active_edges_by_proj=active_edges_by_proj)
 
         if no_monitors:
             event = StepEvent(t=self._t, dt=self._dt)
@@ -905,7 +988,12 @@ class TorchNetworkEngine(ISimulationEngine):
             step_now = self._step
             self._t += self._dt
             self._step += 1
-            return {"step": float(step_now), "t": float(t_now)}
+            return {
+                "step": float(step_now),
+                "t": float(t_now),
+                **self._structural_scalars,
+                **self._neurogenesis_scalars,
+            }
 
         spikes_global = self._spikes_global
         spike_count = spikes_global.sum() if spikes_global.numel() else spikes_global.new_zeros(())
@@ -922,6 +1010,10 @@ class TorchNetworkEngine(ISimulationEngine):
             scalars[f"spike_count/{spec.name}"] = self._pop_states[spec.name].spikes.sum()
         if self._homeostasis_scalars:
             scalars.update(self._homeostasis_scalars)
+        if self._structural_scalars:
+            scalars.update(self._structural_scalars)
+        if self._neurogenesis_scalars:
+            scalars.update(self._neurogenesis_scalars)
 
         event = StepEvent(
             t=self._t,
@@ -955,6 +1047,363 @@ class TorchNetworkEngine(ISimulationEngine):
             if isinstance(releases, list):
                 return releases
         return []
+
+    def _update_structural_plasticity(
+        self,
+        *,
+        active_edges_by_proj: Mapping[str, Tensor | None],
+    ) -> None:
+        prune_manager = self._structural_manager
+        neuro_manager = self._neurogenesis_manager
+        if prune_manager is None:
+            self._structural_scalars = {}
+        if neuro_manager is None:
+            self._neurogenesis_scalars = {}
+        if prune_manager is None and neuro_manager is None:
+            return
+
+        if prune_manager is not None:
+            for runtime in self._proj_runtime_list:
+                prune_manager.record_projection_activity(
+                    projection=runtime.spec,
+                    pre_spikes=runtime.pre_state.spikes,
+                    d_weights=self.last_d_weights.get(runtime.spec.name),
+                    active_edges=active_edges_by_proj.get(runtime.spec.name),
+                )
+
+            weights_by_projection: dict[str, Tensor | None] = {}
+            spec_by_name = {spec.name: spec for spec in self._proj_specs}
+            for proj_name, state in self._proj_states.items():
+                weights = getattr(state.state, "weights", None)
+                if weights is None:
+                    spec = spec_by_name.get(proj_name)
+                    weights_by_projection[proj_name] = (
+                        None if spec is None else spec.topology.weights
+                    )
+                else:
+                    weights_by_projection[proj_name] = cast(Tensor, weights)
+
+            decisions = prune_manager.maybe_prune(
+                step_idx=self._step + 1,
+                projections=self._proj_specs,
+                weights_by_projection=weights_by_projection,
+            )
+            if decisions:
+                self._apply_prune_decisions(decisions)
+            self._structural_scalars = dict(prune_manager.scalars())
+
+        if neuro_manager is not None:
+            spikes_by_pop = {
+                spec.name: self._pop_states[spec.name].spikes for spec in self._pop_specs
+            }
+            neuro_manager.record_step(spikes_by_pop=spikes_by_pop)
+            decision = neuro_manager.maybe_grow(
+                step_idx=self._step + 1,
+                populations=self._pop_specs,
+                projections=self._proj_specs,
+            )
+            if decision is not None:
+                self._apply_neurogenesis_decision(decision)
+            self._neurogenesis_scalars = dict(neuro_manager.scalars())
+
+    def _apply_prune_decisions(
+        self,
+        decisions: Sequence[ProjectionPruneDecision],
+    ) -> None:
+        if not decisions:
+            return
+        index_by_name = {spec.name: idx for idx, spec in enumerate(self._proj_specs)}
+        changed = False
+
+        for decision in decisions:
+            spec_idx = index_by_name.get(decision.projection_name)
+            if spec_idx is None:
+                continue
+            old_spec = self._proj_specs[spec_idx]
+            pruned_spec = replace(old_spec, topology=decision.topology)
+            compiled_spec = self._compile_projection_spec(pruned_spec)
+            edge_count = self._topology_subsystem.edge_count(compiled_spec.topology)
+
+            syn_state = compiled_spec.synapse.init_state(edge_count, ctx=self._ctx)
+            topology = compiled_spec.topology
+            if topology.weights is None and getattr(syn_state, "bind_weights_to_topology", False):
+                topology = replace(topology, weights=syn_state.weights)
+                compiled_spec = replace(compiled_spec, topology=topology)
+            self._topology_subsystem.copy_topology_weights(syn_state, topology.weights)
+
+            learn_state = None
+            if compiled_spec.learning is not None:
+                learn_state = compiled_spec.learning.init_state(edge_count, ctx=self._ctx)
+
+            self._proj_specs[spec_idx] = compiled_spec
+            self._proj_states[compiled_spec.name] = _ProjectionState(
+                state=syn_state,
+                learning_state=learn_state,
+            )
+            self._learning_scratch.pop(compiled_spec.name, None)
+            changed = True
+
+        if changed:
+            self._refresh_runtime_after_structure_change(population_shape_changed=False)
+            if self._neurogenesis_manager is not None:
+                self._neurogenesis_manager.on_structure_changed(self._pop_specs)
+                self._neurogenesis_scalars = dict(self._neurogenesis_manager.scalars())
+
+    def _apply_neurogenesis_decision(self, decision: NeurogenesisDecision) -> None:
+        if decision.added_neurons <= 0:
+            return
+        torch = require_torch()
+        old_pop_states = dict(self._pop_states)
+        self._pop_specs = list(decision.populations)
+        self._proj_specs = list(decision.projections)
+        self._pop_order = [spec.name for spec in self._pop_specs]
+        self._pop_map = {spec.name: spec for spec in self._pop_specs}
+
+        new_pop_states: dict[str, _PopulationState] = {}
+        for spec in self._pop_specs:
+            old_state = old_pop_states.get(spec.name)
+            if old_state is None:
+                model_state = spec.model.init_state(spec.n, ctx=self._ctx)
+                spikes = torch.zeros((spec.n,), device=self._device, dtype=torch.bool)
+                new_pop_states[spec.name] = _PopulationState(state=model_state, spikes=spikes)
+                continue
+
+            old_n = int(old_state.spikes.shape[0])
+            if int(spec.n) <= old_n:
+                model_state = old_state.state
+                spikes = old_state.spikes
+                new_pop_states[spec.name] = _PopulationState(state=model_state, spikes=spikes)
+                continue
+
+            model_state = spec.model.init_state(spec.n, ctx=self._ctx)
+            self._copy_state_prefix(old_state.state, model_state, old_n=old_n)
+            spikes = torch.zeros((spec.n,), device=self._device, dtype=torch.bool)
+            spikes[:old_n] = old_state.spikes[:old_n]
+            new_pop_states[spec.name] = _PopulationState(state=model_state, spikes=spikes)
+
+        self._pop_states = new_pop_states
+        self._recompile_all_projection_specs_and_states()
+        self._refresh_runtime_after_structure_change(population_shape_changed=True)
+
+        if self._structural_manager is not None:
+            self._structural_manager.reset(
+                self._proj_specs,
+                device=self._device,
+                dtype=self._dtype,
+            )
+            self._structural_scalars = dict(self._structural_manager.scalars())
+        if self._neurogenesis_manager is not None:
+            self._neurogenesis_manager.on_structure_changed(self._pop_specs)
+            self._neurogenesis_scalars = dict(self._neurogenesis_manager.scalars())
+
+    def _compile_projection_spec(self, proj: ProjectionSpec) -> ProjectionSpec:
+        if self._device is None:
+            return proj
+        pop_map = self._pop_map
+        topology = self._topology_subsystem.ensure_topology_meta(
+            proj.topology,
+            n_pre=pop_map[proj.pre].n,
+            n_post=pop_map[proj.post].n,
+        )
+        projection_requirements = self._topology_subsystem.projection_network_requirements(
+            proj,
+            base_requirements=self._network_requirements,
+        )
+        projection_requirements = self._learning_subsystem.projection_network_requirements(
+            proj,
+            base_requirements=projection_requirements,
+        )
+        compile_flags = self._topology_subsystem.compile_flags_for_projection(
+            proj,
+            requirements=projection_requirements,
+            device=self._device,
+        )
+        requires_ring = compile_flags.build_edges_by_delay or compile_flags.build_sparse_delay_mats
+        if compile_flags.build_sparse_delay_mats and hasattr(proj.synapse, "params"):
+            params = getattr(proj.synapse, "params", None)
+            receptor_scale = getattr(params, "receptor_scale", None) if params is not None else None
+            if receptor_scale is not None:
+                meta = dict(topology.meta) if topology.meta else {}
+                meta.setdefault("receptor_scale", receptor_scale)
+                topology = replace(topology, meta=meta)
+
+        compile_kwargs: dict[str, Any] = {
+            "device": self._device,
+            "dtype": self._dtype,
+            "build_edges_by_delay": compile_flags.build_edges_by_delay,
+            "build_pre_adjacency": compile_flags.build_pre_adjacency,
+            "build_sparse_delay_mats": compile_flags.build_sparse_delay_mats,
+            "build_bucket_edge_mapping": compile_flags.build_bucket_edge_mapping,
+            "fuse_delay_buckets": compile_flags.fuse_delay_buckets,
+            "store_sparse_by_delay": compile_flags.store_sparse_by_delay,
+            "build_fused_csr": compile_flags.build_fused_csr,
+        }
+        jobs: list[tuple[int, ProjectionSpec, SynapseTopology, dict[str, Any], bool]] = [
+            (0, proj, topology, compile_kwargs, requires_ring)
+        ]
+        compiled_specs = self._topology_subsystem.compile_projection_jobs(
+            projection_specs=[proj],
+            jobs=jobs,
+            parallel_mode="off",
+            parallel_workers=1,
+            parallel_torch_threads=self._parallel_compile_torch_threads,
+            device=self._device,
+            max_ring_mib=self._max_ring_mib,
+            executor_factory=ThreadPoolExecutor,
+        )
+        return compiled_specs[0]
+
+    def _recompile_all_projection_specs_and_states(self) -> None:
+        compiled_specs = [self._compile_projection_spec(proj) for proj in self._proj_specs]
+        self._proj_specs = compiled_specs
+        self._proj_states.clear()
+        for idx, proj in enumerate(self._proj_specs):
+            edge_count = self._topology_subsystem.edge_count(proj.topology)
+            syn_state = proj.synapse.init_state(edge_count, ctx=self._ctx)
+            learn_state = None
+            if proj.learning is not None:
+                learn_state = proj.learning.init_state(edge_count, ctx=self._ctx)
+            topology = proj.topology
+            if topology.weights is None and getattr(syn_state, "bind_weights_to_topology", False):
+                topology = replace(topology, weights=syn_state.weights)
+                proj = replace(proj, topology=topology)
+                self._proj_specs[idx] = proj
+            self._topology_subsystem.copy_topology_weights(syn_state, topology.weights)
+            self._proj_states[proj.name] = _ProjectionState(
+                state=syn_state,
+                learning_state=learn_state,
+            )
+        self._learning_scratch.clear()
+
+    def _refresh_runtime_after_structure_change(self, *, population_shape_changed: bool) -> None:
+        if self._compiled_mode and self._pop_states and self._device is not None:
+            pop_compartments = self._buffer_subsystem.collect_drive_compartments(
+                self._pop_specs,
+                self._proj_specs,
+            )
+            prior_spikes = {
+                name: self._pop_states[name].spikes.clone() for name in self._pop_order
+            }
+            self._init_compiled_buffers(pop_compartments)
+            for name, previous in prior_spikes.items():
+                current = self._pop_states[name].spikes
+                n_copy = min(int(current.shape[0]), int(previous.shape[0]))
+                if n_copy > 0:
+                    current[:n_copy].copy_(previous[:n_copy])
+        elif population_shape_changed and self._device is not None:
+            torch = require_torch()
+            pop_compartments = self._buffer_subsystem.collect_drive_compartments(
+                self._pop_specs,
+                self._proj_specs,
+            )
+            self._drive_buffers = {
+                spec.name: {
+                    comp: torch.zeros((spec.n,), device=self._device, dtype=self._dtype)
+                    for comp in pop_compartments.get(spec.name, spec.model.compartments)
+                }
+                for spec in self._pop_specs
+            }
+            self._drive_global = {}
+            self._drive_global_buffers = []
+            self._spikes_global = None
+            self._pop_spike_views = {}
+            self._compiled_event_tensors = None
+            self._compiled_scalars = None
+            self._compiled_meta = None
+            self._compiled_pop_tensor_views = {}
+            self._compiled_pop_tensor_keys = {}
+            self._compiled_mod_by_pop = {}
+            self._compiled_edge_mods_by_proj = {}
+
+        self._proj_plan_list = self._build_projection_plans()
+        self._proj_runtime_list = self._build_proj_runtime()
+        self._compiled_network_plan = self._topology_subsystem.build_compiled_network_plan(
+            compiled_projections=list(self._proj_specs),
+            fast_mode=self._fast_mode,
+            compiled_mode=self._compiled_mode,
+        )
+
+    def _copy_state_prefix(self, old_state: Any, new_state: Any, *, old_n: int) -> None:
+        for name, new_value in self._iter_state_tensors(new_state):
+            old_value = getattr(old_state, name, None)
+            if old_value is None or not hasattr(old_value, "shape"):
+                continue
+            if new_value.shape == old_value.shape:
+                new_value.copy_(old_value)
+                continue
+            if (
+                hasattr(new_value, "dim")
+                and hasattr(old_value, "dim")
+                and new_value.dim() >= 1
+                and old_value.dim() >= 1
+                and new_value.shape[1:] == old_value.shape[1:]
+            ):
+                n_copy = min(int(old_n), int(new_value.shape[0]), int(old_value.shape[0]))
+                if n_copy > 0:
+                    new_value[:n_copy].copy_(old_value[:n_copy])
+
+    def _iter_state_tensors(self, state: Any) -> list[tuple[str, Tensor]]:
+        names: set[str] = set()
+        if hasattr(state, "__dict__"):
+            names.update(cast(dict[str, Any], state.__dict__).keys())
+        if hasattr(state, "__slots__"):
+            slots = state.__slots__
+            if isinstance(slots, str):
+                names.add(slots)
+            else:
+                names.update(cast(Sequence[str], slots))
+        items: list[tuple[str, Tensor]] = []
+        for name in names:
+            if name.startswith("_"):
+                continue
+            value = getattr(state, name, None)
+            if value is None:
+                continue
+            if not hasattr(value, "shape") or not hasattr(value, "copy_"):
+                continue
+            items.append((name, cast(Tensor, value)))
+        return items
+
+    def _apply_newborn_plasticity_scale(
+        self,
+        *,
+        proj: ProjectionSpec,
+        result: LearningStepResult,
+        active_edges: Tensor | None,
+    ) -> LearningStepResult:
+        meta = proj.topology.meta or {}
+        until = meta.get("newborn_until_step")
+        mask = meta.get("newborn_edge_mask")
+        mult_raw = meta.get("newborn_plasticity_multiplier", 1.0)
+        if until is None or not isinstance(mask, Tensor):
+            return result
+        try:
+            multiplier = float(mult_raw)
+        except (TypeError, ValueError):
+            return result
+        if multiplier == 1.0 or self._step >= int(until):
+            return result
+
+        d_weights = result.d_weights
+        torch = require_torch()
+        if active_edges is not None and d_weights.numel() == active_edges.numel():
+            mask_local = mask.to(device=active_edges.device, dtype=torch.bool).index_select(
+                0,
+                active_edges,
+            )
+            if not bool(mask_local.any()):
+                return result
+            scaled = d_weights.clone()
+            scaled[mask_local] = scaled[mask_local] * multiplier
+            return LearningStepResult(d_weights=scaled, extras=result.extras)
+        if d_weights.numel() == mask.numel():
+            mask_local = mask.to(device=d_weights.device, dtype=torch.bool)
+            if not bool(mask_local.any()):
+                return result
+            scaled = d_weights.clone()
+            scaled[mask_local] = scaled[mask_local] * multiplier
+            return LearningStepResult(d_weights=scaled, extras=result.extras)
+        return result
 
     def _init_compiled_buffers(self, pop_compartments: Mapping[str, Sequence[Compartment]]) -> None:
         torch = require_torch()

@@ -8,10 +8,19 @@ from typing import Any, Literal, cast
 
 DemoId = Literal[
     "network",
+    "pruning_sparse",
+    "neurogenesis_sparse",
     "propagation_impulse",
     "delay_impulse",
     "learning_gate",
     "dopamine_plasticity",
+    "logic_curriculum",
+    "logic_and",
+    "logic_or",
+    "logic_xor",
+    "logic_nand",
+    "logic_nor",
+    "logic_xnor",
 ]
 
 RunMonitorMode = Literal["fast", "dashboard"]
@@ -24,10 +33,19 @@ RunRingDtype = Literal["none", "float32", "float16", "bfloat16"]
 
 ALLOWED_DEMOS: tuple[DemoId, ...] = (
     "network",
+    "pruning_sparse",
+    "neurogenesis_sparse",
     "propagation_impulse",
     "delay_impulse",
     "learning_gate",
     "dopamine_plasticity",
+    "logic_curriculum",
+    "logic_and",
+    "logic_or",
+    "logic_xor",
+    "logic_nand",
+    "logic_nor",
+    "logic_xnor",
 )
 ALLOWED_DEVICE = {"cpu", "cuda"}
 ALLOWED_DTYPE = {"float32", "float64", "bfloat16", "float16"}
@@ -36,6 +54,19 @@ ALLOWED_SYNAPSE_BACKEND = {"spmm_fused", "event_driven"}
 ALLOWED_RING_STRATEGY = {"dense", "event_bucketed"}
 ALLOWED_RING_DTYPE = {"none", "float32", "float16", "bfloat16"}
 ALLOWED_MONITOR_MODE = {"fast", "dashboard"}
+
+_LOGIC_DEMO_TO_GATE: dict[DemoId, str] = {
+    "logic_and": "and",
+    "logic_or": "or",
+    "logic_xor": "xor",
+    "logic_nand": "nand",
+    "logic_nor": "nor",
+    "logic_xnor": "xnor",
+}
+_LOGIC_GATE_VALUES = {"and", "or", "xor", "nand", "nor", "xnor"}
+_LOGIC_LEARNING_MODES = {"rstdp", "surrogate", "none"}
+_LOGIC_SAMPLING_METHODS = {"sequential", "random_balanced"}
+_LOGIC_CURRICULUM_DEFAULT = "or,and,nor,nand,xor,xnor"
 
 _BASE_RUN_SPEC_DEFAULTS: dict[str, Any] = {
     "demo_id": "network",
@@ -67,15 +98,34 @@ _BASE_RUN_SPEC_DEFAULTS: dict[str, Any] = {
 
 _DEMO_NAMES: dict[DemoId, str] = {
     "network": "Network",
+    "pruning_sparse": "Pruning Sparse",
+    "neurogenesis_sparse": "Neurogenesis Sparse",
     "propagation_impulse": "Propagation Impulse",
     "delay_impulse": "Delay Impulse",
     "learning_gate": "Learning Gate",
     "dopamine_plasticity": "Dopamine Plasticity",
+    "logic_curriculum": "Logic Curriculum",
+    "logic_and": "Logic AND",
+    "logic_or": "Logic OR",
+    "logic_xor": "Logic XOR",
+    "logic_nand": "Logic NAND",
+    "logic_nor": "Logic NOR",
+    "logic_xnor": "Logic XNOR",
 }
 
 _DEMO_DEFAULT_OVERRIDES: dict[DemoId, dict[str, Any]] = {
     "network": {
         "steps": 500,
+        "learning": {"enabled": False},
+        "modulators": {"enabled": False, "kinds": []},
+    },
+    "pruning_sparse": {
+        "steps": 5000,
+        "learning": {"enabled": False},
+        "modulators": {"enabled": False, "kinds": []},
+    },
+    "neurogenesis_sparse": {
+        "steps": 5000,
         "learning": {"enabled": False},
         "modulators": {"enabled": False, "kinds": []},
     },
@@ -115,6 +165,85 @@ _DEMO_DEFAULT_OVERRIDES: dict[DemoId, dict[str, Any]] = {
             "pulse_step": 50,
             "amount": 1.0,
         },
+    },
+    "logic_and": {
+        "steps": 5000,
+        "learning": {"enabled": True, "rule": "rstdp", "lr": 0.1},
+        "modulators": {"enabled": False, "kinds": []},
+        "logic_gate": "and",
+        "logic_learning_mode": "rstdp",
+        "logic_sim_steps_per_trial": 10,
+        "logic_sampling_method": "sequential",
+        "logic_debug": False,
+        "logic_debug_every": 25,
+    },
+    "logic_curriculum": {
+        "steps": 2500,
+        "learning": {"enabled": True, "rule": "rstdp", "lr": 0.1},
+        "modulators": {"enabled": False, "kinds": []},
+        "logic_gate": "xor",
+        "logic_learning_mode": "rstdp",
+        "logic_sim_steps_per_trial": 10,
+        "logic_sampling_method": "sequential",
+        "logic_curriculum_gates": _LOGIC_CURRICULUM_DEFAULT,
+        "logic_curriculum_replay_ratio": 0.35,
+        "logic_debug": False,
+        "logic_debug_every": 25,
+    },
+    "logic_or": {
+        "steps": 5000,
+        "learning": {"enabled": True, "rule": "rstdp", "lr": 0.1},
+        "modulators": {"enabled": False, "kinds": []},
+        "logic_gate": "or",
+        "logic_learning_mode": "rstdp",
+        "logic_sim_steps_per_trial": 10,
+        "logic_sampling_method": "sequential",
+        "logic_debug": False,
+        "logic_debug_every": 25,
+    },
+    "logic_xor": {
+        "steps": 20000,
+        "learning": {"enabled": True, "rule": "rstdp", "lr": 0.1},
+        "modulators": {"enabled": False, "kinds": []},
+        "logic_gate": "xor",
+        "logic_learning_mode": "rstdp",
+        "logic_sim_steps_per_trial": 10,
+        "logic_sampling_method": "sequential",
+        "logic_debug": False,
+        "logic_debug_every": 25,
+    },
+    "logic_nand": {
+        "steps": 5000,
+        "learning": {"enabled": True, "rule": "rstdp", "lr": 0.1},
+        "modulators": {"enabled": False, "kinds": []},
+        "logic_gate": "nand",
+        "logic_learning_mode": "rstdp",
+        "logic_sim_steps_per_trial": 10,
+        "logic_sampling_method": "sequential",
+        "logic_debug": False,
+        "logic_debug_every": 25,
+    },
+    "logic_nor": {
+        "steps": 5000,
+        "learning": {"enabled": True, "rule": "rstdp", "lr": 0.1},
+        "modulators": {"enabled": False, "kinds": []},
+        "logic_gate": "nor",
+        "logic_learning_mode": "rstdp",
+        "logic_sim_steps_per_trial": 10,
+        "logic_sampling_method": "sequential",
+        "logic_debug": False,
+        "logic_debug_every": 25,
+    },
+    "logic_xnor": {
+        "steps": 5000,
+        "learning": {"enabled": True, "rule": "rstdp", "lr": 0.1},
+        "modulators": {"enabled": False, "kinds": []},
+        "logic_gate": "xnor",
+        "logic_learning_mode": "rstdp",
+        "logic_sim_steps_per_trial": 10,
+        "logic_sampling_method": "sequential",
+        "logic_debug": False,
+        "logic_debug_every": 25,
     },
 }
 
@@ -278,6 +407,50 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         resolved["modulators"]["enabled"] = True
         if not resolved["modulators"]["kinds"]:
             resolved["modulators"]["kinds"] = ["dopamine"]
+    if demo_id in _LOGIC_DEMO_TO_GATE:
+        resolved["logic_gate"] = _coerce_choice(
+            merged.get("logic_gate"),
+            allowed=_LOGIC_GATE_VALUES,
+            default=_LOGIC_DEMO_TO_GATE[demo_id],
+        )
+        resolved["logic_learning_mode"] = _coerce_choice(
+            merged.get("logic_learning_mode"),
+            allowed=_LOGIC_LEARNING_MODES,
+            default="rstdp",
+        )
+        resolved["logic_sim_steps_per_trial"] = _coerce_positive_int(
+            merged.get("logic_sim_steps_per_trial"),
+            10,
+        )
+        resolved["logic_sampling_method"] = _coerce_choice(
+            merged.get("logic_sampling_method"),
+            allowed=_LOGIC_SAMPLING_METHODS,
+            default="sequential",
+        )
+        resolved["logic_debug"] = bool(merged.get("logic_debug", False))
+        resolved["logic_debug_every"] = _coerce_positive_int(
+            merged.get("logic_debug_every"),
+            25,
+        )
+    if demo_id == "logic_curriculum":
+        curriculum_raw = str(merged.get("logic_curriculum_gates", _LOGIC_CURRICULUM_DEFAULT))
+        curriculum_items = [
+            part.strip().lower() for part in curriculum_raw.split(",") if part.strip()
+        ]
+        curriculum_items = [part for part in curriculum_items if part in _LOGIC_GATE_VALUES]
+        if not curriculum_items:
+            curriculum_items = _LOGIC_CURRICULUM_DEFAULT.split(",")
+        replay_ratio = _coerce_float(merged.get("logic_curriculum_replay_ratio"), 0.35)
+        if replay_ratio < 0.0:
+            replay_ratio = 0.0
+        if replay_ratio > 1.0:
+            replay_ratio = 1.0
+        resolved["logic_curriculum_gates"] = ",".join(curriculum_items)
+        resolved["logic_curriculum_replay_ratio"] = replay_ratio
+        resolved["logic_gate"] = curriculum_items[-1]
+        resolved["logic_learning_mode"] = "rstdp"
+        resolved["learning"]["enabled"] = True
+        resolved["learning"]["rule"] = "rstdp"
     return resolved
 
 
@@ -319,6 +492,51 @@ def run_spec_from_cli_args(
     if demo_name == "dopamine_plasticity":
         raw["modulators"]["enabled"] = True
         raw["modulators"]["kinds"] = ["dopamine"]
+    if demo_name in _LOGIC_DEMO_TO_GATE:
+        demo_key = cast(DemoId, demo_name)
+        logic_mode = str(getattr(args, "logic_learning_mode", "rstdp")).strip().lower()
+        if logic_mode not in _LOGIC_LEARNING_MODES:
+            logic_mode = "rstdp"
+        raw["learning"]["enabled"] = logic_mode != "none"
+        raw["learning"]["rule"] = logic_mode
+        raw["logic_gate"] = _coerce_choice(
+            getattr(args, "logic_gate", None),
+            allowed=_LOGIC_GATE_VALUES,
+            default=_LOGIC_DEMO_TO_GATE[demo_key],
+        )
+        raw["logic_learning_mode"] = logic_mode
+        raw["logic_sim_steps_per_trial"] = max(
+            1,
+            int(getattr(args, "logic_sim_steps_per_trial", 10)),
+        )
+        raw["logic_sampling_method"] = _coerce_choice(
+            getattr(args, "logic_sampling_method", None),
+            allowed=_LOGIC_SAMPLING_METHODS,
+            default="sequential",
+        )
+        raw["logic_debug"] = bool(getattr(args, "logic_debug", False))
+        raw["logic_debug_every"] = max(1, int(getattr(args, "logic_debug_every", 25)))
+    if demo_name == "logic_curriculum":
+        raw["learning"]["enabled"] = True
+        raw["learning"]["rule"] = "rstdp"
+        raw["logic_learning_mode"] = "rstdp"
+        raw["logic_sim_steps_per_trial"] = max(
+            1,
+            int(getattr(args, "logic_sim_steps_per_trial", 10)),
+        )
+        raw["logic_sampling_method"] = _coerce_choice(
+            getattr(args, "logic_sampling_method", None),
+            allowed=_LOGIC_SAMPLING_METHODS,
+            default="sequential",
+        )
+        raw["logic_curriculum_gates"] = str(
+            getattr(args, "logic_curriculum_gates", _LOGIC_CURRICULUM_DEFAULT)
+        )
+        raw["logic_curriculum_replay_ratio"] = float(
+            getattr(args, "logic_curriculum_replay_ratio", 0.35)
+        )
+        raw["logic_debug"] = bool(getattr(args, "logic_debug", False))
+        raw["logic_debug_every"] = max(1, int(getattr(args, "logic_debug_every", 25)))
     return resolve_run_spec(raw)
 
 
@@ -372,6 +590,51 @@ def run_spec_to_cli_args(
     store_sparse = spec.get("store_sparse_by_delay")
     if store_sparse is not None:
         args.extend(["--store-sparse-by-delay", "true" if bool(store_sparse) else "false"])
+    demo_id = cast(DemoId, spec["demo_id"])
+    if demo_id in _LOGIC_DEMO_TO_GATE:
+        gate = str(spec.get("logic_gate", _LOGIC_DEMO_TO_GATE[demo_id])).strip().lower()
+        if gate not in _LOGIC_GATE_VALUES:
+            gate = _LOGIC_DEMO_TO_GATE[demo_id]
+        if not bool(spec["learning"]["enabled"]):
+            logic_mode = "none"
+        else:
+            learning_rule = str(spec["learning"]["rule"]).strip().lower()
+            logic_mode = "surrogate" if learning_rule == "surrogate" else "rstdp"
+        args.extend(
+            [
+                "--logic-gate",
+                gate,
+                "--logic-learning-mode",
+                logic_mode,
+                "--logic-sim-steps-per-trial",
+                str(int(spec.get("logic_sim_steps_per_trial", 10))),
+                "--logic-sampling-method",
+                str(spec.get("logic_sampling_method", "sequential")),
+                "--logic-debug-every",
+                str(int(spec.get("logic_debug_every", 25))),
+            ]
+        )
+        if bool(spec.get("logic_debug", False)):
+            args.append("--logic-debug")
+    if demo_id == "logic_curriculum":
+        args.extend(
+            [
+                "--logic-curriculum-gates",
+                str(spec.get("logic_curriculum_gates", _LOGIC_CURRICULUM_DEFAULT)),
+                "--logic-curriculum-replay-ratio",
+                str(float(spec.get("logic_curriculum_replay_ratio", 0.35))),
+                "--logic-learning-mode",
+                "rstdp",
+                "--logic-sim-steps-per-trial",
+                str(int(spec.get("logic_sim_steps_per_trial", 10))),
+                "--logic-sampling-method",
+                str(spec.get("logic_sampling_method", "sequential")),
+                "--logic-debug-every",
+                str(int(spec.get("logic_debug_every", 25))),
+            ]
+        )
+        if bool(spec.get("logic_debug", False)):
+            args.append("--logic-debug")
     return args
 
 
@@ -385,7 +648,7 @@ def feature_flags_for_run_spec(
         known_max_delay = 0
     elif demo_id == "delay_impulse":
         known_max_delay = int(spec["delay_steps"])
-    elif demo_id in {"learning_gate", "dopamine_plasticity"}:
+    elif demo_id in {"learning_gate", "dopamine_plasticity", "logic_curriculum"} or demo_id in _LOGIC_DEMO_TO_GATE:
         known_max_delay = 0
     else:
         known_max_delay = None
@@ -422,6 +685,19 @@ def feature_flags_for_run_spec(
             "mode": monitor_mode,
             "sync_policy": monitor_policy,
         },
+        "pruning": {
+            "enabled": demo_id == "pruning_sparse",
+        },
+        "neurogenesis": {
+            "enabled": demo_id == "neurogenesis_sparse",
+        },
+        "logic_gate": spec.get("logic_gate") if demo_id in _LOGIC_DEMO_TO_GATE else None,
+        "logic_curriculum_gates": spec.get("logic_curriculum_gates")
+        if demo_id == "logic_curriculum"
+        else None,
+        "logic_curriculum_replay_ratio": spec.get("logic_curriculum_replay_ratio")
+        if demo_id == "logic_curriculum"
+        else None,
     }
 
 

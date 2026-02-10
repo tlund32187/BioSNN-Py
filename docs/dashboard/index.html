@@ -47,7 +47,22 @@
             <h2>Run</h2>
             <div class="run-controls">
               <label>Demo
-                <select id="runDemoSelect"></select>
+                <select id="runDemoSelect">
+                  <option value="network">Network</option>
+                  <option value="pruning_sparse">Pruning Sparse</option>
+                  <option value="neurogenesis_sparse">Neurogenesis Sparse</option>
+                  <option value="propagation_impulse">Propagation Impulse</option>
+                  <option value="delay_impulse">Delay Impulse</option>
+                  <option value="learning_gate">Learning Gate</option>
+                  <option value="dopamine_plasticity">Dopamine Plasticity</option>
+                  <option value="logic_curriculum">Logic Curriculum</option>
+                  <option value="logic_and">Logic AND</option>
+                  <option value="logic_or">Logic OR</option>
+                  <option value="logic_xor">Logic XOR</option>
+                  <option value="logic_nand">Logic NAND</option>
+                  <option value="logic_nor">Logic NOR</option>
+                  <option value="logic_xnor">Logic XNOR</option>
+                </select>
               </label>
               <label>Steps
                 <input id="runStepsInput" type="number" min="1" value="200" />
@@ -259,13 +274,13 @@
 
         <section class="card card-task">
           <div class="card-header">
-            <h2>2 + 4 = ?</h2>
-            <span class="chip">Demo task</span>
+            <h2 id="taskTitle">Demo Task</h2>
+            <span class="chip" id="taskChip">Run summary</span>
           </div>
           <div class="task-body">
-            <p class="task-input">Input: <strong>12</strong></p>
-            <p class="task-output">Answer: <strong>6</strong></p>
-            <p class="task-foot">No learning; classifier head disabled.</p>
+            <p class="task-summary" id="taskSummary">Waiting for run data...</p>
+            <div id="taskTruthTable"></div>
+            <p class="task-foot" id="taskTakeaway">Train = sampled trial accuracy. Eval = full gate truth-table accuracy.</p>
           </div>
         </section>
       </main>

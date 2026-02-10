@@ -558,12 +558,63 @@ h1 {
   font-family: var(--mono);
 }
 
-.task-input {
-  font-size: 18px;
+.task-summary {
+  margin: 0 0 10px 0;
+  color: var(--text);
+  font-weight: 600;
 }
 
-.task-output {
-  font-size: 20px;
+.task-foot {
+  margin: 10px 0 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-truth-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.task-truth-table th,
+.task-truth-table td {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  padding: 6px 4px;
+  text-align: left;
+}
+
+.task-truth-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.task-truth-table td {
+  color: var(--text);
+}
+
+.task-pred-ok {
+  color: #6ee7b7;
+  font-weight: 600;
+}
+
+.task-pred-bad {
+  color: #fda4af;
+  font-weight: 600;
+}
+
+.task-pred-missing {
+  color: var(--muted);
+}
+
+.task-conf {
+  color: #93c5fd;
+}
+
+.task-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 @media (max-width: 1200px) {

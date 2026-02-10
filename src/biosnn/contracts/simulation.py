@@ -16,6 +16,22 @@ class SimulationConfig:
     device: str | None = None
     dtype: str | None = None
     max_ring_mib: float | None = 2048.0
+    enable_pruning: bool = False
+    prune_interval_steps: int = 250
+    usage_alpha: float = 0.01
+    w_min: float = 0.01
+    usage_min: float = 0.01
+    k_min_out: int = 0
+    k_min_in: int = 0
+    max_prune_fraction_per_interval: float = 0.1
+    pruning_verbose: bool = False
+    enable_neurogenesis: bool = False
+    growth_interval_steps: int = 500
+    add_neurons_per_event: int = 4
+    newborn_plasticity_multiplier: float = 1.5
+    newborn_duration_steps: int = 250
+    max_total_neurons: int = 20000
+    neurogenesis_verbose: bool = False
     meta: Mapping[str, Any] | None = None
 
 
