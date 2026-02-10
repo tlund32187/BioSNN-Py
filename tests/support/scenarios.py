@@ -11,7 +11,12 @@ from biosnn.contracts.synapses import SynapseTopology
 from biosnn.contracts.tensor import Tensor
 from biosnn.core.torch_utils import require_torch, resolve_device_dtype
 from biosnn.learning import ThreeFactorHebbianParams, ThreeFactorHebbianRule
-from biosnn.neuromodulators import GlobalScalarField, GlobalScalarParams
+from biosnn.neuromodulators import (
+    GlobalScalarField,
+    GlobalScalarParams,
+    GridDiffusion2DField,
+    GridDiffusion2DParams,
+)
 from biosnn.simulation.engine import TorchNetworkEngine
 from biosnn.simulation.network import ModulatorSpec, PopulationSpec, ProjectionSpec
 from biosnn.synapses.dynamics.delayed_sparse_matmul import (
@@ -165,6 +170,7 @@ def build_learning_gate_engine(
     dopamine_on: bool,
     compiled_mode: bool,
     learning_rule: ILearningRule | None = None,
+    use_grid_field: bool = False,
     device: str = "cpu",
     dtype: object | None = None,
 ) -> tuple[TorchNetworkEngine, str, ReleasesFn, ExternalDriveFn]:
@@ -191,10 +197,24 @@ def build_learning_gate_engine(
         sparse_learning=True,
     )
 
-    field = GlobalScalarField(
-        kinds=(ModulatorKind.DOPAMINE,),
-        params=GlobalScalarParams(decay_tau=10.0),
-    )
+    if use_grid_field:
+        field = GridDiffusion2DField(
+            params=GridDiffusion2DParams(
+                kinds=(ModulatorKind.DOPAMINE,),
+                grid_size=(16, 16),
+                world_origin=(-1.0, -1.0),
+                world_extent=(2.0, 2.0),
+                diffusion=0.2,
+                decay_tau=10.0,
+                deposit_sigma=0.0,
+                clamp_min=0.0,
+            )
+        )
+    else:
+        field = GlobalScalarField(
+            kinds=(ModulatorKind.DOPAMINE,),
+            params=GlobalScalarParams(decay_tau=10.0),
+        )
     mod_spec = ModulatorSpec(name="dopamine", field=field, kinds=(ModulatorKind.DOPAMINE,))
 
     def releases_fn(t: float, step: int, ctx: StepContext):
@@ -233,6 +253,24 @@ def build_learning_gate_engine(
     _reset_engine(engine, device=device, dtype=_dtype_to_str(dtype))
 
     return engine, proj_name, releases_fn, external_drive_fn
+
+
+def build_learning_gate_engine_grid_field(
+    *,
+    dopamine_on: bool,
+    compiled_mode: bool,
+    learning_rule: ILearningRule | None = None,
+    device: str = "cpu",
+    dtype: object | None = None,
+) -> tuple[TorchNetworkEngine, str, ReleasesFn, ExternalDriveFn]:
+    return build_learning_gate_engine(
+        dopamine_on=dopamine_on,
+        compiled_mode=compiled_mode,
+        learning_rule=learning_rule,
+        use_grid_field=True,
+        device=device,
+        dtype=dtype,
+    )
 
 
 def _identity_topology(

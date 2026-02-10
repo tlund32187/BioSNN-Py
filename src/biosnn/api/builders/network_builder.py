@@ -7,13 +7,19 @@ from dataclasses import dataclass
 from typing import Any, Protocol, TypeAlias, cast
 
 from biosnn.connectivity.builders.random_topology import build_erdos_renyi_edges
+from biosnn.connectivity.positions import coerce_population_frame, positions_tensor
 from biosnn.contracts.learning import ILearningRule
 from biosnn.contracts.modulators import IModulatorField, ModulatorKind
 from biosnn.contracts.neurons import Compartment, INeuronModel
 from biosnn.contracts.synapses import ISynapseModel, ReceptorKind, SynapseTopology
 from biosnn.contracts.tensor import Tensor
 from biosnn.core.torch_utils import require_torch
-from biosnn.simulation.network.specs import ModulatorSpec, PopulationSpec, ProjectionSpec
+from biosnn.simulation.network.specs import (
+    ModulatorSpec,
+    PopulationFrame,
+    PopulationSpec,
+    ProjectionSpec,
+)
 
 TopologyFactory: TypeAlias = Callable[..., SynapseTopology]
 WeightsFactory: TypeAlias = Callable[..., Tensor]
@@ -126,6 +132,7 @@ class _PopulationDraft:
     name: str
     n: int
     neuron: INeuronModel
+    frame: PopulationFrame | None
     tags: Mapping[str, Any] | None
 
 
@@ -174,11 +181,36 @@ class NetworkBuilder:
         *,
         n: int,
         neuron: INeuronModel,
+        frame: PopulationFrame | Mapping[str, Any] | None = None,
         tags: Mapping[str, Any] | None = None,
     ) -> NetworkBuilder:
         if name in self._populations:
             raise ValueError(f"Population '{name}' already exists")
-        self._populations[name] = _PopulationDraft(name=name, n=n, neuron=neuron, tags=tags)
+        frame_obj = None if frame is None else coerce_population_frame(frame)
+        self._populations[name] = _PopulationDraft(
+            name=name,
+            n=n,
+            neuron=neuron,
+            frame=frame_obj,
+            tags=tags,
+        )
+        return self
+
+    def population_frame(
+        self,
+        pop_name: str,
+        frame: PopulationFrame | Mapping[str, Any],
+    ) -> NetworkBuilder:
+        if pop_name not in self._populations:
+            raise ValueError(f"Population '{pop_name}' does not exist")
+        draft = self._populations[pop_name]
+        self._populations[pop_name] = _PopulationDraft(
+            name=draft.name,
+            n=draft.n,
+            neuron=draft.neuron,
+            frame=coerce_population_frame(frame),
+            tags=draft.tags,
+        )
         return self
 
     def projection(
@@ -241,12 +273,22 @@ class NetworkBuilder:
 
         populations = []
         for pop_draft in self._populations.values():
+            positions = None
+            frame = pop_draft.frame
+            if frame is not None:
+                positions = positions_tensor(
+                    frame,
+                    pop_draft.n,
+                    device=self._device,
+                    dtype=self._dtype,
+                )
             populations.append(
                 PopulationSpec(
                     name=pop_draft.name,
                     model=pop_draft.neuron,
                     n=pop_draft.n,
-                    positions=None,
+                    frame=frame,
+                    positions=positions,
                     meta=pop_draft.tags,
                 )
             )

@@ -7,6 +7,9 @@ const canvases = {
   rate: document.getElementById("rateCanvas"),
   weight: document.getElementById("weightCanvas"),
   state: document.getElementById("stateCanvas"),
+  modulator: document.getElementById("modulatorCanvas"),
+  receptor: document.getElementById("receptorCanvas"),
+  vision: document.getElementById("visionCanvas"),
 };
 
 const networkControls = {
@@ -73,6 +76,16 @@ const taskNodes = {
   summary: document.getElementById("taskSummary"),
   table: document.getElementById("taskTruthTable"),
   takeaway: document.getElementById("taskTakeaway"),
+};
+
+const auxNodes = {
+  modulatorCard: document.getElementById("modulatorCard"),
+  modulatorFieldSelect: document.getElementById("modulatorFieldSelect"),
+  modulatorKindSelect: document.getElementById("modulatorKindSelect"),
+  receptorCard: document.getElementById("receptorCard"),
+  receptorProjectionSelect: document.getElementById("receptorProjectionSelect"),
+  receptorMetricSelect: document.getElementById("receptorMetricSelect"),
+  visionCard: document.getElementById("visionCard"),
 };
 
 const theme = {
@@ -143,6 +156,9 @@ const dataConfig = (() => {
   const trialsCsv = readParam("trials", pathFromRun("trials.csv"));
   const evalCsv = readParam("eval", pathFromRun("eval.csv"));
   const confusionCsv = readParam("confusion", pathFromRun("confusion.csv"));
+  const modgridJson = readParam("modgrid", pathFromRun("modgrid.json"));
+  const receptorsCsv = readParam("receptors", pathFromRun("receptors.csv"));
+  const visionJson = readParam("vision", pathFromRun("vision.json"));
   return {
     runPath,
     neuronCsv,
@@ -153,6 +169,9 @@ const dataConfig = (() => {
     trialsCsv,
     evalCsv,
     confusionCsv,
+    modgridJson,
+    receptorsCsv,
+    visionJson,
     topologyJson,
     runConfigJson: pathFromRun("run_config.json"),
     runFeaturesJson: pathFromRun("run_features.json"),
@@ -172,6 +191,9 @@ const dataState = {
   trialsRows: null,
   evalRows: null,
   confusionRows: null,
+  modgridData: null,
+  receptorsRows: null,
+  visionData: null,
   weightsIndex: null,
   topology: null,
   topologyMode: "neurons",
@@ -207,6 +229,11 @@ const FALLBACK_DEMO_DEFINITIONS = [
     id: "network",
     name: "Network",
     defaults: { demo_id: "network", steps: 500, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: false }, modulators: { enabled: false, kinds: [] } },
+  },
+  {
+    id: "vision",
+    name: "Vision",
+    defaults: { demo_id: "vision", steps: 500, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: false }, modulators: { enabled: false, kinds: [] } },
   },
   {
     id: "pruning_sparse",
@@ -497,6 +524,12 @@ function renderTaskPanel() {
     const rowGate = normalizeGateToken(row?.train_gate || row?.gate);
     return rowGate === gate;
   });
+  const scopedEvalRows = (dataState.evalRows || []).filter((row) => {
+    if (!curriculum) return true;
+    return normalizeGateToken(row?.gate) === gate;
+  });
+  const latestEvalPredRow = findLastRow(scopedEvalRows);
+  const predKeyByCase = ["pred_00", "pred_01", "pred_10", "pred_11"];
   scopedTrials.forEach((row) => {
     let caseIdx = parseInteger(row.case_idx);
     if (caseIdx === null) {
@@ -517,14 +550,16 @@ function renderTaskPanel() {
   const bodyRows = LOGIC_TRUTH_ROWS.map(([x0, x1], idx) => {
     const row = latestByCase.get(idx) || null;
     const target = gateTargetBit(gate, x0, x1);
-    const pred = parseInteger(row?.pred);
+    const predTrial = parseInteger(row?.pred);
+    const predEval = parseInteger(latestEvalPredRow?.[predKeyByCase[idx]]);
+    const pred = predTrial ?? predEval;
     const out0 = parseNumber(row?.out_spikes_0);
     const out1 = parseNumber(row?.out_spikes_1);
     const total = (out0 ?? 0) + (out1 ?? 0);
     const instantConfidence =
       total > 0
         ? Math.min(1, Math.abs((out1 ?? 0) - (out0 ?? 0)) / total)
-        : pred !== null
+        : predTrial !== null
           ? 0
           : null;
     const history = historyByCase.get(idx) || [];
@@ -548,14 +583,14 @@ function renderTaskPanel() {
       correct,
     };
   });
-
-  const scopedEvalRows = (dataState.evalRows || []).filter((row) => {
-    if (!curriculum) return true;
-    return normalizeGateToken(row?.gate) === gate;
-  });
   const latestEval =
     parseNumber(latestValue(scopedEvalRows, "eval_accuracy")) ??
     parseNumber(latestValue(dataState.metricsRows, "eval_accuracy"));
+  const latestGlobalEval = curriculum
+    ? parseNumber(latestValue(dataState.evalRows, "global_eval_accuracy")) ??
+      parseNumber(latestValue(dataState.metricsRows, "global_eval_accuracy")) ??
+      parseNumber(latestValue(dataState.metricsRows, "sample_accuracy_global"))
+    : null;
   const latestTrain =
     parseNumber(latestValue(scopedEvalRows, curriculum ? "sample_accuracy_phase_gate" : "sample_accuracy")) ??
     parseNumber(latestValue(dataState.metricsRows, "train_accuracy")) ??
@@ -572,12 +607,22 @@ function renderTaskPanel() {
       ? ` | Phase gate ${gate.toUpperCase()}` +
         (lastTrainGate ? ` | Last train gate ${lastTrainGate.toUpperCase()}` : "")
       : "";
-  taskNodes.summary.textContent =
-    `Eval ${latestEval !== null ? latestEval.toFixed(3) : "--"} | ` +
-    `Train ${latestTrain !== null ? latestTrain.toFixed(3) : "--"} | ` +
-    `Loss ${latestLoss !== null ? latestLoss.toFixed(3) : "--"} | ` +
-    `${solved ? "SOLVED" : "IN PROGRESS"} (${coveredCases}/4 cases observed)` +
-    curriculumSuffix;
+  if (curriculum) {
+    taskNodes.summary.textContent =
+      `Gate Eval ${latestEval !== null ? latestEval.toFixed(3) : "--"} | ` +
+      `Global Eval ${latestGlobalEval !== null ? latestGlobalEval.toFixed(3) : "--"} | ` +
+      `Gate Train ${latestTrain !== null ? latestTrain.toFixed(3) : "--"} | ` +
+      `Loss ${latestLoss !== null ? latestLoss.toFixed(3) : "--"} | ` +
+      `${solved ? "SOLVED" : "IN PROGRESS"} (${coveredCases}/4 cases observed)` +
+      curriculumSuffix;
+  } else {
+    taskNodes.summary.textContent =
+      `Eval ${latestEval !== null ? latestEval.toFixed(3) : "--"} | ` +
+      `Train ${latestTrain !== null ? latestTrain.toFixed(3) : "--"} | ` +
+      `Loss ${latestLoss !== null ? latestLoss.toFixed(3) : "--"} | ` +
+      `${solved ? "SOLVED" : "IN PROGRESS"} (${coveredCases}/4 cases observed)` +
+      curriculumSuffix;
+  }
 
   taskNodes.table.innerHTML = `
     <table class="task-truth-table">
@@ -617,7 +662,9 @@ function renderTaskPanel() {
   taskNodes.takeaway.textContent =
     "Confidence is recent per-case correctness (fallback: WTA margin). " +
     "Train is sampled trial accuracy; Eval is full 4-case truth-table accuracy." +
-    (curriculum ? " Curriculum eval can oscillate at phase switches and replay trials." : " ") +
+    (curriculum
+      ? " Gate Eval is the current phase gate; Global Eval is the average across all curriculum gates."
+      : " ") +
     logicPassCriterionText(gate);
 }
 
@@ -2038,6 +2085,9 @@ async function refreshData() {
     trialsRes,
     evalRes,
     confusionRes,
+    modgridRes,
+    receptorsRes,
+    visionRes,
     topologyRes,
     runConfigRes,
     runFeaturesRes,
@@ -2051,6 +2101,9 @@ async function refreshData() {
     loadOptionalCsvMaybe(dataConfig.trialsCsv),
     loadOptionalCsvMaybe(dataConfig.evalCsv),
     loadOptionalCsvMaybe(dataConfig.confusionCsv),
+    loadOptionalJsonMaybe(dataConfig.modgridJson),
+    loadOptionalCsvMaybe(dataConfig.receptorsCsv),
+    loadOptionalJsonMaybe(dataConfig.visionJson),
     loadOptionalJsonMaybe(dataConfig.topologyJson),
     loadOptionalJsonMaybe(dataConfig.runConfigJson),
     loadOptionalJsonMaybe(dataConfig.runFeaturesJson),
@@ -2065,6 +2118,9 @@ async function refreshData() {
   const trialsRows = trialsRes.data;
   const evalRows = evalRes.data;
   const confusionRows = confusionRes.data;
+  const modgridData = modgridRes.data;
+  const receptorsRows = receptorsRes.data;
+  const visionData = visionRes.data;
   const topology = topologyRes.data;
 
   dataState.neuronRows = neuronRows;
@@ -2075,6 +2131,9 @@ async function refreshData() {
   dataState.trialsRows = trialsRows;
   dataState.evalRows = evalRows;
   dataState.confusionRows = confusionRows;
+  dataState.modgridData = modgridData;
+  dataState.receptorsRows = receptorsRows;
+  dataState.visionData = visionData;
   dataState.weightsIndex = weightsRows ? buildWeightsIndex(weightsRows) : null;
   dataState.topology = topology;
   dataState.runConfig = runConfigRes.data;
@@ -2090,6 +2149,9 @@ async function refreshData() {
       trialsRows ||
       evalRows ||
       confusionRows ||
+      modgridData ||
+      receptorsRows ||
+      visionData ||
       topology
   );
   dataState.lastUpdated = new Date();
@@ -2103,6 +2165,9 @@ async function refreshData() {
     trialsRes,
     evalRes,
     confusionRes,
+    modgridRes,
+    receptorsRes,
+    visionRes,
     topologyRes,
     runConfigRes,
     runFeaturesRes,
@@ -2118,6 +2183,7 @@ async function refreshData() {
   }
   renderFeatureChecklist(dataState.runFeatures);
   renderTaskPanel();
+  renderAuxPanels();
   if (
     !runState.apiAvailable &&
     runStatusRes.data &&
@@ -2678,7 +2744,7 @@ function drawAccuracyChart() {
   const isCurriculum = demoId === "logic_curriculum";
   const train = rows.map((row) =>
     Number(
-      (isCurriculum ? row.sample_accuracy_global : null) ??
+      (isCurriculum ? row.global_eval_accuracy ?? row.sample_accuracy_global : null) ??
         row.train_accuracy ??
         row.trainAcc ??
         ""
@@ -2686,7 +2752,7 @@ function drawAccuracyChart() {
   );
   const evalAcc = rows.map((row) =>
     Number(
-      (isCurriculum ? row.sample_accuracy_global : null) ??
+      (isCurriculum ? row.global_eval_accuracy ?? row.sample_accuracy_global : null) ??
         row.eval_accuracy ??
         row.evalAcc ??
         ""
@@ -2705,7 +2771,7 @@ function drawAccuracyChart() {
   const last = rows[rows.length - 1];
   if (metricNodes.trainAccLatest) {
     const trainLatest = parseNumber(
-      (isCurriculum ? last.sample_accuracy_global : null) ??
+      (isCurriculum ? last.global_eval_accuracy ?? last.sample_accuracy_global : null) ??
         last.train_accuracy ??
         last.trainAcc ??
         last.sample_accuracy
@@ -2714,7 +2780,7 @@ function drawAccuracyChart() {
   }
   if (metricNodes.evalAccLatest) {
     const evalLatest = parseNumber(
-      (isCurriculum ? last.sample_accuracy_global : null) ??
+      (isCurriculum ? last.global_eval_accuracy ?? last.sample_accuracy_global : null) ??
         last.eval_accuracy ??
         last.evalAcc
     );
@@ -2746,6 +2812,348 @@ function drawLineSeries(ctx, values, color, width, height) {
     }
   });
   ctx.stroke();
+}
+
+function renderAuxPanels() {
+  drawModulatorPanel();
+  drawReceptorPanel();
+  drawVisionPanel();
+}
+
+function setPanelVisible(node, visible) {
+  if (!node) return;
+  node.classList.toggle("hidden", !visible);
+}
+
+function setSelectOptions(select, options) {
+  if (!select) return null;
+  const normalized = (Array.isArray(options) ? options : [])
+    .map((entry) => {
+      if (entry && typeof entry === "object") {
+        return {
+          value: String(entry.value ?? entry.label ?? ""),
+          label: String(entry.label ?? entry.value ?? ""),
+        };
+      }
+      return { value: String(entry ?? ""), label: String(entry ?? "") };
+    })
+    .filter((entry) => entry.value.length > 0);
+
+  const previous = String(select.value || "");
+  while (select.firstChild) {
+    select.removeChild(select.firstChild);
+  }
+  if (normalized.length === 0) {
+    return null;
+  }
+  normalized.forEach((entry) => {
+    const option = document.createElement("option");
+    option.value = entry.value;
+    option.textContent = entry.label;
+    select.appendChild(option);
+  });
+  const values = normalized.map((entry) => entry.value);
+  const selected = values.includes(previous) ? previous : values[0];
+  select.value = selected;
+  return selected;
+}
+
+function parseNumericMatrix2D(raw) {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  if (!Array.isArray(raw[0])) return null;
+  if (raw[0].length === 0) return null;
+  if (typeof raw[0][0] !== "number") return null;
+  return raw;
+}
+
+function toGridChannels(raw) {
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  const as2d = parseNumericMatrix2D(raw);
+  if (as2d) return [as2d];
+  if (Array.isArray(raw[0]) && Array.isArray(raw[0][0])) {
+    return raw
+      .map((entry) => parseNumericMatrix2D(entry))
+      .filter((entry) => Array.isArray(entry));
+  }
+  return [];
+}
+
+function toVisionGrayMatrix(raw) {
+  const as2d = parseNumericMatrix2D(raw);
+  if (as2d) return as2d;
+  const channels = toGridChannels(raw);
+  if (channels.length === 0) return null;
+  const first = channels[0];
+  const h = first.length;
+  const w = first[0]?.length || 0;
+  if (h <= 0 || w <= 0) return null;
+  if (channels.length === 1) return first;
+  if (channels.length < 3) return first;
+  const out = new Array(h);
+  for (let y = 0; y < h; y += 1) {
+    const row = new Array(w);
+    for (let x = 0; x < w; x += 1) {
+      const r = Number(channels[0][y][x] || 0);
+      const g = Number(channels[1][y][x] || 0);
+      const b = Number(channels[2][y][x] || 0);
+      row[x] = 0.299 * r + 0.587 * g + 0.114 * b;
+    }
+    out[y] = row;
+  }
+  return out;
+}
+
+function hexToRgb(hex) {
+  const clean = String(hex || "").trim().replace("#", "");
+  if (clean.length !== 6) {
+    return { r: 255, g: 255, b: 255 };
+  }
+  const value = Number.parseInt(clean, 16);
+  if (!Number.isFinite(value)) {
+    return { r: 255, g: 255, b: 255 };
+  }
+  return {
+    r: (value >> 16) & 255,
+    g: (value >> 8) & 255,
+    b: value & 255,
+  };
+}
+
+function paletteColor(t, palette) {
+  const stops = Array.isArray(palette) && palette.length > 1 ? palette : ["#000000", "#ffffff"];
+  const x = clamp01(t) * (stops.length - 1);
+  const i0 = Math.floor(x);
+  const i1 = Math.min(stops.length - 1, i0 + 1);
+  const frac = x - i0;
+  const c0 = hexToRgb(stops[i0]);
+  const c1 = hexToRgb(stops[i1]);
+  const r = Math.round(c0.r + (c1.r - c0.r) * frac);
+  const g = Math.round(c0.g + (c1.g - c0.g) * frac);
+  const b = Math.round(c0.b + (c1.b - c0.b) * frac);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+function drawMatrixHeatmap(canvas, matrix, { palette, fixedRange, emptyMessage } = {}) {
+  const ctx = setupCanvas(canvas);
+  if (!ctx) return;
+  const { width, height } = canvas.getBoundingClientRect();
+  ctx.fillStyle = theme.background;
+  ctx.fillRect(0, 0, width, height);
+
+  if (!Array.isArray(matrix) || matrix.length === 0 || !Array.isArray(matrix[0]) || matrix[0].length === 0) {
+    ctx.fillStyle = theme.muted;
+    ctx.fillText(emptyMessage || "Data unavailable.", 12, 20);
+    return;
+  }
+
+  const values = [];
+  matrix.forEach((row) => {
+    if (!Array.isArray(row)) return;
+    row.forEach((value) => {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        values.push(numeric);
+      }
+    });
+  });
+  if (values.length === 0) {
+    ctx.fillStyle = theme.muted;
+    ctx.fillText(emptyMessage || "Data unavailable.", 12, 20);
+    return;
+  }
+
+  let minVal = Math.min(...values);
+  let maxVal = Math.max(...values);
+  if (Array.isArray(fixedRange) && fixedRange.length === 2) {
+    minVal = Number(fixedRange[0]);
+    maxVal = Number(fixedRange[1]);
+  }
+  if (!Number.isFinite(minVal) || !Number.isFinite(maxVal) || Math.abs(maxVal - minVal) < 1e-12) {
+    maxVal = minVal + 1;
+  }
+
+  const rows = matrix.length;
+  const cols = matrix[0].length;
+  const cellW = width / cols;
+  const cellH = height / rows;
+
+  for (let y = 0; y < rows; y += 1) {
+    const row = matrix[y];
+    for (let x = 0; x < cols; x += 1) {
+      const value = Number(row[x]);
+      const t = Number.isFinite(value) ? clamp01((value - minVal) / (maxVal - minVal)) : 0;
+      ctx.fillStyle = paletteColor(t, palette || theme.heat);
+      ctx.fillRect(x * cellW, y * cellH, cellW + 0.5, cellH + 0.5);
+    }
+  }
+}
+
+function drawModulatorPanel() {
+  const hasPath = Boolean(dataConfig.modgridJson);
+  if (!hasPath) {
+    setPanelVisible(auxNodes.modulatorCard, false);
+    return;
+  }
+  const payload = dataState.modgridData;
+  const grids = payload && typeof payload === "object" ? payload.grids : null;
+  const fieldNames = grids && typeof grids === "object" ? Object.keys(grids).sort() : [];
+  if (fieldNames.length === 0) {
+    setPanelVisible(auxNodes.modulatorCard, false);
+    return;
+  }
+
+  const selectedField = setSelectOptions(
+    auxNodes.modulatorFieldSelect,
+    fieldNames.map((name) => ({ value: name, label: name }))
+  );
+  if (!selectedField) {
+    setPanelVisible(auxNodes.modulatorCard, false);
+    return;
+  }
+
+  const channels = toGridChannels(grids[selectedField]);
+  if (channels.length === 0) {
+    setPanelVisible(auxNodes.modulatorCard, false);
+    return;
+  }
+
+  const kindsByField =
+    payload && payload.kinds && typeof payload.kinds === "object" ? payload.kinds : {};
+  const kindLabels = Array.isArray(kindsByField[selectedField]) ? kindsByField[selectedField] : [];
+  const selectedKind = Number(
+    setSelectOptions(
+      auxNodes.modulatorKindSelect,
+      channels.map((_, idx) => ({
+        value: String(idx),
+        label: String(kindLabels[idx] ?? `kind_${idx}`),
+      }))
+    ) || "0"
+  );
+  const matrix = channels[Math.max(0, Math.min(channels.length - 1, selectedKind))] || channels[0];
+
+  setPanelVisible(auxNodes.modulatorCard, true);
+  drawMatrixHeatmap(canvases.modulator, matrix, {
+    palette: theme.heat,
+    emptyMessage: "Modulator grid unavailable.",
+  });
+}
+
+function drawReceptorPanel() {
+  const hasPath = Boolean(dataConfig.receptorsCsv);
+  if (!hasPath) {
+    setPanelVisible(auxNodes.receptorCard, false);
+    return;
+  }
+
+  const rows = Array.isArray(dataState.receptorsRows) ? dataState.receptorsRows : null;
+  if (!rows || rows.length === 0) {
+    setPanelVisible(auxNodes.receptorCard, false);
+    return;
+  }
+
+  const projectionMap = new Map();
+  rows.forEach((row) => {
+    const proj = String(row.proj || "").trim();
+    const comp = String(row.comp || "").trim();
+    if (!proj) return;
+    const key = comp ? `${proj}::${comp}` : proj;
+    const label = comp ? `${proj}/${comp}` : proj;
+    if (!projectionMap.has(key)) {
+      projectionMap.set(key, label);
+    }
+  });
+  const projectionOptions = Array.from(projectionMap.entries())
+    .sort((a, b) => String(a[1]).localeCompare(String(b[1])))
+    .map(([value, label]) => ({ value, label }));
+  if (projectionOptions.length === 0) {
+    setPanelVisible(auxNodes.receptorCard, false);
+    return;
+  }
+
+  const numericMetricKeys = new Set();
+  rows.forEach((row) => {
+    Object.entries(row || {}).forEach(([key, value]) => {
+      if (key === "step" || key === "t" || key === "proj" || key === "comp") return;
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        numericMetricKeys.add(key);
+      }
+    });
+  });
+  const metricOptions = Array.from(numericMetricKeys)
+    .sort((a, b) => String(a).localeCompare(String(b)))
+    .map((key) => ({ value: key, label: key }));
+  if (metricOptions.length === 0) {
+    setPanelVisible(auxNodes.receptorCard, false);
+    return;
+  }
+
+  const selectedProjection = setSelectOptions(auxNodes.receptorProjectionSelect, projectionOptions);
+  const selectedMetric = setSelectOptions(auxNodes.receptorMetricSelect, metricOptions);
+  if (!selectedProjection || !selectedMetric) {
+    setPanelVisible(auxNodes.receptorCard, false);
+    return;
+  }
+
+  const [selectedProj, selectedComp = ""] = String(selectedProjection).split("::");
+  const series = rows
+    .filter((row) => {
+      const proj = String(row.proj || "").trim();
+      const comp = String(row.comp || "").trim();
+      return proj === selectedProj && comp === selectedComp;
+    })
+    .map((row) => Number(row[selectedMetric]));
+  const hasSeries = series.some((value) => Number.isFinite(value));
+
+  setPanelVisible(auxNodes.receptorCard, true);
+  const ctx = setupCanvas(canvases.receptor);
+  if (!ctx) return;
+  const { width, height } = canvases.receptor.getBoundingClientRect();
+  ctx.fillStyle = theme.background;
+  ctx.fillRect(0, 0, width, height);
+  if (!hasSeries) {
+    ctx.fillStyle = theme.muted;
+    ctx.fillText("No receptor series for selected projection.", 12, 20);
+    return;
+  }
+  const color = selectedMetric.includes("gaba") ? theme.inhib : theme.accent;
+  drawLineSeries(ctx, series, color, width, height);
+}
+
+function drawVisionPanel() {
+  const hasPath = Boolean(dataConfig.visionJson);
+  if (!hasPath) {
+    setPanelVisible(auxNodes.visionCard, false);
+    return;
+  }
+  const payload = dataState.visionData;
+  const matrix =
+    payload && payload.available && payload.data !== undefined
+      ? toVisionGrayMatrix(payload.data)
+      : null;
+  if (!matrix) {
+    setPanelVisible(auxNodes.visionCard, false);
+    return;
+  }
+
+  let maxValue = -Infinity;
+  for (let y = 0; y < matrix.length; y += 1) {
+    const row = matrix[y];
+    for (let x = 0; x < row.length; x += 1) {
+      const value = Number(row[x]);
+      if (Number.isFinite(value)) {
+        maxValue = Math.max(maxValue, value);
+      }
+    }
+  }
+  const range = maxValue > 1.0 ? [0, 255] : [0, 1];
+
+  setPanelVisible(auxNodes.visionCard, true);
+  drawMatrixHeatmap(canvases.vision, matrix, {
+    palette: ["#000000", "#ffffff"],
+    fixedRange: range,
+    emptyMessage: "Vision frame unavailable.",
+  });
 }
 
 function smoothSeries(values, window) {
@@ -2850,6 +3258,9 @@ function applyRunDirectory(runPath, { updateUrl = false } = {}) {
   dataConfig.trialsCsv = `${normalized}/trials.csv`;
   dataConfig.evalCsv = `${normalized}/eval.csv`;
   dataConfig.confusionCsv = `${normalized}/confusion.csv`;
+  dataConfig.modgridJson = `${normalized}/modgrid.json`;
+  dataConfig.receptorsCsv = `${normalized}/receptors.csv`;
+  dataConfig.visionJson = `${normalized}/vision.json`;
   dataConfig.runConfigJson = `${normalized}/run_config.json`;
   dataConfig.runFeaturesJson = `${normalized}/run_features.json`;
   dataConfig.runStatusJson = `${normalized}/run_status.json`;
@@ -2866,6 +3277,9 @@ function applyRunDirectory(runPath, { updateUrl = false } = {}) {
       "trials",
       "eval",
       "confusion",
+      "modgrid",
+      "receptors",
+      "vision",
     ].forEach((key) => url.searchParams.delete(key));
     url.searchParams.set("run", normalized);
     window.history.replaceState({}, "", url.toString());
@@ -3268,7 +3682,10 @@ try {
   setRunStateText({ state: "ui-error" });
 }
 
-window.addEventListener("resize", resizeAll);
+window.addEventListener("resize", () => {
+  resizeAll();
+  renderAuxPanels();
+});
 if (networkControls.viewSelect) {
   networkControls.viewSelect.addEventListener("change", (event) => {
     userViewSelection = true;
@@ -3354,6 +3771,26 @@ if (runNodes.startButton) {
 if (runNodes.stopButton) {
   runNodes.stopButton.addEventListener("click", () => {
     onStopRunClick();
+  });
+}
+if (auxNodes.modulatorFieldSelect) {
+  auxNodes.modulatorFieldSelect.addEventListener("change", () => {
+    drawModulatorPanel();
+  });
+}
+if (auxNodes.modulatorKindSelect) {
+  auxNodes.modulatorKindSelect.addEventListener("change", () => {
+    drawModulatorPanel();
+  });
+}
+if (auxNodes.receptorProjectionSelect) {
+  auxNodes.receptorProjectionSelect.addEventListener("change", () => {
+    drawReceptorPanel();
+  });
+}
+if (auxNodes.receptorMetricSelect) {
+  auxNodes.receptorMetricSelect.addEventListener("change", () => {
+    drawReceptorPanel();
   });
 }
 

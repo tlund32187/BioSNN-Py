@@ -132,3 +132,40 @@ def test_cli_ring_dtype_cuda_smoke(monkeypatch, tmp_path: Path) -> None:
     topology = run_dir / "topology.json"
     assert topology.exists()
     assert topology.stat().st_size > 0
+
+
+def test_cli_vision_demo_writes_optional_monitor_artifacts(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    run_dir = tmp_path / "vision_demo"
+    args = cli._parse_args(
+        [
+            "--demo",
+            "vision",
+            "--mode",
+            "dashboard",
+            "--device",
+            "cpu",
+            "--steps",
+            "20",
+            "--no-open",
+        ]
+    )
+
+    monkeypatch.setattr(cli, "_parse_args", lambda *_: args)
+    monkeypatch.setattr(cli, "_make_run_dir", lambda *_: run_dir)
+    monkeypatch.setattr(cli, "_should_launch_dashboard", lambda *_: False)
+
+    cli.main()
+
+    required = (
+        "topology.json",
+        "neuron.csv",
+        "metrics.csv",
+        "modgrid.json",
+        "receptors.csv",
+        "vision.json",
+    )
+    for name in required:
+        path = run_dir / name
+        assert path.exists(), f"Missing artifact {name} for vision demo"
+        assert path.stat().st_size > 0, f"Empty artifact {name} for vision demo"

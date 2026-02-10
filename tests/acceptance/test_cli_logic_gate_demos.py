@@ -84,7 +84,8 @@ def test_cli_logic_gate_demos_smoke(
             metrics_rows = list(csv.DictReader(handle))
         assert metrics_rows
         assert any(str(row.get("sample_accuracy_global", "")).strip() for row in metrics_rows)
+        assert any(str(row.get("global_eval_accuracy", "")).strip() for row in metrics_rows)
         last_metrics = metrics_rows[-1]
         assert str(last_metrics.get("eval_accuracy", "")).strip() == str(
-            last_metrics.get("sample_accuracy_global", "")
+            last_metrics.get("global_eval_accuracy", "")
         ).strip()

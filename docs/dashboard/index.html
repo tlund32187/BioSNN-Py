@@ -49,6 +49,7 @@
               <label>Demo
                 <select id="runDemoSelect">
                   <option value="network">Network</option>
+                  <option value="vision">Vision</option>
                   <option value="pruning_sparse">Pruning Sparse</option>
                   <option value="neurogenesis_sparse">Neurogenesis Sparse</option>
                   <option value="propagation_impulse">Propagation Impulse</option>
@@ -282,6 +283,42 @@
             <div id="taskTruthTable"></div>
             <p class="task-foot" id="taskTakeaway">Train = sampled trial accuracy. Eval = full gate truth-table accuracy.</p>
           </div>
+        </section>
+
+        <section class="card card-modulator hidden" id="modulatorCard">
+          <div class="card-header">
+            <h2>Neuromodulator Field</h2>
+            <div class="header-actions">
+              <div class="control-row">
+                <label>Field <select id="modulatorFieldSelect"></select></label>
+                <label>Kind <select id="modulatorKindSelect"></select></label>
+              </div>
+              <span class="chip">Mod grid</span>
+            </div>
+          </div>
+          <canvas id="modulatorCanvas"></canvas>
+        </section>
+
+        <section class="card card-receptor hidden" id="receptorCard">
+          <div class="card-header">
+            <h2>Receptor Summary</h2>
+            <div class="header-actions">
+              <div class="control-row">
+                <label>Proj <select id="receptorProjectionSelect"></select></label>
+                <label>Metric <select id="receptorMetricSelect"></select></label>
+              </div>
+              <span class="chip">Receptors</span>
+            </div>
+          </div>
+          <canvas id="receptorCanvas"></canvas>
+        </section>
+
+        <section class="card card-vision hidden" id="visionCard">
+          <div class="card-header">
+            <h2>Vision Input</h2>
+            <span class="chip">Frame</span>
+          </div>
+          <canvas id="visionCanvas"></canvas>
         </section>
       </main>
     </div>

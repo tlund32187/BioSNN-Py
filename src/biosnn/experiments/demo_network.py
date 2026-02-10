@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-import random
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -16,6 +14,7 @@ from biosnn.connectivity.builders import (
     build_bipartite_erdos_renyi_topology,
 )
 from biosnn.connectivity.delays import DelayParams, compute_delay_steps
+from biosnn.connectivity.positions import positions_tensor
 from biosnn.contracts.monitors import IMonitor, MonitorRequirements, StepEvent
 from biosnn.contracts.neurons import Compartment
 from biosnn.contracts.synapses import ISynapseModel
@@ -31,11 +30,13 @@ from biosnn.monitors.csv import NeuronCSVMonitor
 from biosnn.monitors.metrics.homeostasis_csv import HomeostasisCSVMonitor
 from biosnn.monitors.metrics.metrics_csv import MetricsCSVMonitor
 from biosnn.monitors.metrics.scalar_utils import scalar_to_float
+from biosnn.monitors.modulators.modulator_grid_json_monitor import ModulatorGridJsonMonitor
 from biosnn.monitors.raster.spike_events_csv import SpikeEventsCSVMonitor
+from biosnn.monitors.synapses.receptor_summary_csv import ReceptorSummaryCsvMonitor
+from biosnn.monitors.vision.vision_frame_json_monitor import VisionFrameJsonMonitor
 from biosnn.monitors.weights.projection_weights_csv import ProjectionWeightsCSVMonitor
 from biosnn.simulation.engine import TorchNetworkEngine
 from biosnn.simulation.network import (
-    NeuronPosition,
     PopulationFrame,
     PopulationSpec,
     ProjectionSpec,
@@ -163,6 +164,12 @@ class DemoNetworkConfig:
     newborn_duration_steps: int = 250
     max_total_neurons: int = 20000
     neurogenesis_verbose: bool = False
+    enable_vision_monitors: bool = False
+    vision_tensor_key: str = "pop/Input0/v_soma"
+    vision_frame_dtype: Literal["uint8", "float16"] = "uint8"
+    vision_export_every: int = 1
+    modgrid_export_every: int = 10
+    receptor_export_every: int = 10
 
 
 def build_network_demo(
@@ -738,6 +745,34 @@ def build_network_demo(
                     flush_every=25,
                 )
             )
+        if cfg.enable_vision_monitors and run_mode == "dashboard":
+            monitors.append(
+                ModulatorGridJsonMonitor(
+                    out_dir / "modgrid.json",
+                    every_n_steps=max(1, int(cfg.modgrid_export_every)),
+                    max_side=64,
+                    allow_cuda_sync=allow_cuda_sync,
+                )
+            )
+            monitors.append(
+                ReceptorSummaryCsvMonitor(
+                    out_dir / "receptors.csv",
+                    stride=max(1, int(cfg.receptor_export_every)),
+                    include_max=True,
+                    allow_cuda_sync=allow_cuda_sync,
+                    flush_every=25,
+                )
+            )
+            monitors.append(
+                VisionFrameJsonMonitor(
+                    out_dir / "vision.json",
+                    tensor_key=cfg.vision_tensor_key,
+                    every_n_steps=max(1, int(cfg.vision_export_every)),
+                    max_side=64,
+                    output_dtype=cfg.vision_frame_dtype,
+                    allow_cuda_sync=allow_cuda_sync,
+                )
+            )
 
     model_spec = DemoModelSpec(
         populations=populations,
@@ -1294,7 +1329,7 @@ def _build_population_spec(
         layout=layout,
         seed=seed,
     )
-    positions = _positions_tensor(frame, n, device=device, dtype=dtype)
+    positions = positions_tensor(frame, n, device=device, dtype=dtype)
     return PopulationSpec(
         name=name,
         model=model,
@@ -1303,91 +1338,6 @@ def _build_population_spec(
         positions=positions,
         meta={"layer": layer, "role": role, "group": group},
     )
-
-
-def _positions_tensor(frame: PopulationFrame, n: int, *, device: str, dtype: str) -> Any:
-    torch = require_torch()
-    device_obj = torch.device(device) if device else None
-    dtype_obj = getattr(torch, dtype) if isinstance(dtype, str) else dtype
-    positions = _generate_positions(frame, n)
-    if not positions:
-        return torch.empty((0, 3), device=device_obj, dtype=dtype_obj)
-    data = [[pos.x, pos.y, pos.z] for pos in positions]
-    return torch.tensor(data, device=device_obj, dtype=dtype_obj)
-
-
-def _generate_positions(frame: PopulationFrame, n: int) -> list[NeuronPosition]:
-    if n <= 0:
-        return []
-    origin_x, origin_y, origin_z = frame.origin
-    extent_x, extent_y, extent_z = frame.extent
-    layout = frame.layout
-    if layout == "line":
-        x_val = _center(origin_x, extent_x)
-        z_val = _center(origin_z, extent_z)
-        ys = _linspace(origin_y, origin_y + extent_y, n)
-        return [NeuronPosition(x_val, y, z_val) for y in ys]
-    if layout == "grid":
-        cols, rows = _grid_dims(n, extent_x, extent_y)
-        xs = _linspace(origin_x, origin_x + extent_x, cols)
-        ys = _linspace(origin_y, origin_y + extent_y, rows)
-        z_val = _center(origin_z, extent_z)
-        grid_positions: list[NeuronPosition] = []
-        for idx in range(n):
-            row = idx // cols
-            col = idx % cols
-            if row >= rows:
-                break
-            grid_positions.append(NeuronPosition(xs[col], ys[row], z_val))
-        return grid_positions
-    if layout == "ring":
-        center_x = _center(origin_x, extent_x)
-        center_y = _center(origin_y, extent_y)
-        z_val = _center(origin_z, extent_z)
-        radius = 0.5 * min(abs(extent_x), abs(extent_y))
-        if radius == 0.0:
-            return [NeuronPosition(center_x, center_y, z_val) for _ in range(n)]
-        return [
-            NeuronPosition(
-                center_x + radius * math.cos(2.0 * math.pi * idx / n),
-                center_y + radius * math.sin(2.0 * math.pi * idx / n),
-                z_val,
-            )
-            for idx in range(n)
-        ]
-    if layout == "random":
-        rng = random.Random(frame.seed)
-        rand_positions: list[NeuronPosition] = []
-        for _ in range(n):
-            rand_positions.append(
-                NeuronPosition(
-                    origin_x + rng.random() * extent_x,
-                    origin_y + rng.random() * extent_y,
-                    origin_z + rng.random() * extent_z,
-                )
-            )
-        return rand_positions
-    raise ValueError(f"Unknown population layout: {layout}")
-
-
-def _linspace(start: float, end: float, count: int) -> list[float]:
-    if count <= 1:
-        return [_center(start, end - start)]
-    step = (end - start) / (count - 1)
-    return [start + step * idx for idx in range(count)]
-
-
-def _grid_dims(n: int, extent_x: float, extent_y: float) -> tuple[int, int]:
-    if n <= 0:
-        return 0, 0
-    aspect = abs(extent_x / extent_y) if extent_y not in (0.0, -0.0) else 1.0
-    cols = max(1, int(math.ceil(math.sqrt(n * aspect))))
-    rows = max(1, int(math.ceil(n / cols)))
-    return cols, rows
-
-
-def _center(origin: float, extent: float) -> float:
-    return origin + extent * 0.5
 
 
 def _seed_for(base_seed: int | None, *parts: int) -> int | None:

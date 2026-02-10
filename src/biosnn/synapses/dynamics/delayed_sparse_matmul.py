@@ -18,6 +18,7 @@ from biosnn.contracts.synapses import (
 )
 from biosnn.core.torch_utils import _resolve_dtype, require_torch, resolve_device_dtype
 from biosnn.synapses.buffers import BucketedEventRing
+from biosnn.synapses.receptors import ReceptorProfile, resolve_profile_value
 
 _COMPARTMENT_ORDER = tuple(Compartment)
 _COMPARTMENT_TO_ID = {comp: idx for idx, comp in enumerate(_COMPARTMENT_ORDER)}
@@ -38,6 +39,8 @@ class DelayedSparseMatmulParams:
     backend: Literal["spmm_fused", "event_driven"] = "spmm_fused"
     ring_strategy: Literal["dense", "event_bucketed"] = "dense"
     ring_capacity_max: int = 2_000_000
+    receptor_profile: ReceptorProfile | None = None
+    receptor_state_dtype: str | None = None
 
 
 @dataclass(slots=True)
@@ -49,6 +52,15 @@ class DelayedSparseMatmulState:
     cursor: int
     bind_weights_to_topology: bool = True
     pre_activity_buf: Tensor | None = None
+    receptor_g: dict[Compartment, Tensor] | None = None
+    receptor_decay: Tensor | None = None
+    receptor_mix: Tensor | None = None
+    receptor_sign: Tensor | None = None
+    receptor_sign_values: tuple[float, ...] | None = None
+    receptor_profile_kinds: tuple[ReceptorKind, ...] | None = None
+    receptor_profile_dt: float | None = None
+    receptor_profile_dtype: Any | None = None
+    receptor_input_buf: dict[Compartment, Tensor] | None = None
 
 
 class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
@@ -102,6 +114,12 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
             state.cursor = 0
             if state.pre_activity_buf is not None:
                 state.pre_activity_buf.zero_()
+            if state.receptor_g is not None:
+                for g in state.receptor_g.values():
+                    g.zero_()
+            if state.receptor_input_buf is not None:
+                for buf in state.receptor_input_buf.values():
+                    buf.zero_()
             return state
         state.weights[edge_indices] = self.params.init_weight
         if state.post_ring is not None:
@@ -115,6 +133,12 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                 event_ring.clear()
         if state.pre_activity_buf is not None:
             state.pre_activity_buf.zero_()
+        if state.receptor_g is not None:
+            for g in state.receptor_g.values():
+                g.zero_()
+        if state.receptor_input_buf is not None:
+            for buf in state.receptor_input_buf.values():
+                buf.zero_()
         return state
 
     def step(
@@ -154,6 +178,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                     pre_spikes,
                     device,
                     weights,
+                    dt,
                 )
                 return state, SynapseStepResult(post_drive=post_drive, extras=extras)
             post_drive = _step_sparse_matmul(
@@ -163,6 +188,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                 pre_spikes,
                 device,
                 weights,
+                dt,
             )
             return state, SynapseStepResult(post_drive=post_drive)
 
@@ -206,6 +232,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                     device,
                     weights,
                     out_drive,
+                    dt,
                 )
                 return
             _step_sparse_matmul_into(
@@ -216,6 +243,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                 device,
                 weights,
                 out_drive,
+                dt,
             )
 
     def state_tensors(self, state: DelayedSparseMatmulState) -> Mapping[str, Tensor]:
@@ -253,7 +281,10 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         kinds: tuple[ReceptorKind, ...],
         scale_map: Mapping[ReceptorKind, float],
     ) -> Tensor:
-        values = tuple(float(scale_map.get(kind, 1.0)) for kind in kinds)
+        values = tuple(
+            resolve_profile_value(scale_map, kind, default=1.0)
+            for kind in kinds
+        )
         key = (like.device, like.dtype, kinds, values)
         cached = self._scale_cache.get(key)
         if cached is not None:
@@ -346,6 +377,7 @@ def _step_sparse_matmul(
     pre_spikes: Tensor,
     device: Any,
     weights: Tensor,
+    dt: float,
 ) -> Mapping[Compartment, Tensor]:
     torch = require_torch()
     max_delay = _max_delay_steps(topology)
@@ -411,6 +443,17 @@ def _step_sparse_matmul(
                 else:
                     post_ring[comp][target_row].add_(_as_ring_dtype(contrib, ring_dtype))
 
+    _apply_receptor_profile_if_enabled(
+        model=model,
+        state=state,
+        topology=topology,
+        drive_by_comp=post_drive,
+        dt=dt,
+        n_post=n_post,
+        device=device,
+        weights_dtype=weights.dtype,
+    )
+
     state.cursor = (cursor + 1) % depth
     return post_drive
 
@@ -423,13 +466,14 @@ def _step_sparse_matmul_into(
     device: Any,
     weights: Tensor,
     out_drive: MutableMapping[Compartment, Tensor],
+    dt: float,
 ) -> None:
     torch = require_torch()
     max_delay = _max_delay_steps(topology)
     depth = max_delay + 1
     n_post = _infer_n_post(topology)
     ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
-    post_ring, _ = _ensure_post_ring(
+    post_ring, post_out = _ensure_post_ring(
         state,
         topology,
         depth,
@@ -439,12 +483,23 @@ def _step_sparse_matmul_into(
         weights.dtype,
     )
 
+    use_receptor_profile = model.params.receptor_profile is not None
     cursor = state.cursor % depth
-    for comp, ring in post_ring.items():
-        slot = ring[cursor]
-        if comp not in out_drive:
-            raise KeyError(f"Drive accumulator missing compartment {comp}")
-        _add_ring_slot(slot, out_drive[comp])
+    proj_drive: MutableMapping[Compartment, Tensor]
+    if use_receptor_profile:
+        proj_drive = post_out
+        for comp, ring in post_ring.items():
+            slot = ring[cursor]
+            out = proj_drive[comp]
+            out.zero_()
+            _copy_ring_slot(slot, out)
+    else:
+        proj_drive = out_drive
+        for comp, ring in post_ring.items():
+            slot = ring[cursor]
+            if comp not in out_drive:
+                raise KeyError(f"Drive accumulator missing compartment {comp}")
+            _add_ring_slot(slot, out_drive[comp])
 
     weights = _maybe_clamp_weights(model, state, topology, weights)
     pre_activity = _fill_pre_activity_buf(state, pre_spikes, weights, device)
@@ -455,7 +510,7 @@ def _step_sparse_matmul_into(
     )
     if fused_mats:
         for comp, fused in fused_mats.items():
-            if comp not in out_drive:
+            if comp not in proj_drive:
                 raise KeyError(f"Drive accumulator missing compartment {comp}")
             delays = fused_delays.get(comp)
             if delays is None or delays.numel() == 0:
@@ -469,7 +524,7 @@ def _step_sparse_matmul_into(
                 continue
             contrib = contrib_flat.view(int(d_val), n_post_comp)
             if immediate_idx is not None and immediate_idx.numel() > 0:
-                out_drive[comp].add_(contrib.index_select(0, immediate_idx).sum(dim=0))
+                proj_drive[comp].add_(contrib.index_select(0, immediate_idx).sum(dim=0))
             if delayed_idx is not None and delayed_idx.numel() > 0:
                 ring_indices = torch.remainder(delays + cursor, depth)
                 contrib_ring = _as_ring_dtype(contrib, ring_dtype)
@@ -481,15 +536,31 @@ def _step_sparse_matmul_into(
     else:
         mats_by_comp = _nonempty_mats_by_comp(topology, device)
         for comp, mats in mats_by_comp.items():
-            if comp not in out_drive:
+            if comp not in proj_drive:
                 raise KeyError(f"Drive accumulator missing compartment {comp}")
             for delay, mat in mats:
                 contrib = torch.sparse.mm(mat, pre_activity.unsqueeze(1)).squeeze(1)
                 target_row = (cursor + delay) % depth
                 if delay == 0:
-                    out_drive[comp].add_(contrib)
+                    proj_drive[comp].add_(contrib)
                 else:
                     post_ring[comp][target_row].add_(_as_ring_dtype(contrib, ring_dtype))
+
+    if use_receptor_profile:
+        _apply_receptor_profile_if_enabled(
+            model=model,
+            state=state,
+            topology=topology,
+            drive_by_comp=proj_drive,
+            dt=dt,
+            n_post=n_post,
+            device=device,
+            weights_dtype=weights.dtype,
+        )
+        for comp, proj_out in proj_drive.items():
+            if comp not in out_drive:
+                raise KeyError(f"Drive accumulator missing compartment {comp}")
+            out_drive[comp].add_(proj_out)
 
     state.cursor = (cursor + 1) % depth
 
@@ -501,6 +572,7 @@ def _step_event_driven(
     pre_spikes: Tensor,
     device: Any,
     weights: Tensor,
+    dt: float,
 ) -> tuple[Mapping[Compartment, Tensor], Mapping[str, Tensor]]:
     torch = require_torch()
     max_delay = _max_delay_steps(topology)
@@ -558,12 +630,32 @@ def _step_event_driven(
     pre_activity = _fill_pre_activity_buf(state, pre_spikes, weights, device)
     active_pre = pre_activity.nonzero(as_tuple=False).flatten()
     if active_pre.numel() == 0:
+        _apply_receptor_profile_if_enabled(
+            model=model,
+            state=state,
+            topology=topology,
+            drive_by_comp=post_drive,
+            dt=dt,
+            n_post=n_post,
+            device=device,
+            weights_dtype=weights.dtype,
+        )
         state.cursor = (cursor + 1) % depth
         return post_drive, {"processed_edges": weights.new_zeros(())}
 
     pre_ptr, edge_idx = _require_pre_adjacency(topology, device)
     edges = _gather_active_edges(active_pre, pre_ptr, edge_idx)
     if edges.numel() == 0:
+        _apply_receptor_profile_if_enabled(
+            model=model,
+            state=state,
+            topology=topology,
+            drive_by_comp=post_drive,
+            dt=dt,
+            n_post=n_post,
+            device=device,
+            weights_dtype=weights.dtype,
+        )
         state.cursor = (cursor + 1) % depth
         return post_drive, {"processed_edges": weights.new_zeros(())}
 
@@ -615,6 +707,17 @@ def _step_event_driven(
                 ring_dtype=ring_dtype,
             )
 
+    _apply_receptor_profile_if_enabled(
+        model=model,
+        state=state,
+        topology=topology,
+        drive_by_comp=post_drive,
+        dt=dt,
+        n_post=n_post,
+        device=device,
+        weights_dtype=weights.dtype,
+    )
+
     state.cursor = (cursor + 1) % depth
     return post_drive, {"processed_edges": weights.new_tensor(edges.numel())}
 
@@ -627,6 +730,7 @@ def _step_event_driven_into(
     device: Any,
     weights: Tensor,
     out_drive: MutableMapping[Compartment, Tensor],
+    dt: float,
 ) -> None:
     torch = require_torch()
     max_delay = _max_delay_steps(topology)
@@ -634,9 +738,19 @@ def _step_event_driven_into(
     n_post = _infer_n_post(topology)
     ring_dtype = _resolve_ring_dtype(model.params.ring_dtype, weights.dtype, device)
     use_bucketed_ring = model.params.ring_strategy == "event_bucketed"
+    use_receptor_profile = model.params.receptor_profile is not None
     post_ring: dict[Compartment, Tensor] | None = None
     event_ring: dict[Compartment, _EventRing] | None = None
+    post_out: dict[Compartment, Tensor] | None = None
     if use_bucketed_ring:
+        if use_receptor_profile:
+            post_out = _ensure_post_out(
+                state,
+                topology,
+                n_post,
+                device,
+                weights.dtype,
+            )
         event_ring = _ensure_event_ring(
             state,
             topology,
@@ -646,7 +760,7 @@ def _step_event_driven_into(
             capacity_max=int(model.params.ring_capacity_max),
         )
     else:
-        post_ring, _ = _ensure_post_ring(
+        post_ring, post_out = _ensure_post_ring(
             state,
             topology,
             depth,
@@ -657,29 +771,77 @@ def _step_event_driven_into(
         )
 
     cursor = state.cursor % depth
-    if use_bucketed_ring:
-        assert event_ring is not None
-        for comp, bucket_ring in event_ring.items():
-            if comp not in out_drive:
-                raise KeyError(f"Drive accumulator missing compartment {comp}")
-            bucket_ring.pop_into(cursor, out_drive[comp])
+    proj_drive: MutableMapping[Compartment, Tensor]
+    if use_receptor_profile:
+        assert post_out is not None
+        proj_drive = post_out
+        if use_bucketed_ring:
+            assert event_ring is not None
+            for comp, bucket_ring in event_ring.items():
+                out = proj_drive[comp]
+                out.zero_()
+                bucket_ring.pop_into(cursor, out)
+        else:
+            assert post_ring is not None
+            for comp, dense_ring in post_ring.items():
+                out = proj_drive[comp]
+                out.zero_()
+                _copy_ring_slot(dense_ring[cursor], out)
     else:
-        assert post_ring is not None
-        for comp, dense_ring in post_ring.items():
-            if comp not in out_drive:
-                raise KeyError(f"Drive accumulator missing compartment {comp}")
-            _add_ring_slot(dense_ring[cursor], out_drive[comp])
+        proj_drive = out_drive
+        if use_bucketed_ring:
+            assert event_ring is not None
+            for comp, bucket_ring in event_ring.items():
+                if comp not in out_drive:
+                    raise KeyError(f"Drive accumulator missing compartment {comp}")
+                bucket_ring.pop_into(cursor, out_drive[comp])
+        else:
+            assert post_ring is not None
+            for comp, dense_ring in post_ring.items():
+                if comp not in out_drive:
+                    raise KeyError(f"Drive accumulator missing compartment {comp}")
+                _add_ring_slot(dense_ring[cursor], out_drive[comp])
 
     weights = _maybe_clamp_weights(model, state, topology, weights)
     pre_activity = _fill_pre_activity_buf(state, pre_spikes, weights, device)
     active_pre = pre_activity.nonzero(as_tuple=False).flatten()
     if active_pre.numel() == 0:
+        if use_receptor_profile:
+            _apply_receptor_profile_if_enabled(
+                model=model,
+                state=state,
+                topology=topology,
+                drive_by_comp=proj_drive,
+                dt=dt,
+                n_post=n_post,
+                device=device,
+                weights_dtype=weights.dtype,
+            )
+            for comp, proj_out in proj_drive.items():
+                if comp not in out_drive:
+                    raise KeyError(f"Drive accumulator missing compartment {comp}")
+                out_drive[comp].add_(proj_out)
         state.cursor = (cursor + 1) % depth
         return
 
     pre_ptr, edge_idx = _require_pre_adjacency(topology, device)
     edges = _gather_active_edges(active_pre, pre_ptr, edge_idx)
     if edges.numel() == 0:
+        if use_receptor_profile:
+            _apply_receptor_profile_if_enabled(
+                model=model,
+                state=state,
+                topology=topology,
+                drive_by_comp=proj_drive,
+                dt=dt,
+                n_post=n_post,
+                device=device,
+                weights_dtype=weights.dtype,
+            )
+            for comp, proj_out in proj_drive.items():
+                if comp not in out_drive:
+                    raise KeyError(f"Drive accumulator missing compartment {comp}")
+                out_drive[comp].add_(proj_out)
         state.cursor = (cursor + 1) % depth
         return
 
@@ -695,7 +857,7 @@ def _step_event_driven_into(
     post_ring_opt = None if use_bucketed_ring else post_ring
     if topology.target_compartments is None:
         comp = topology.target_compartment
-        if comp not in out_drive:
+        if comp not in proj_drive:
             raise KeyError(f"Drive accumulator missing compartment {comp}")
         _route_currents_for_comp(
             posts=edge_post,
@@ -703,7 +865,7 @@ def _step_event_driven_into(
             delays=delay_vals,
             cursor=cursor,
             depth=depth,
-            out=out_drive[comp],
+            out=proj_drive[comp],
             dense_ring=post_ring_opt[comp] if post_ring_opt is not None else None,
             event_ring=event_ring[comp] if event_ring is not None else None,
             ring_dtype=ring_dtype,
@@ -713,7 +875,7 @@ def _step_event_driven_into(
         if comp_ids.device != device or comp_ids.dtype != torch.long:
             raise ValueError("target_compartments must be on the target device with dtype long")
         comp_ids = comp_ids.index_select(0, edges)
-        for comp, out in out_drive.items():
+        for comp, out in proj_drive.items():
             comp_mask = comp_ids == _COMPARTMENT_TO_ID[comp]
             comp_idx = comp_mask.nonzero(as_tuple=False).flatten()
             if comp_idx.numel() == 0:
@@ -732,6 +894,22 @@ def _step_event_driven_into(
                 event_ring=event_ring[comp] if event_ring is not None else None,
                 ring_dtype=ring_dtype,
             )
+
+    if use_receptor_profile:
+        _apply_receptor_profile_if_enabled(
+            model=model,
+            state=state,
+            topology=topology,
+            drive_by_comp=proj_drive,
+            dt=dt,
+            n_post=n_post,
+            device=device,
+            weights_dtype=weights.dtype,
+        )
+        for comp, proj_out in proj_drive.items():
+            if comp not in out_drive:
+                raise KeyError(f"Drive accumulator missing compartment {comp}")
+            out_drive[comp].add_(proj_out)
 
     state.cursor = (cursor + 1) % depth
 
@@ -921,6 +1099,163 @@ def _ring_compartments(topology: SynapseTopology) -> tuple[Compartment, ...]:
                     comps.append(comp)
             return tuple(comps)
     return _COMPARTMENT_ORDER
+
+
+def _apply_receptor_profile_if_enabled(
+    *,
+    model: DelayedSparseMatmulSynapse,
+    state: DelayedSparseMatmulState,
+    topology: SynapseTopology,
+    drive_by_comp: Mapping[Compartment, Tensor],
+    dt: float,
+    n_post: int,
+    device: Any,
+    weights_dtype: Any,
+) -> None:
+    profile = model.params.receptor_profile
+    if profile is None:
+        return
+    _ensure_receptor_profile_state(
+        model=model,
+        state=state,
+        topology=topology,
+        dt=dt,
+        n_post=n_post,
+        device=device,
+        weights_dtype=weights_dtype,
+    )
+    if state.receptor_g is None or state.receptor_decay is None or state.receptor_mix is None:
+        return
+    signs = state.receptor_sign_values or ()
+    for comp, out in drive_by_comp.items():
+        g = state.receptor_g.get(comp)
+        if g is None:
+            continue
+        receptor_in = out
+        if receptor_in.dtype != g.dtype:
+            receptor_in = _ensure_receptor_input_buf(
+                state=state,
+                comp=comp,
+                n_post=n_post,
+                device=device,
+                dtype=g.dtype,
+            )
+            receptor_in.copy_(out)
+        g.mul_(state.receptor_decay)
+        g.addcmul_(state.receptor_mix, receptor_in.unsqueeze(0))
+        out.zero_()
+        if out.dtype == g.dtype:
+            for ridx, sign in enumerate(signs):
+                if sign != 0.0:
+                    out.add_(g[ridx], alpha=sign)
+        else:
+            for ridx, sign in enumerate(signs):
+                if sign != 0.0:
+                    out.add_(g[ridx].to(dtype=out.dtype), alpha=sign)
+
+
+def _ensure_receptor_profile_state(
+    *,
+    model: DelayedSparseMatmulSynapse,
+    state: DelayedSparseMatmulState,
+    topology: SynapseTopology,
+    dt: float,
+    n_post: int,
+    device: Any,
+    weights_dtype: Any,
+) -> None:
+    profile = model.params.receptor_profile
+    if profile is None:
+        return
+    torch = require_torch()
+    kinds = tuple(profile.kinds)
+    if len(kinds) == 0:
+        raise ValueError("receptor_profile.kinds must be non-empty.")
+    receptor_dtype = _resolve_receptor_profile_dtype(
+        receptor_state_dtype=model.params.receptor_state_dtype,
+        weights_dtype=weights_dtype,
+    )
+    if state.receptor_g is None:
+        state.receptor_g = {}
+    for comp in _ring_compartments(topology):
+        g = state.receptor_g.get(comp)
+        if (
+            g is None
+            or g.shape != (len(kinds), n_post)
+            or g.device != device
+            or g.dtype != receptor_dtype
+        ):
+            state.receptor_g[comp] = torch.zeros(
+                (len(kinds), n_post), device=device, dtype=receptor_dtype
+            )
+
+    cache_invalid = (
+        state.receptor_decay is None
+        or state.receptor_mix is None
+        or state.receptor_sign is None
+        or state.receptor_profile_kinds != kinds
+        or state.receptor_profile_dt != float(dt)
+        or state.receptor_profile_dtype != receptor_dtype
+        or state.receptor_decay.device != device
+        or state.receptor_mix.device != device
+        or state.receptor_sign.device != device
+    )
+    if cache_invalid:
+        tau_vals = [
+            max(resolve_profile_value(profile.tau, kind, default=1.0), 1e-9)
+            for kind in kinds
+        ]
+        mix_vals = [resolve_profile_value(profile.mix, kind, default=1.0) for kind in kinds]
+        sign_vals = [resolve_profile_value(profile.sign, kind, default=1.0) for kind in kinds]
+        tau = cast(
+            Tensor,
+            torch.tensor(tau_vals, device=device, dtype=receptor_dtype),
+        )
+        decay = cast(Tensor, torch.exp(-float(dt) / tau)).unsqueeze(1)
+        mix = cast(
+            Tensor,
+            torch.tensor(mix_vals, device=device, dtype=receptor_dtype),
+        ).unsqueeze(1)
+        sign = cast(
+            Tensor,
+            torch.tensor(sign_vals, device=device, dtype=receptor_dtype),
+        ).unsqueeze(1)
+        state.receptor_decay = decay
+        state.receptor_mix = mix
+        state.receptor_sign = sign
+        state.receptor_sign_values = tuple(float(v) for v in sign_vals)
+        state.receptor_profile_kinds = kinds
+        state.receptor_profile_dt = float(dt)
+        state.receptor_profile_dtype = receptor_dtype
+
+
+def _ensure_receptor_input_buf(
+    *,
+    state: DelayedSparseMatmulState,
+    comp: Compartment,
+    n_post: int,
+    device: Any,
+    dtype: Any,
+) -> Tensor:
+    torch = require_torch()
+    if state.receptor_input_buf is None:
+        state.receptor_input_buf = {}
+    buf = state.receptor_input_buf.get(comp)
+    if buf is None or buf.shape != (n_post,) or buf.device != device or buf.dtype != dtype:
+        buf = torch.zeros((n_post,), device=device, dtype=dtype)
+        state.receptor_input_buf[comp] = buf
+    return buf
+
+
+def _resolve_receptor_profile_dtype(
+    *,
+    receptor_state_dtype: str | None,
+    weights_dtype: Any,
+) -> Any:
+    if receptor_state_dtype is None:
+        return weights_dtype
+    torch = require_torch()
+    return _resolve_dtype(torch, receptor_state_dtype)
 
 
 def _resolve_receptor_scale_map(

@@ -39,6 +39,8 @@ def test_cli_demo_flag_defaults():
 
     args = cli._parse_args(["--demo", "network"])
     assert args.demo == "network"
+    args = cli._parse_args(["--demo", "vision"])
+    assert args.demo == "vision"
     args = cli._parse_args(["--demo", "propagation_impulse"])
     assert args.demo == "propagation_impulse"
     args = cli._parse_args(["--demo", "delay_impulse"])
@@ -216,4 +218,10 @@ def test_cli_dashboard_url_params(tmp_path: Path):
     assert "spikes" in params
     assert "metrics" in params
     assert "weights" in params
+    assert "modgrid" in params
+    assert "receptors" in params
+    assert "vision" in params
     assert params["weights"] == ["none"]
+    assert params["modgrid"] == ["none"]
+    assert params["receptors"] == ["none"]
+    assert params["vision"] == ["none"]

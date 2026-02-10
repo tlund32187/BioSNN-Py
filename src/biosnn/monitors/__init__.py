@@ -8,7 +8,10 @@ from biosnn.monitors.csv import (
 )
 from biosnn.monitors.metrics.homeostasis_csv import HomeostasisCSVMonitor
 from biosnn.monitors.metrics.metrics_csv import MetricsCSVMonitor
+from biosnn.monitors.modulators import ModulatorGridJsonMonitor
 from biosnn.monitors.raster.spike_events_csv import SpikeEventsCSVMonitor
+from biosnn.monitors.synapses import ReceptorSummaryCsvMonitor
+from biosnn.monitors.vision import VisionFrameJsonMonitor
 from biosnn.monitors.weights.projection_weights_csv import ProjectionWeightsCSVMonitor
 
 __all__ = [
@@ -20,4 +23,7 @@ __all__ = [
     "HomeostasisCSVMonitor",
     "SpikeEventsCSVMonitor",
     "ProjectionWeightsCSVMonitor",
+    "ModulatorGridJsonMonitor",
+    "ReceptorSummaryCsvMonitor",
+    "VisionFrameJsonMonitor",
 ]

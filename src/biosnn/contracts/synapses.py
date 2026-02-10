@@ -17,6 +17,8 @@ class ReceptorKind(StrEnum):
     AMPA = "ampa"
     NMDA = "nmda"
     GABA = "gaba"
+    GABA_A = "gaba_a"
+    GABA_B = "gaba_b"
 
 
 @dataclass(frozen=True, slots=True)

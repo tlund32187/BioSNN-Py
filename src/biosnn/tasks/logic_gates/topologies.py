@@ -16,6 +16,7 @@ from biosnn.synapses.dynamics.delayed_sparse_matmul import (
     DelayedSparseMatmulParams,
     DelayedSparseMatmulSynapse,
 )
+from biosnn.synapses.receptors import profile_exc_ampa_nmda
 
 from .datasets import LogicGate, coerce_gate
 from .encoding import INPUT_NEURON_INDICES, OUTPUT_NEURON_INDICES
@@ -365,7 +366,12 @@ def _bundle_and_engine(
 
 
 def _make_sparse_synapse() -> DelayedSparseMatmulSynapse:
-    return DelayedSparseMatmulSynapse(DelayedSparseMatmulParams(init_weight=0.0))
+    return DelayedSparseMatmulSynapse(
+        DelayedSparseMatmulParams(
+            init_weight=0.0,
+            receptor_profile=profile_exc_ampa_nmda(),
+        )
+    )
 
 
 def _build_fixed_fanin_topology(

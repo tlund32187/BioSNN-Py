@@ -16,6 +16,7 @@ class SimulationConfig:
     device: str | None = None
     dtype: str | None = None
     max_ring_mib: float | None = 2048.0
+    max_edges_mod_sample: int | None = None
     enable_pruning: bool = False
     prune_interval_steps: int = 250
     usage_alpha: float = 0.01

@@ -8,6 +8,7 @@ from typing import Any, Literal, cast
 
 DemoId = Literal[
     "network",
+    "vision",
     "pruning_sparse",
     "neurogenesis_sparse",
     "propagation_impulse",
@@ -33,6 +34,7 @@ RunRingDtype = Literal["none", "float32", "float16", "bfloat16"]
 
 ALLOWED_DEMOS: tuple[DemoId, ...] = (
     "network",
+    "vision",
     "pruning_sparse",
     "neurogenesis_sparse",
     "propagation_impulse",
@@ -98,6 +100,7 @@ _BASE_RUN_SPEC_DEFAULTS: dict[str, Any] = {
 
 _DEMO_NAMES: dict[DemoId, str] = {
     "network": "Network",
+    "vision": "Vision",
     "pruning_sparse": "Pruning Sparse",
     "neurogenesis_sparse": "Neurogenesis Sparse",
     "propagation_impulse": "Propagation Impulse",
@@ -115,6 +118,11 @@ _DEMO_NAMES: dict[DemoId, str] = {
 
 _DEMO_DEFAULT_OVERRIDES: dict[DemoId, dict[str, Any]] = {
     "network": {
+        "steps": 500,
+        "learning": {"enabled": False},
+        "modulators": {"enabled": False, "kinds": []},
+    },
+    "vision": {
         "steps": 500,
         "learning": {"enabled": False},
         "modulators": {"enabled": False, "kinds": []},

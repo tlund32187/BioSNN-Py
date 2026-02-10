@@ -205,6 +205,7 @@ DemoBuilder = Callable[..., DemoBuildResult]
 def _demo_registry() -> Mapping[str, DemoBuilder]:
     return {
         "network": _build_network_demo_from_cli,
+        "vision": _build_vision_demo_from_cli,
         "pruning_sparse": _build_pruning_sparse_demo_from_cli,
         "neurogenesis_sparse": _build_neurogenesis_sparse_demo_from_cli,
         "propagation_impulse": _build_propagation_impulse_demo_from_cli,
@@ -327,14 +328,16 @@ def _write_logic_metrics_csv_from_eval(run_dir: Path) -> None:
             eval_raw = (row.get("eval_accuracy") or "").strip()
             sample_raw = (row.get("sample_accuracy") or eval_raw).strip()
             global_raw = (row.get("sample_accuracy_global") or "").strip()
+            global_eval_raw = (row.get("global_eval_accuracy") or "").strip()
             rolling_raw = (row.get("trial_acc_rolling") or "").strip()
             loss_raw = (row.get("loss") or "").strip()
             if not trial_raw:
                 continue
-            # Curriculum rows include sample_accuracy_global; this is the true
-            # overall task accuracy across gates/replay and should drive dashboard curves.
-            train_out = global_raw or sample_raw
-            eval_out = global_raw or eval_raw
+            # Curriculum rows can include global_eval_accuracy (true across-gate
+            # evaluation) and sample_accuracy_global (rolling train sampling
+            # accuracy). Prefer global_eval_accuracy for dashboard curves.
+            train_out = global_eval_raw or global_raw or sample_raw
+            eval_out = global_eval_raw or global_raw or eval_raw
             loss_out = loss_raw
             if not loss_out and eval_out:
                 try:
@@ -351,6 +354,7 @@ def _write_logic_metrics_csv_from_eval(run_dir: Path) -> None:
                     "eval_accuracy": eval_out,
                     "gate_eval_accuracy": eval_raw,
                     "sample_accuracy_global": global_raw,
+                    "global_eval_accuracy": global_eval_raw,
                     "loss": loss_out,
                     "trial_acc_rolling": rolling_raw,
                 }
@@ -368,6 +372,7 @@ def _write_logic_metrics_csv_from_eval(run_dir: Path) -> None:
                 "eval_accuracy",
                 "gate_eval_accuracy",
                 "sample_accuracy_global",
+                "global_eval_accuracy",
                 "loss",
                 "trial_acc_rolling",
             ],
@@ -415,6 +420,27 @@ def _build_propagation_impulse_demo_from_cli(
         dt=dt,
         device=device,
     )
+
+
+def _build_vision_demo_from_cli(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    mode: ModeName,
+    steps: int,
+    dt: float,
+    device: str,
+) -> DemoBuildResult:
+    cfg = _build_network_config_from_args(
+        args=args,
+        run_dir=run_dir,
+        mode=mode,
+        steps=steps,
+        dt=dt,
+        device=device,
+    )
+    cfg.enable_vision_monitors = mode == "dashboard"
+    return build_network_demo(cfg)
 
 
 def _build_pruning_sparse_demo_from_cli(
@@ -715,6 +741,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=[
             "minimal",
             "network",
+            "vision",
             "pruning_sparse",
             "neurogenesis_sparse",
             "propagation_impulse",
@@ -731,8 +758,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ],
         default=_default_demo(),
         help=(
-            "demo to run: minimal, network, pruning_sparse, neurogenesis_sparse, propagation_impulse, "
-            "delay_impulse, learning_gate, dopamine_plasticity, logic_curriculum, logic_and, logic_or, "
+            "demo to run: minimal, network, vision, pruning_sparse, neurogenesis_sparse, "
+            "propagation_impulse, delay_impulse, learning_gate, dopamine_plasticity, logic_curriculum, logic_and, logic_or, "
             "logic_xor, logic_nand, logic_nor, logic_xnor"
         ),
     )
@@ -1178,6 +1205,9 @@ def _build_dashboard_url(port: int, run_dir: Path, repo_root: Path, refresh_ms: 
         "spikes": param_or_none("spikes.csv"),
         "metrics": param_or_none("metrics.csv"),
         "weights": param_or_none("weights.csv"),
+        "modgrid": param_or_none("modgrid.json"),
+        "receptors": param_or_none("receptors.csv"),
+        "vision": param_or_none("vision.json"),
         "refresh": str(refresh_ms),
     }
 

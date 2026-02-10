@@ -173,13 +173,14 @@ class TorchNetworkEngine(ISimulationEngine):
         self._compiled_pop_tensor_views: dict[str, dict[str, Tensor]] = {}
         self._compiled_pop_tensor_keys: dict[str, tuple[str, ...]] = {}
         self._compiled_mod_by_pop: dict[str, dict[ModulatorKind, Tensor]] = {}
-        self._compiled_edge_mods_by_proj: dict[str, dict[ModulatorKind, Tensor]] = {}
+        self._compiled_edge_mods_by_proj: dict[str, dict[ModulatorKind | str, Tensor]] = {}
         self._homeostasis_scalars: dict[str, Tensor] = {}
         self._structural_scalars: dict[str, Scalar] = {}
         self._structural_manager: StructuralPlasticityManager | None = None
         self._neurogenesis_scalars: dict[str, Scalar] = {}
         self._neurogenesis_manager: NeurogenesisManager | None = None
         self._max_ring_mib: float | None = 2048.0
+        self._max_edges_mod_sample: int | None = None
         self._last_event: StepEvent | None = None
 
         self.last_projection_drive: dict[str, Mapping[Compartment, Tensor]] = {}
@@ -229,6 +230,7 @@ class TorchNetworkEngine(ISimulationEngine):
             rng=None,
         )
         self._max_ring_mib = config.max_ring_mib
+        self._max_edges_mod_sample = config.max_edges_mod_sample
         self._structural_scalars = {}
         self._neurogenesis_scalars = {}
         if bool(config.enable_pruning):
@@ -661,7 +663,9 @@ class TorchNetworkEngine(ISimulationEngine):
                 pre_spikes=runtime.pre_state.spikes,
                 post_spikes=runtime.post_state.spikes,
                 weights=weights,
-                edge_mods=edge_mods_by_proj.get(runtime.plan.name),
+                edge_mods=self._modulator_subsystem.learning_modulators_for_projection(
+                    edge_mods_by_proj.get(runtime.plan.name)
+                ),
                 device=self._device,
                 use_sparse=runtime.use_sparse_learning,
                 scratch=self._get_learning_scratch(proj.name) if self._learning_use_scratch else None,
@@ -949,7 +953,9 @@ class TorchNetworkEngine(ISimulationEngine):
                 pre_spikes=runtime.pre_state.spikes,
                 post_spikes=runtime.post_state.spikes,
                 weights=weights,
-                edge_mods=edge_mods_by_proj.get(runtime.plan.name),
+                edge_mods=self._modulator_subsystem.learning_modulators_for_projection(
+                    edge_mods_by_proj.get(runtime.plan.name)
+                ),
                 device=self._device,
                 use_sparse=runtime.use_sparse_learning,
                 scratch=self._get_learning_scratch(proj.name) if self._learning_use_scratch else None,
@@ -1556,6 +1562,14 @@ class TorchNetworkEngine(ISimulationEngine):
 
         self._compiled_mod_by_pop = {spec.name: {} for spec in self._pop_specs}
         self._compiled_edge_mods_by_proj = {proj.name: {} for proj in self._proj_specs}
+        self._modulator_subsystem.prepare_compiled_edge_cache(
+            proj_specs=self._proj_specs,
+            pop_map=self._pop_map,
+            edge_mods_by_proj=self._compiled_edge_mods_by_proj,
+            device=self._device,
+            dtype=self._dtype,
+            max_edges_mod_sample=self._max_edges_mod_sample,
+        )
 
     def _get_learning_scratch(self, proj_name: str) -> _LearningScratch:
         return cast(

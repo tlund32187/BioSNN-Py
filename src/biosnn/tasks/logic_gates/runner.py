@@ -77,6 +77,9 @@ class _RstdpRuntime:
     topology_name: str
     mode: str
     hidden_size: int
+    context_dim: int
+    output_dim: int
+    edges_per_output: int
     rule: RStdpEligibilityRule
     state: Any
     ctx: StepContext
@@ -253,6 +256,10 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
             "eval_accuracy": float(initial_eval_acc),
             "sample_accuracy": 0.0,
             "trial_acc_rolling": 0.0,
+            "pred_00": int(predictions[0].item()),
+            "pred_01": int(predictions[1].item()),
+            "pred_10": int(predictions[2].item()),
+            "pred_11": int(predictions[3].item()),
             "mean_eligibility_abs": init_elig,
             "mean_abs_dw": 0.0,
             "weights_min": init_w_min,
@@ -409,6 +416,10 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
                         "eval_accuracy": eval_acc_full,
                         "sample_accuracy": sample_acc,
                         "trial_acc_rolling": trial_acc_rolling,
+                        "pred_00": int(predictions[0].item()),
+                        "pred_01": int(predictions[1].item()),
+                        "pred_10": int(predictions[2].item()),
+                        "pred_11": int(predictions[3].item()),
                         "mean_eligibility_abs": last_mean_eligibility,
                         "mean_abs_dw": mean_abs_dw_trial,
                         "weights_min": last_weight_min,
@@ -529,7 +540,14 @@ def run_logic_gate_curriculum(
         n_cases=int(inputs.shape[0]),
         n_inputs=int(encoded_inputs.shape[1]),
         topology_name="xor_ff2",
+        context_dim=0,
+        output_dim=2 * len(gate_sequence),
     )
+    gate_to_output_pair = {
+        gate_value: (2 * idx, 2 * idx + 1) for idx, gate_value in enumerate(gate_sequence)
+    }
+
+    first_pair = gate_to_output_pair[gate_sequence[0]]
     case_scores = torch.zeros((4,), device=inputs.device, dtype=inputs.dtype)
     predictions = torch.zeros((4,), device=inputs.device, dtype=inputs.dtype)
     _predict_all_cases_rstdp(
@@ -537,6 +555,7 @@ def run_logic_gate_curriculum(
         encoded_inputs=encoded_inputs,
         predictions_out=predictions,
         scores_out=case_scores,
+        output_pair=first_pair,
     )
 
     trial_sink = CsvSink(run_dir / "trials.csv", flush_every=max(1, cfg.export_every))
@@ -547,7 +566,7 @@ def run_logic_gate_curriculum(
         deque(maxlen=cfg.dump_last_trials_n) if cfg.dump_last_trials_csv else None
     )
 
-    output_spike_counts = torch.zeros((2,), device=inputs.device, dtype=inputs.dtype)
+    output_spike_counts = torch.zeros((int(runtime.output_dim),), device=inputs.device, dtype=inputs.dtype)
     input_drive_buf = torch.zeros((4,), device=inputs.device, dtype=inputs.dtype)
     hidden_step_spikes = torch.zeros((int(runtime.hidden_size),), device=inputs.device, dtype=inputs.dtype)
     hidden_spike_counts = torch.zeros_like(hidden_step_spikes)
@@ -595,6 +614,7 @@ def run_logic_gate_curriculum(
             for local_trial, case_idx in enumerate(case_sequence, start=1):
                 global_trial += 1
                 active_gate = gate_sequence[int(train_gate_idx[local_trial - 1].item())]
+                active_pair = gate_to_output_pair[active_gate]
                 train_targets_flat = targets_by_gate[active_gate]
                 target_value = train_targets_flat[case_idx]
                 input_drive_buf.copy_(encoded_inputs[case_idx])
@@ -610,6 +630,7 @@ def run_logic_gate_curriculum(
                     hidden_step_spikes=hidden_step_spikes,
                     hidden_spike_counts=hidden_spike_counts,
                     last_pred=last_pred,
+                    output_pair=active_pair,
                 )
                 output_spike_counts.copy_(runtime.output_spike_counts)
 
@@ -630,6 +651,7 @@ def run_logic_gate_curriculum(
                     pred_bit=pred_bit,
                     target_bit=target_bit,
                     dt=cfg.dt,
+                    output_pair=active_pair,
                 )
                 mean_abs_dw_trial = _mean_nonzero(mean_abs_dw_online, mean_abs_dw_dopa)
                 _predict_all_cases_rstdp(
@@ -637,13 +659,16 @@ def run_logic_gate_curriculum(
                     encoded_inputs=encoded_inputs,
                     predictions_out=predictions,
                     scores_out=case_scores,
+                    output_pair=gate_to_output_pair[gate],
                 )
 
                 mean_eligibility = float(runtime.state.eligibility.abs().mean().item())
                 weights_min, weights_max, weights_mean = _tensor_stats(runtime.weights)
                 hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(cfg.sim_steps_per_trial)
-                tie_behavior = int(output_spike_counts[0].item() == output_spike_counts[1].item())
-                no_spikes = int(float(output_spike_counts.sum().item()) <= 0.0)
+                active_out_0 = float(output_spike_counts[int(active_pair[0])].item())
+                active_out_1 = float(output_spike_counts[int(active_pair[1])].item())
+                tie_behavior = int(active_out_0 == active_out_1)
+                no_spikes = int((active_out_0 + active_out_1) <= 0.0)
 
                 trial_row = {
                     "phase": phase_idx,
@@ -659,8 +684,8 @@ def run_logic_gate_curriculum(
                     "in_bit0_1_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit0_1"]].item()),
                     "in_bit1_0_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit1_0"]].item()),
                     "in_bit1_1_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit1_1"]].item()),
-                    "out_spikes_0": float(output_spike_counts[OUTPUT_NEURON_INDICES["class_0"]].item()),
-                    "out_spikes_1": float(output_spike_counts[OUTPUT_NEURON_INDICES["class_1"]].item()),
+                    "out_spikes_0": active_out_0,
+                    "out_spikes_1": active_out_1,
                     "hidden_mean_spikes": hidden_mean_spikes,
                     "dopamine_pulse": dopamine_pulse,
                     "trial_acc_rolling": trial_acc_rolling,
@@ -690,7 +715,7 @@ def run_logic_gate_curriculum(
                         f"train_gate={active_gate.value} "
                         f"input=({int(inputs[case_idx, 0].item())},{int(inputs[case_idx, 1].item())}) "
                         f"target={target_bit} pred={pred_bit} "
-                        f"out=[{output_spike_counts[0].item():.1f},{output_spike_counts[1].item():.1f}] "
+                        f"out=[{active_out_0:.1f},{active_out_1:.1f}] "
                         f"hidden_mean={hidden_mean_spikes:.3f} hidden_topk={hidden_top_k_str} "
                         f"dopamine={dopamine_pulse:+.2f} tie={tie_behavior} no_spikes={no_spikes}"
                     )
@@ -708,6 +733,26 @@ def run_logic_gate_curriculum(
                         else 0.0
                     )
                     sample_acc_global = sampled_correct_total / float(global_trial)
+                    global_eval_by_gate: dict[str, float] = {}
+                    for eval_gate in gate_sequence:
+                        _predict_all_cases_rstdp(
+                            runtime=runtime,
+                            encoded_inputs=encoded_inputs,
+                            predictions_out=predictions,
+                            scores_out=case_scores,
+                            output_pair=gate_to_output_pair[eval_gate],
+                        )
+                        global_eval_by_gate[eval_gate.value] = float(
+                            eval_accuracy(predictions, targets_by_gate[eval_gate])
+                        )
+                    _predict_all_cases_rstdp(
+                        runtime=runtime,
+                        encoded_inputs=encoded_inputs,
+                        predictions_out=predictions,
+                        scores_out=case_scores,
+                        output_pair=gate_to_output_pair[gate],
+                    )
+                    global_eval_accuracy = sum(global_eval_by_gate.values()) / float(len(global_eval_by_gate))
                     eval_acc_full, confusion = eval_accuracy(
                         predictions, targets_flat, report_confusion=True
                     )
@@ -721,7 +766,12 @@ def run_logic_gate_curriculum(
                             "sample_accuracy": sample_acc_phase,
                             "sample_accuracy_phase_gate": sample_acc_phase_gate,
                             "sample_accuracy_global": sample_acc_global,
+                            "global_eval_accuracy": global_eval_accuracy,
                             "trial_acc_rolling": trial_acc_rolling,
+                            "pred_00": int(predictions[0].item()),
+                            "pred_01": int(predictions[1].item()),
+                            "pred_10": int(predictions[2].item()),
+                            "pred_11": int(predictions[3].item()),
                             "mean_eligibility_abs": mean_eligibility,
                             "mean_abs_dw": mean_abs_dw_trial,
                             "weights_min": weights_min,
@@ -730,6 +780,7 @@ def run_logic_gate_curriculum(
                             "perfect_streak": tracker.perfect_streak,
                             "high_streak": tracker.high_streak,
                             "passed": int(tracker.passed),
+                            **{f"eval_{name}": value for name, value in global_eval_by_gate.items()},
                         }
                     )
                     confusion_sink.write_row(
@@ -745,6 +796,7 @@ def run_logic_gate_curriculum(
                         f"[logic-curriculum] phase={phase_idx} gate={gate.value} "
                         f"trial={local_trial}/{phase_trials} global={global_trial} "
                         f"eval_acc={eval_acc_full:.3f} sample_acc={sample_acc_phase:.3f} "
+                        f"global_eval={global_eval_accuracy:.3f} "
                         f"gate_sample_acc={sample_acc_phase_gate:.3f} "
                         f"roll_acc={trial_acc_rolling:.3f} pass={tracker.passed}"
                     )
@@ -796,6 +848,13 @@ def run_logic_gate_curriculum(
     elapsed_s = perf_counter() - t0
     final_eval_by_gate: dict[str, float] = {}
     for gate in gate_sequence:
+        _predict_all_cases_rstdp(
+            runtime=runtime,
+            encoded_inputs=encoded_inputs,
+            predictions_out=predictions,
+            scores_out=case_scores,
+            output_pair=gate_to_output_pair[gate],
+        )
         final_eval_by_gate[gate.value] = float(eval_accuracy(predictions, targets_by_gate[gate]))
 
     return {
@@ -946,6 +1005,10 @@ def _run_logic_gate_surrogate(
                         "eval_accuracy": eval_acc_full,
                         "sample_accuracy": eval_acc_full,
                         "trial_acc_rolling": trial_acc_rolling,
+                        "pred_00": int(preds_step[0].item()),
+                        "pred_01": int(preds_step[1].item()),
+                        "pred_10": int(preds_step[2].item()),
+                        "pred_11": int(preds_step[3].item()),
                         "loss": loss_step,
                         "perfect_streak": tracker.perfect_streak,
                         "high_streak": tracker.high_streak,
@@ -1016,8 +1079,12 @@ def _run_rstdp_trial_forward(
     hidden_step_spikes: Any,
     hidden_spike_counts: Any,
     last_pred: int | None,
+    output_pair: tuple[int, int] = (0, 1),
+    context_features: Any | None = None,
 ) -> tuple[int, float]:
     torch = require_torch()
+    if int(output_pair[0]) < 0 or int(output_pair[1]) >= int(runtime.output_dim):
+        raise ValueError(f"output_pair {output_pair!r} is outside output_dim={runtime.output_dim}.")
     runtime.pre_spikes.zero_()
     # Keep eligibility local to the current trial window to prevent stale
     # cross-trial traces from dominating corrective dopamine updates.
@@ -1027,6 +1094,7 @@ def _run_rstdp_trial_forward(
             runtime=runtime,
             input_drive=input_drive,
             hidden_step_spikes=hidden_step_spikes,
+            context_features=context_features,
         )
     else:
         runtime.pre_spikes[: input_drive.numel()].copy_((input_drive >= 0.5).to(dtype=input_drive.dtype))
@@ -1047,7 +1115,9 @@ def _run_rstdp_trial_forward(
         runtime.output_drive.zero_()
         runtime.output_drive.scatter_add_(0, runtime.post_idx, runtime.edge_current)
 
-        step_pred = decode_output(runtime.output_drive, mode="wta", hysteresis=0.0, last_pred=None)
+        step_pair_drive = runtime.output_drive[list(output_pair)]
+        step_pred_local = decode_output(step_pair_drive, mode="wta", hysteresis=0.0, last_pred=None)
+        step_pred = int(output_pair[step_pred_local])
         runtime.output_step_spikes.zero_()
         runtime.output_step_spikes[step_pred] = 1.0
         runtime.output_spike_counts.add_(runtime.output_step_spikes)
@@ -1065,8 +1135,9 @@ def _run_rstdp_trial_forward(
         abs_dw_sum += float(result.d_weights.abs().mean().item())
         abs_dw_count += 1
 
+    pred_pair_counts = runtime.output_spike_counts[list(output_pair)]
     pred_bit = decode_output(
-        runtime.output_spike_counts,
+        pred_pair_counts,
         mode="wta",
         hysteresis=0.0,
         last_pred=last_pred,
@@ -1082,11 +1153,19 @@ def _apply_rstdp_dopamine(
     pred_bit: int,
     target_bit: int,
     dt: float,
+    output_pair: tuple[int, int] = (0, 1),
 ) -> tuple[float, float]:
+    if int(output_pair[0]) < 0 or int(output_pair[1]) >= int(runtime.output_dim):
+        raise ValueError(f"output_pair {output_pair!r} is outside output_dim={runtime.output_dim}.")
     # Keep updates predominantly error-driven to avoid class-imbalance collapse
     # (e.g., AND tends to overfit the majority zero-class otherwise).
     update_scale = 0.0 if reward_signal > 0.0 else 1.0
-    runtime.dopamine_edge.fill_(float(reward_signal) * update_scale)
+    runtime.dopamine_edge.zero_()
+    dopamine_value = float(reward_signal) * update_scale
+    for output_class in output_pair:
+        edge_start = int(output_class) * int(runtime.edges_per_output)
+        edge_end = edge_start + int(runtime.edges_per_output)
+        runtime.dopamine_edge[edge_start:edge_end].fill_(dopamine_value)
 
     abs_dw_sum = 0.0
     abs_dw_count = 0
@@ -1105,11 +1184,16 @@ def _apply_rstdp_dopamine(
 
     if target_bit != pred_bit:
         runtime.output_step_spikes.zero_()
-        runtime.output_step_spikes[target_bit] = 1.0
+        target_class = int(output_pair[target_bit])
+        runtime.output_step_spikes[target_class] = 1.0
         torch = require_torch()
         torch.index_select(runtime.output_step_spikes, 0, runtime.post_idx, out=runtime.edge_post)
         runtime.state.eligibility.zero_()
-        runtime.dopamine_edge.fill_(2.0)
+        runtime.dopamine_edge.zero_()
+        for output_class in output_pair:
+            edge_start = int(output_class) * int(runtime.edges_per_output)
+            edge_end = edge_start + int(runtime.edges_per_output)
+            runtime.dopamine_edge[edge_start:edge_end].fill_(2.0)
         correction_batch = LearningBatch(
             pre_spikes=runtime.edge_pre,
             post_spikes=runtime.edge_post,
@@ -1136,8 +1220,12 @@ def _predict_all_cases_rstdp(
     encoded_inputs: Any,
     predictions_out: Any,
     scores_out: Any,
+    output_pair: tuple[int, int] = (0, 1),
+    context_features: Any | None = None,
 ) -> None:
     torch = require_torch()
+    if int(output_pair[0]) < 0 or int(output_pair[1]) >= int(runtime.output_dim):
+        raise ValueError(f"output_pair {output_pair!r} is outside output_dim={runtime.output_dim}.")
     runtime.pred_input_aug.zero_()
     if runtime.mode == "xor_ff2":
         xor_pred_input = _require_tensor(runtime.xor_pred_input, name="xor_pred_input")
@@ -1178,7 +1266,22 @@ def _predict_all_cases_rstdp(
         xor_h1_drive.add_(h1_bias.unsqueeze(0))
         xor_h1_spikes.copy_(xor_h1_drive >= 0.0)
 
-        runtime.pred_input_aug[:, : xor_h1_spikes.shape[1]].copy_(xor_h1_spikes)
+        feature_dim = int(xor_h1_spikes.shape[1])
+        runtime.pred_input_aug[:, :feature_dim].copy_(xor_h1_spikes)
+        if runtime.context_dim > 0:
+            context_start = feature_dim
+            context_end = feature_dim + runtime.context_dim
+            if context_features is not None:
+                if int(context_features.dim()) == 1:
+                    runtime.pred_input_aug[:, context_start:context_end].copy_(
+                        context_features.unsqueeze(0).expand(runtime.pred_input_aug.shape[0], -1)
+                    )
+                else:
+                    runtime.pred_input_aug[:, context_start:context_end].copy_(
+                        context_features[:, : runtime.context_dim]
+                    )
+            else:
+                runtime.pred_input_aug[:, context_start:context_end].zero_()
     else:
         runtime.pred_input_aug[:, : encoded_inputs.shape[1]].copy_(encoded_inputs)
     runtime.pred_input_aug[:, -1] = 1.0
@@ -1187,7 +1290,9 @@ def _predict_all_cases_rstdp(
     runtime.pred_edge_current.mul_(runtime.weights.unsqueeze(0))
     runtime.pred_out_drive.zero_()
     runtime.pred_out_drive.scatter_add_(1, runtime.pred_post_idx_2d, runtime.pred_edge_current)
-    scores_out.copy_(runtime.pred_out_drive[:, 1] - runtime.pred_out_drive[:, 0])
+    score_pos = runtime.pred_out_drive[:, int(output_pair[1])]
+    score_neg = runtime.pred_out_drive[:, int(output_pair[0])]
+    scores_out.copy_(score_pos - score_neg)
     predictions_out.copy_((scores_out > 0.0).to(dtype=predictions_out.dtype))
 
 
@@ -1200,6 +1305,8 @@ def _init_rstdp_runtime(
     n_cases: int,
     n_inputs: int,
     topology_name: str,
+    context_dim: int = 0,
+    output_dim: int = 2,
 ) -> _RstdpRuntime:
     torch = require_torch()
     device_obj = torch.device(device)
@@ -1207,17 +1314,15 @@ def _init_rstdp_runtime(
     generator.manual_seed(int(seed))
 
     mode = "xor_ff2" if gate in {LogicGate.XOR, LogicGate.XNOR} else "linear"
-    hidden_size = 16 if mode == "xor_ff2" else int(n_inputs)
+    context_dim = max(0, int(context_dim))
+    output_dim = max(2, int(output_dim))
+    base_hidden_size = 16 if mode == "xor_ff2" else int(n_inputs)
+    hidden_size = int(base_hidden_size + context_dim)
 
     # Output layer: dense bipartite map with an extra always-on bias input.
     total_pre = int(hidden_size) + 1
-    pre_idx = torch.arange(total_pre, device=device_obj, dtype=torch.long).repeat(2)
-    post_idx = torch.cat(
-        (
-            torch.zeros((total_pre,), device=device_obj, dtype=torch.long),
-            torch.ones((total_pre,), device=device_obj, dtype=torch.long),
-        )
-    )
+    pre_idx = torch.arange(total_pre, device=device_obj, dtype=torch.long).repeat(output_dim)
+    post_idx = torch.arange(output_dim, device=device_obj, dtype=torch.long).repeat_interleave(total_pre)
     edge_count = int(pre_idx.numel())
 
     weights = torch.empty((edge_count,), device=device_obj, dtype=dtype)
@@ -1243,15 +1348,15 @@ def _init_rstdp_runtime(
     edge_post = torch.zeros((edge_count,), device=device_obj, dtype=dtype)
     edge_current = torch.zeros((edge_count,), device=device_obj, dtype=dtype)
 
-    output_drive = torch.zeros((2,), device=device_obj, dtype=dtype)
-    output_step_spikes = torch.zeros((2,), device=device_obj, dtype=dtype)
-    output_spike_counts = torch.zeros((2,), device=device_obj, dtype=dtype)
+    output_drive = torch.zeros((output_dim,), device=device_obj, dtype=dtype)
+    output_step_spikes = torch.zeros((output_dim,), device=device_obj, dtype=dtype)
+    output_spike_counts = torch.zeros((output_dim,), device=device_obj, dtype=dtype)
     dopamine_edge = torch.zeros((edge_count,), device=device_obj, dtype=dtype)
 
     pred_input_aug = torch.zeros((n_cases, total_pre), device=device_obj, dtype=dtype)
     pred_edge_pre = torch.zeros((n_cases, edge_count), device=device_obj, dtype=dtype)
     pred_edge_current = torch.zeros((n_cases, edge_count), device=device_obj, dtype=dtype)
-    pred_out_drive = torch.zeros((n_cases, 2), device=device_obj, dtype=dtype)
+    pred_out_drive = torch.zeros((n_cases, output_dim), device=device_obj, dtype=dtype)
     pred_post_idx_2d = post_idx.unsqueeze(0).expand(n_cases, -1)
 
     xor_input_spikes = None
@@ -1331,6 +1436,9 @@ def _init_rstdp_runtime(
         topology_name=topology_name,
         mode=mode,
         hidden_size=hidden_size,
+        context_dim=context_dim,
+        output_dim=output_dim,
+        edges_per_output=total_pre,
         rule=rule,
         state=state,
         ctx=ctx,
@@ -1464,6 +1572,7 @@ def _prepare_xor_trial_features(
     runtime: _RstdpRuntime,
     input_drive: Any,
     hidden_step_spikes: Any,
+    context_features: Any | None = None,
 ) -> None:
     torch = require_torch()
     xor_input = _require_tensor(runtime.xor_input_spikes, name="xor_input_spikes")
@@ -1505,9 +1614,22 @@ def _prepare_xor_trial_features(
     h1_drive.add_(h1_bias)
     h1_spikes.copy_(h1_drive >= 0.0)
 
-    runtime.pre_spikes[: h1_spikes.numel()].copy_(h1_spikes)
+    h1_dim = int(h1_spikes.numel())
+    runtime.pre_spikes.zero_()
+    hidden_step_spikes.zero_()
+    runtime.pre_spikes[:h1_dim].copy_(h1_spikes)
+    hidden_step_spikes[:h1_dim].copy_(h1_spikes)
+    if runtime.context_dim > 0:
+        ctx_start = h1_dim
+        ctx_end = h1_dim + runtime.context_dim
+        if context_features is not None:
+            runtime.pre_spikes[ctx_start:ctx_end].copy_(context_features[: runtime.context_dim])
+            hidden_step_spikes[ctx_start:ctx_end].copy_(context_features[: runtime.context_dim])
+        elif int(input_drive.numel()) >= 4 + runtime.context_dim:
+            context_slice = input_drive[4 : 4 + runtime.context_dim]
+            runtime.pre_spikes[ctx_start:ctx_end].copy_(context_slice)
+            hidden_step_spikes[ctx_start:ctx_end].copy_(context_slice)
     runtime.pre_spikes[-1] = 1.0
-    hidden_step_spikes.copy_(h1_spikes)
 
 
 def _require_tensor(value: Any | None, *, name: str) -> Any:

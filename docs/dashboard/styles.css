@@ -401,6 +401,13 @@ h1 {
   grid-column: span 1;
 }
 
+.card-modulator,
+.card-receptor,
+.card-vision {
+  grid-column: span 1;
+  min-height: 220px;
+}
+
 .legend {
   display: flex;
   gap: 10px;
