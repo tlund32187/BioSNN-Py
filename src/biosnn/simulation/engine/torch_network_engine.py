@@ -16,7 +16,11 @@ from biosnn.contracts.learning import LearningBatch, LearningStepResult
 from biosnn.contracts.modulators import ModulatorKind, ModulatorRelease
 from biosnn.contracts.monitors import IMonitor, MonitorRequirements, Scalar, StepEvent
 from biosnn.contracts.neurons import Compartment, INeuronModel, NeuronInputs, StepContext
-from biosnn.contracts.simulation import ISimulationEngine, SimulationConfig
+from biosnn.contracts.simulation import (
+    ExcitabilityModulationConfig,
+    ISimulationEngine,
+    SimulationConfig,
+)
 from biosnn.contracts.synapses import (
     ISynapseModel,
     ISynapseModelInplace,
@@ -42,6 +46,7 @@ from biosnn.simulation.engine.subsystems import (
     ModulatorSubsystem,
     MonitorSubsystem,
     NetworkRequirements,
+    NeuromodulatedExcitabilitySubsystem,
     StepEventPayloadPlan,
     StepEventSubsystem,
     TopologySubsystem,
@@ -88,6 +93,7 @@ class _ProjectionRuntime:
     learn_every: int
     use_sparse_learning: bool
     has_step_into: bool
+    needs_post_membrane: bool
     spec: ProjectionSpec
     pre_state: _PopulationState
     post_state: _PopulationState
@@ -194,9 +200,13 @@ class TorchNetworkEngine(ISimulationEngine):
         self._topology_subsystem = TopologySubsystem()
         self._buffer_subsystem = BufferSubsystem()
         self._modulator_subsystem = ModulatorSubsystem()
+        self._neuromodulated_excitability_subsystem = NeuromodulatedExcitabilitySubsystem()
         self._learning_subsystem = LearningSubsystem()
         self._monitor_subsystem = MonitorSubsystem()
         self._event_subsystem = StepEventSubsystem()
+        self._excitability_modulation_config: (
+            ExcitabilityModulationConfig | Mapping[str, Any] | None
+        ) = ExcitabilityModulationConfig()
         self._event_payload_plan = self._event_subsystem.payload_plan(
             self._network_requirements,
             fast_mode=self._fast_mode,
@@ -228,6 +238,13 @@ class TorchNetworkEngine(ISimulationEngine):
             dt=float(config.dt),
             seed=config.seed,
             rng=None,
+        )
+        self._excitability_modulation_config = config.excitability_modulation
+        self._neuromodulated_excitability_subsystem.configure(
+            config=self._excitability_modulation_config,
+            pop_specs=self._pop_specs,
+            device=self._device,
+            dtype=self._dtype,
         )
         self._max_ring_mib = config.max_ring_mib
         self._max_edges_mod_sample = config.max_edges_mod_sample
@@ -427,6 +444,9 @@ class TorchNetworkEngine(ISimulationEngine):
             self._neurogenesis_manager.reset(self._pop_specs)
             self._neurogenesis_scalars = dict(self._neurogenesis_manager.scalars())
 
+    def set_training(self, is_training: bool) -> None:
+        self._ctx = replace(self._ctx, is_training=bool(is_training))
+
     def _build_projection_plans(self) -> list[_CompiledProjectionPlan]:
         plans: list[_CompiledProjectionPlan] = []
         for proj in self._proj_specs:
@@ -469,6 +489,7 @@ class TorchNetworkEngine(ISimulationEngine):
                     learn_every=proj.learn_every,
                     use_sparse_learning=use_sparse,
                     has_step_into=isinstance(plan.synapse, ISynapseModelInplace),
+                    needs_post_membrane=_synapse_needs_post_membrane(plan.synapse),
                     spec=proj,
                     pre_state=self._pop_states[plan.pre_name],
                     post_state=self._pop_states[plan.post_name],
@@ -550,9 +571,28 @@ class TorchNetworkEngine(ISimulationEngine):
             for buffer in drive_by_comp.values():
                 buffer.zero_()
 
+        post_membrane_by_pop: dict[str, Mapping[Compartment, Tensor]] = {}
+        required_post_pops = {
+            runtime.plan.post_name for runtime in self._proj_runtime_list if runtime.needs_post_membrane
+        }
+        if required_post_pops:
+            post_membrane_by_pop = _collect_post_membrane_by_pop(
+                pop_specs=self._pop_specs,
+                pop_states=self._pop_states,
+                required_pop_names=required_post_pops,
+            )
+
         self.last_projection_drive = {}
         for runtime in self._proj_runtime_list:
             pre_spikes = runtime.pre_state.spikes
+            syn_inputs_meta: Mapping[str, Any] | None = None
+            if runtime.needs_post_membrane:
+                post_membrane = post_membrane_by_pop.get(runtime.plan.post_name)
+                if post_membrane is None:
+                    raise RuntimeError(
+                        f"Projection {runtime.plan.name} requires post membrane tensors but none were found."
+                    )
+                syn_inputs_meta = {"post_membrane": post_membrane}
             if runtime.has_step_into:
                 synapse_inplace = cast(ISynapseModelInplace, runtime.plan.synapse)
                 synapse_inplace.step_into(
@@ -563,13 +603,14 @@ class TorchNetworkEngine(ISimulationEngine):
                     topology=runtime.plan.topology,
                     dt=self._dt,
                     ctx=self._ctx,
+                    inputs_meta=syn_inputs_meta,
                 )
                 self.last_projection_drive[runtime.plan.name] = runtime.drive_target
             else:
                 runtime.state.state, syn_result = runtime.plan.synapse.step(
                     runtime.state.state,
                     runtime.plan.topology,
-                    SynapseInputs(pre_spikes=pre_spikes),
+                    SynapseInputs(pre_spikes=pre_spikes, meta=syn_inputs_meta),
                     dt=self._dt,
                     t=self._t,
                     ctx=self._ctx,
@@ -584,6 +625,11 @@ class TorchNetworkEngine(ISimulationEngine):
             for spec in self._pop_specs:
                 extra = self._external_drive_fn(self._t, self._step, spec.name, self._ctx)
                 self._event_subsystem.accumulate_drive(drive_acc[spec.name], extra)
+        self._neuromodulated_excitability_subsystem.apply(
+            drive_by_pop=drive_acc,
+            mod_by_pop=mod_by_pop,
+            modulator_subsystem=self._modulator_subsystem,
+        )
 
         spikes_concat: list[Tensor] = []
         neuron_tensors_by_pop: dict[str, Mapping[str, Tensor]] = {}
@@ -652,6 +698,8 @@ class TorchNetworkEngine(ISimulationEngine):
             if runtime.learning is None:
                 continue
             if runtime.learn_every <= 0 or (self._step % runtime.learn_every) != 0:
+                continue
+            if not self._ctx.is_training:
                 continue
             learn_state = runtime.state.learning_state
             if learn_state is None:
@@ -843,9 +891,28 @@ class TorchNetworkEngine(ISimulationEngine):
                 for buffer in drive_by_comp.values():
                     buffer.zero_()
 
+        post_membrane_by_pop: dict[str, Mapping[Compartment, Tensor]] = {}
+        required_post_pops = {
+            runtime.plan.post_name for runtime in self._proj_runtime_list if runtime.needs_post_membrane
+        }
+        if required_post_pops:
+            post_membrane_by_pop = _collect_post_membrane_by_pop(
+                pop_specs=self._pop_specs,
+                pop_states=self._pop_states,
+                required_pop_names=required_post_pops,
+            )
+
         self.last_projection_drive = {}
         for runtime in self._proj_runtime_list:
             pre_spikes = runtime.pre_state.spikes
+            syn_inputs_meta: Mapping[str, Any] | None = None
+            if runtime.needs_post_membrane:
+                post_membrane = post_membrane_by_pop.get(runtime.plan.post_name)
+                if post_membrane is None:
+                    raise RuntimeError(
+                        f"Projection {runtime.plan.name} requires post membrane tensors but none were found."
+                    )
+                syn_inputs_meta = {"post_membrane": post_membrane}
             if runtime.has_step_into:
                 synapse_inplace = cast(ISynapseModelInplace, runtime.plan.synapse)
                 synapse_inplace.step_into(
@@ -856,13 +923,14 @@ class TorchNetworkEngine(ISimulationEngine):
                     topology=runtime.plan.topology,
                     dt=self._dt,
                     ctx=self._ctx,
+                    inputs_meta=syn_inputs_meta,
                 )
                 self.last_projection_drive[runtime.plan.name] = runtime.drive_target
             else:
                 runtime.state.state, syn_result = runtime.plan.synapse.step(
                     runtime.state.state,
                     runtime.plan.topology,
-                    SynapseInputs(pre_spikes=pre_spikes),
+                    SynapseInputs(pre_spikes=pre_spikes, meta=syn_inputs_meta),
                     dt=self._dt,
                     t=self._t,
                     ctx=self._ctx,
@@ -874,6 +942,11 @@ class TorchNetworkEngine(ISimulationEngine):
             for spec in self._pop_specs:
                 extra = self._external_drive_fn(self._t, self._step, spec.name, self._ctx)
                 self._event_subsystem.accumulate_drive(self._drive_buffers[spec.name], extra)
+        self._neuromodulated_excitability_subsystem.apply(
+            drive_by_pop=self._drive_buffers,
+            mod_by_pop=mod_by_pop,
+            modulator_subsystem=self._modulator_subsystem,
+        )
 
         for spec in self._pop_specs:
             pop_state = self._pop_states[spec.name]
@@ -942,6 +1015,8 @@ class TorchNetworkEngine(ISimulationEngine):
             if runtime.learning is None:
                 continue
             if runtime.learn_every <= 0 or (self._step % runtime.learn_every) != 0:
+                continue
+            if not self._ctx.is_training:
                 continue
             learn_state = runtime.state.learning_state
             if learn_state is None:
@@ -1328,6 +1403,13 @@ class TorchNetworkEngine(ISimulationEngine):
             fast_mode=self._fast_mode,
             compiled_mode=self._compiled_mode,
         )
+        if self._device is not None and self._dtype is not None:
+            self._neuromodulated_excitability_subsystem.configure(
+                config=self._excitability_modulation_config,
+                pop_specs=self._pop_specs,
+                device=self._device,
+                dtype=self._dtype,
+            )
 
     def _copy_state_prefix(self, old_state: Any, new_state: Any, *, old_n: int) -> None:
         for name, new_value in self._iter_state_tensors(new_state):
@@ -1607,6 +1689,72 @@ def _collect_modulator_kinds(mod_specs: Sequence[ModulatorSpec]) -> tuple[Modula
             if kind not in kinds:
                 kinds.append(kind)
     return tuple(kinds)
+
+
+def _synapse_needs_post_membrane(synapse: ISynapseModel) -> bool:
+    reqs = None
+    if hasattr(synapse, "compilation_requirements"):
+        try:
+            reqs = synapse.compilation_requirements()
+        except Exception:
+            reqs = None
+    if isinstance(reqs, Mapping) and "needs_post_membrane" in reqs:
+        return bool(reqs.get("needs_post_membrane"))
+    params = getattr(synapse, "params", None)
+    return bool(getattr(params, "conductance_mode", False))
+
+
+def _collect_post_membrane_by_pop(
+    *,
+    pop_specs: Sequence[PopulationSpec],
+    pop_states: Mapping[str, _PopulationState],
+    required_pop_names: set[str],
+) -> dict[str, Mapping[Compartment, Tensor]]:
+    if not required_pop_names:
+        return {}
+    spec_by_name = {spec.name: spec for spec in pop_specs}
+    out: dict[str, Mapping[Compartment, Tensor]] = {}
+    for pop_name in required_pop_names:
+        spec = spec_by_name.get(pop_name)
+        pop_state = pop_states.get(pop_name)
+        if spec is None or pop_state is None:
+            continue
+        tensors = spec.model.state_tensors(pop_state.state)
+        membrane = _extract_membrane_views(tensors)
+        if not membrane:
+            raise RuntimeError(
+                f"Population {pop_name} does not expose membrane tensors required by conductance synapses."
+            )
+        out[pop_name] = membrane
+    return out
+
+
+def _extract_membrane_views(tensors: Mapping[str, Tensor]) -> dict[Compartment, Tensor]:
+    membrane: dict[Compartment, Tensor] = {}
+
+    v_soma = tensors.get("v_soma")
+    if v_soma is not None:
+        membrane[Compartment.SOMA] = v_soma
+    v_dend = tensors.get("v_dend")
+    if v_dend is not None:
+        membrane[Compartment.DENDRITE] = v_dend
+    v_axon = tensors.get("v_axon")
+    if v_axon is not None:
+        membrane[Compartment.AXON] = v_axon
+    v_ais = tensors.get("v_ais")
+    if v_ais is not None:
+        membrane[Compartment.AIS] = v_ais
+
+    packed = tensors.get("v")
+    if packed is not None and packed.dim() == 2:
+        cols = int(packed.shape[1])
+        if cols >= 1 and Compartment.SOMA not in membrane:
+            membrane[Compartment.SOMA] = packed[:, 0]
+        if cols >= 2 and Compartment.DENDRITE not in membrane:
+            membrane[Compartment.DENDRITE] = packed[:, 1]
+        if cols >= 3 and Compartment.AXON not in membrane:
+            membrane[Compartment.AXON] = packed[:, 2]
+    return membrane
 
 
 def _monitors_active(monitors: Sequence[IMonitor]) -> bool:

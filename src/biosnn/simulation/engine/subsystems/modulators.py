@@ -79,6 +79,26 @@ class ModulatorSubsystem:
         }
         return mods or None
 
+    def get_population_levels(
+        self,
+        *,
+        kind: ModulatorKind,
+        population_name: str,
+        mod_by_pop: Mapping[str, Mapping[ModulatorKind, Tensor]] | None,
+        like: Tensor | None = None,
+    ) -> Tensor | None:
+        if mod_by_pop is None:
+            return None
+        pop_levels = mod_by_pop.get(population_name)
+        if pop_levels is None:
+            return None
+        levels = pop_levels.get(kind)
+        if levels is None:
+            return None
+        if like is not None and (levels.device != like.device or levels.dtype != like.dtype):
+            levels = levels.to(device=like.device, dtype=like.dtype)
+        return levels
+
     def step(
         self,
         *,

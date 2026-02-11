@@ -19,7 +19,7 @@ from biosnn.io.dashboard_export import export_population_topology_json
 from biosnn.io.sinks import CsvSink
 from biosnn.learning.rules import RStdpEligibilityParams, RStdpEligibilityRule
 
-from .configs import LogicGateRunConfig
+from .configs import LogicGateNeuronModel, LogicGateRunConfig
 from .datasets import LogicGate, coerce_gate, make_truth_table, sample_case_indices
 from .encoding import INPUT_NEURON_INDICES, OUTPUT_NEURON_INDICES, decode_output, encode_inputs
 from .evaluators import PassTracker, eval_accuracy
@@ -158,6 +158,7 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
         topology_name=topology_name,
         gate=gate,
         seed=cfg.seed,
+        neuron_model=cfg.neuron_model,
     )
     if cfg.learning_mode == "surrogate":
         return _run_logic_gate_surrogate(
@@ -592,6 +593,7 @@ def run_logic_gate_curriculum(
         topology_name="xor_ff2",
         gate=final_gate,
         seed=cfg.seed,
+        neuron_model=cfg.neuron_model,
     )
 
     print(
@@ -1858,12 +1860,22 @@ def _write_logic_topology_json(
     topology_name: str,
     gate: LogicGate,
     seed: int,
+    neuron_model: LogicGateNeuronModel,
 ) -> None:
     try:
         if topology_name == "xor_ff2":
-            _, topology, _ = build_logic_gate_xor(device="cpu", seed=seed)
+            _, topology, _ = build_logic_gate_xor(
+                device="cpu",
+                seed=seed,
+                neuron_model=neuron_model,
+            )
         else:
-            _, topology, _ = build_logic_gate_ff(gate, device="cpu", seed=seed)
+            _, topology, _ = build_logic_gate_ff(
+                gate,
+                device="cpu",
+                seed=seed,
+                neuron_model=neuron_model,
+            )
         weights_by_projection: dict[str, Any] = {}
         for projection in topology.projections:
             if projection.topology.weights is not None:

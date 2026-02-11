@@ -1,8 +1,14 @@
 """Logic-gate task harness for deterministic CPU-friendly experiments."""
 
-from .configs import LogicGateRunConfig
+from .configs import (
+    AdvancedPostVoltageSource,
+    AdvancedSynapseConfig,
+    LogicGateNeuronModel,
+    LogicGateRunConfig,
+)
 from .datasets import LogicGate, SamplingMethod, make_truth_table, sample_case_indices
 from .encoding import INPUT_NEURON_INDICES, OUTPUT_NEURON_INDICES, decode_output, encode_inputs
+from .engine_runner import run_logic_gate_curriculum_engine, run_logic_gate_engine
 from .evaluators import PassCriterion, PassTracker, eval_accuracy, gate_pass_criterion
 from .runner import run_logic_gate, run_logic_gate_curriculum
 from .surrogate_train import SurrogateTrainResult, train_logic_gate_surrogate
@@ -16,7 +22,10 @@ from .topologies import (
 
 __all__ = [
     "INPUT_NEURON_INDICES",
+    "AdvancedPostVoltageSource",
+    "AdvancedSynapseConfig",
     "LogicGate",
+    "LogicGateNeuronModel",
     "LogicGateRunConfig",
     "OUTPUT_NEURON_INDICES",
     "PassCriterion",
@@ -34,6 +43,8 @@ __all__ = [
     "make_truth_table",
     "run_logic_gate",
     "run_logic_gate_curriculum",
+    "run_logic_gate_engine",
+    "run_logic_gate_curriculum_engine",
     "sample_case_indices",
     "SurrogateTrainResult",
     "train_logic_gate_surrogate",

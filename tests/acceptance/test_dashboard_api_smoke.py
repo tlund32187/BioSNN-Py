@@ -84,6 +84,19 @@ def test_dashboard_api_can_start_run_and_emit_manifests(tmp_path: Path) -> None:
             "logic_or",
             "logic_xor",
         }.issubset(demo_ids)
+        demo_defaults = {
+            str(entry.get("id")): cast(dict[str, object], entry.get("defaults"))
+            for entry in demos
+            if isinstance(entry, dict) and isinstance(entry.get("defaults"), dict)
+        }
+        network_defaults = demo_defaults["network"]
+        assert isinstance(network_defaults.get("homeostasis"), dict)
+        assert isinstance(network_defaults.get("pruning"), dict)
+        assert isinstance(network_defaults.get("neurogenesis"), dict)
+        assert isinstance(network_defaults.get("synapse"), dict)
+        assert isinstance(network_defaults.get("modulators"), dict)
+        logic_xor_defaults = demo_defaults["logic_xor"]
+        assert logic_xor_defaults.get("logic_backend") == "harness"
 
         run_payload = _post_json(
             f"{base_url}/api/run",

@@ -29,7 +29,14 @@ from biosnn.experiments.demos import FEATURE_DEMO_BUILDERS, FeatureDemoConfig, F
 from biosnn.io.export.run_manifest import write_run_config, write_run_features, write_run_status
 from biosnn.learning.homeostasis import HomeostasisScope, RateEmaThresholdHomeostasisConfig
 from biosnn.runners.dashboard_server import start_dashboard_server
-from biosnn.tasks.logic_gates import LogicGateRunConfig, run_logic_gate, run_logic_gate_curriculum
+from biosnn.tasks.logic_gates import (
+    LogicGateNeuronModel,
+    LogicGateRunConfig,
+    run_logic_gate,
+    run_logic_gate_curriculum,
+    run_logic_gate_curriculum_engine,
+    run_logic_gate_engine,
+)
 
 LOGIC_DEMO_TO_GATE: dict[str, str] = {
     "logic_and": "and",
@@ -87,6 +94,7 @@ def main() -> None:
         )
 
     try:
+        logic_result: dict[str, Any] | None = None
         if args.demo == "minimal":
             run_demo_minimal(
                 DemoMinimalConfig(
@@ -109,20 +117,22 @@ def main() -> None:
             )
         else:
             if args.demo in LOGIC_DEMO_TO_GATE:
-                _run_logic_gate_demo_from_cli(
+                logic_result = _run_logic_gate_demo_from_cli(
                     args=args,
                     run_dir=run_dir,
                     steps=int(steps),
                     dt=float(dt),
                     device=device,
+                    run_spec=run_spec,
                 )
             elif args.demo == LOGIC_CURRICULUM_DEMO:
-                _run_logic_curriculum_demo_from_cli(
+                logic_result = _run_logic_curriculum_demo_from_cli(
                     args=args,
                     run_dir=run_dir,
                     steps=int(steps),
                     dt=float(dt),
                     device=device,
+                    run_spec=run_spec,
                 )
             else:
                 builders = _demo_registry()
@@ -138,6 +148,12 @@ def main() -> None:
                     device=device,
                 )
                 run_demo_from_spec(model_spec, runtime_cfg, monitors)
+        if run_spec is not None and logic_result is not None:
+            backend = str(logic_result.get("logic_backend", run_spec.get("logic_backend", "harness"))).strip().lower()
+            if backend in {"harness", "engine"}:
+                run_spec["logic_backend"] = backend
+            write_run_config(run_dir, run_spec)
+            write_run_features(run_dir, feature_flags_for_run_spec(run_spec))
     except Exception as exc:
         if run_spec is not None:
             write_run_status(
@@ -223,37 +239,61 @@ def _run_logic_gate_demo_from_cli(
     steps: int,
     dt: float,
     device: str,
+    run_spec: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    spec = cast(Mapping[str, Any], run_spec) if isinstance(run_spec, Mapping) else {}
     demo_gate = LOGIC_DEMO_TO_GATE.get(str(args.demo).strip().lower(), "and")
-    gate = str(getattr(args, "logic_gate", demo_gate) or demo_gate).strip().lower()
+    gate = str(spec.get("logic_gate", getattr(args, "logic_gate", demo_gate) or demo_gate)).strip().lower()
     if gate not in {"and", "or", "xor", "nand", "nor", "xnor"}:
         gate = demo_gate
-    learning_mode = str(getattr(args, "logic_learning_mode", "rstdp")).strip().lower()
+    learning_mode = str(spec.get("logic_learning_mode", getattr(args, "logic_learning_mode", "rstdp"))).strip().lower()
     if learning_mode not in {"rstdp", "surrogate", "none"}:
         learning_mode = "rstdp"
-    sampling_method = str(getattr(args, "logic_sampling_method", "sequential")).strip().lower()
+    sampling_method = str(spec.get("logic_sampling_method", getattr(args, "logic_sampling_method", "sequential"))).strip().lower()
     if sampling_method not in {"sequential", "random_balanced"}:
         sampling_method = "sequential"
-
-    result = run_logic_gate(
-        LogicGateRunConfig(
-            gate=gate,
-            seed=123 if args.seed is None else int(args.seed),
-            steps=int(steps),
-            dt=float(dt),
-            sim_steps_per_trial=max(1, int(args.logic_sim_steps_per_trial)),
-            device=device,
-            learning_mode=cast(Any, learning_mode),
-            debug=bool(getattr(args, "logic_debug", False)),
-            debug_every=max(1, int(getattr(args, "logic_debug_every", 25))),
-            export_every=25,
-            sampling_method=cast(Any, sampling_method),
-            out_dir=run_dir,
-        )
+    logic_backend = str(spec.get("logic_backend", "harness")).strip().lower()
+    if logic_backend not in {"harness", "engine"}:
+        logic_backend = "harness"
+    sim_steps_per_trial = max(
+        1,
+        int(spec.get("logic_sim_steps_per_trial", getattr(args, "logic_sim_steps_per_trial", 10))),
     )
+    neuron_model = str(spec.get("logic_neuron_model", _resolve_logic_neuron_model_arg(args))).strip().lower()
+    if neuron_model not in {"adex_3c", "lif_3c"}:
+        neuron_model = "adex_3c"
+    logic_cfg = LogicGateRunConfig(
+        gate=gate,
+        seed=123 if args.seed is None else int(args.seed),
+        steps=int(steps),
+        dt=float(dt),
+        sim_steps_per_trial=sim_steps_per_trial,
+        device=device,
+        learning_mode=cast(Any, learning_mode),
+        engine_learning_rule=cast(Any, _resolve_logic_engine_learning_rule(spec)),
+        learning_modulator_kind=cast(Any, _resolve_logic_learning_modulator_kind(spec)),
+        neuron_model=cast(LogicGateNeuronModel, neuron_model),
+        debug=bool(spec.get("logic_debug", getattr(args, "logic_debug", False))),
+        debug_every=max(1, int(spec.get("logic_debug_every", getattr(args, "logic_debug_every", 25)))),
+        export_every=25,
+        sampling_method=cast(Any, sampling_method),
+        out_dir=run_dir,
+        advanced_synapse=cast(Any, spec.get("advanced_synapse", {})),
+        modulators=cast(Any, spec.get("modulators", {})),
+        wrapper=cast(Any, spec.get("wrapper", {})),
+        excitability_modulation=cast(Any, spec.get("excitability_modulation", {})),
+    )
+
+    if logic_backend == "engine":
+        result = run_logic_gate_engine(logic_cfg, spec)
+    else:
+        result = run_logic_gate(logic_cfg)
+    result = dict(result)
+    result["logic_backend"] = logic_backend
     _write_logic_metrics_csv_from_eval(run_dir)
     print(
         "[logic-gate] "
+        f"backend={logic_backend} "
         f"gate={result.get('gate')} mode={result.get('learning_mode')} "
         f"eval_acc={result.get('eval_accuracy')} passed={result.get('passed')}"
     )
@@ -267,54 +307,108 @@ def _run_logic_curriculum_demo_from_cli(
     steps: int,
     dt: float,
     device: str,
+    run_spec: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    gates_raw = str(getattr(args, "logic_curriculum_gates", "or,and,nor,nand,xor,xnor"))
+    spec = cast(Mapping[str, Any], run_spec) if isinstance(run_spec, Mapping) else {}
+    gates_raw = str(spec.get("logic_curriculum_gates", getattr(args, "logic_curriculum_gates", "or,and,nor,nand,xor,xnor")))
     gate_list = [token.strip().lower() for token in gates_raw.split(",") if token.strip()]
     if not gate_list:
         gate_list = ["or", "and", "nor", "nand", "xor", "xnor"]
 
-    learning_mode = str(getattr(args, "logic_learning_mode", "rstdp")).strip().lower()
-    if learning_mode != "rstdp":
+    learning_mode = str(spec.get("logic_learning_mode", getattr(args, "logic_learning_mode", "rstdp"))).strip().lower()
+    logic_backend = str(spec.get("logic_backend", "harness")).strip().lower()
+    if logic_backend not in {"harness", "engine"}:
+        logic_backend = "harness"
+    if logic_backend == "harness" and learning_mode != "rstdp":
         print(
             f"[logic-curriculum] overriding learning_mode={learning_mode!r} to 'rstdp' "
             "for persistent cross-gate learning."
         )
         learning_mode = "rstdp"
 
-    sampling_method = str(getattr(args, "logic_sampling_method", "sequential")).strip().lower()
+    sampling_method = str(spec.get("logic_sampling_method", getattr(args, "logic_sampling_method", "sequential"))).strip().lower()
     if sampling_method not in {"sequential", "random_balanced"}:
         sampling_method = "sequential"
-    replay_ratio = float(getattr(args, "logic_curriculum_replay_ratio", 0.35))
+    replay_ratio = float(spec.get("logic_curriculum_replay_ratio", getattr(args, "logic_curriculum_replay_ratio", 0.35)))
     if replay_ratio < 0.0:
         replay_ratio = 0.0
     if replay_ratio > 1.0:
         replay_ratio = 1.0
 
-    result = run_logic_gate_curriculum(
-        LogicGateRunConfig(
-            gate=gate_list[0],
-            seed=123 if args.seed is None else int(args.seed),
-            steps=int(steps),
-            dt=float(dt),
-            sim_steps_per_trial=max(1, int(args.logic_sim_steps_per_trial)),
-            device=device,
-            learning_mode=cast(Any, learning_mode),
-            debug=bool(getattr(args, "logic_debug", False)),
-            debug_every=max(1, int(getattr(args, "logic_debug_every", 25))),
-            export_every=25,
-            sampling_method=cast(Any, sampling_method),
-            out_dir=run_dir,
-        ),
-        gates=gate_list,
-        phase_steps=int(steps),
-        replay_ratio=replay_ratio,
+    sim_steps_per_trial = max(
+        1,
+        int(spec.get("logic_sim_steps_per_trial", getattr(args, "logic_sim_steps_per_trial", 10))),
     )
+    neuron_model = str(spec.get("logic_neuron_model", _resolve_logic_neuron_model_arg(args))).strip().lower()
+    if neuron_model not in {"adex_3c", "lif_3c"}:
+        neuron_model = "adex_3c"
+    logic_cfg = LogicGateRunConfig(
+        gate=gate_list[0],
+        seed=123 if args.seed is None else int(args.seed),
+        steps=int(steps),
+        dt=float(dt),
+        sim_steps_per_trial=sim_steps_per_trial,
+        device=device,
+        learning_mode=cast(Any, learning_mode),
+        engine_learning_rule=cast(Any, _resolve_logic_engine_learning_rule(spec)),
+        learning_modulator_kind=cast(Any, _resolve_logic_learning_modulator_kind(spec)),
+        neuron_model=cast(LogicGateNeuronModel, neuron_model),
+        debug=bool(spec.get("logic_debug", getattr(args, "logic_debug", False))),
+        debug_every=max(1, int(spec.get("logic_debug_every", getattr(args, "logic_debug_every", 25)))),
+        export_every=25,
+        sampling_method=cast(Any, sampling_method),
+        out_dir=run_dir,
+        advanced_synapse=cast(Any, spec.get("advanced_synapse", {})),
+        modulators=cast(Any, spec.get("modulators", {})),
+        wrapper=cast(Any, spec.get("wrapper", {})),
+        excitability_modulation=cast(Any, spec.get("excitability_modulation", {})),
+    )
+
+    if logic_backend == "engine":
+        result = run_logic_gate_curriculum_engine(logic_cfg, spec)
+    else:
+        result = run_logic_gate_curriculum(
+            logic_cfg,
+            gates=gate_list,
+            phase_steps=int(steps),
+            replay_ratio=replay_ratio,
+        )
+    result = dict(result)
+    result["logic_backend"] = logic_backend
     _write_logic_metrics_csv_from_eval(run_dir)
     print(
         "[logic-curriculum] "
+        f"backend={logic_backend} "
         f"gates={result.get('gates')} final_eval={result.get('final_eval_by_gate')}"
     )
     return result
+
+
+def _resolve_logic_engine_learning_rule(spec: Mapping[str, Any]) -> str:
+    learning = cast(Mapping[str, Any], spec.get("learning", {}))
+    rule = str(learning.get("rule", "three_factor_elig_stdp")).strip().lower()
+    if rule in {"three_factor_elig_stdp", "three_factor_eligibility_stdp"}:
+        return "three_factor_elig_stdp"
+    if rule in {"rstdp", "rstdp_elig", "rstdp_eligibility"}:
+        return "rstdp_elig"
+    if rule in {"none", "surrogate"}:
+        return "none"
+    return "three_factor_elig_stdp"
+
+
+def _resolve_logic_learning_modulator_kind(spec: Mapping[str, Any]) -> str:
+    learning = cast(Mapping[str, Any], spec.get("learning", {}))
+    token = str(learning.get("modulator_kind", "dopamine")).strip().lower()
+    aliases = {
+        "da": "dopamine",
+        "ach": "acetylcholine",
+        "na": "noradrenaline",
+        "5ht": "serotonin",
+    }
+    token = aliases.get(token, token)
+    if token in {"dopamine", "acetylcholine", "noradrenaline", "serotonin"}:
+        return token
+    return "dopamine"
 
 
 def _write_logic_metrics_csv_from_eval(run_dir: Path) -> None:
@@ -801,6 +895,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="synapse backend preference for delayed_sparse_matmul",
     )
     parser.add_argument(
+        "--receptor-mode",
+        choices=["exc_only", "ei_ampa_nmda_gabaa", "ei_ampa_nmda_gabaa_gabab"],
+        default="exc_only",
+        help="receptor profile preset used by schema/registry-level run specs",
+    )
+    parser.add_argument(
         "--ring-dtype",
         type=_parse_ring_dtype,
         default=None,
@@ -936,16 +1036,97 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--da_amount", type=float, default=1.0)
     parser.add_argument("--da_step", type=int, default=10)
     parser.add_argument(
+        "--modulators-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable modulators from run-spec plumbing",
+    )
+    parser.add_argument(
+        "--modulator-kinds",
+        type=str,
+        default="",
+        help="comma-separated modulator kinds (dopamine,acetylcholine,noradrenaline,serotonin)",
+    )
+    parser.add_argument(
+        "--modulator-field-type",
+        choices=["global_scalar", "grid_diffusion_2d"],
+        default="global_scalar",
+        help="modulator field type for schema/registry-level run specs",
+    )
+    parser.add_argument(
+        "--modulator-grid-size",
+        type=str,
+        default="16x16",
+        help="modulator grid size as 'HxW' (e.g., 16x16)",
+    )
+    parser.add_argument(
+        "--modulator-world-extent",
+        type=str,
+        default="1.0,1.0",
+        help="modulator world extent as 'x,y'",
+    )
+    parser.add_argument("--modulator-diffusion", type=float, default=0.0)
+    parser.add_argument("--modulator-decay-tau", type=float, default=1.0)
+    parser.add_argument("--modulator-deposit-sigma", type=float, default=0.0)
+    parser.add_argument(
+        "--logic-adv-synapse-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--logic-adv-synapse-conductance-mode",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--logic-adv-synapse-nmda-block",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--logic-adv-synapse-stp-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--logic-wrapper-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument("--logic-wrapper-ach-lr-gain", type=float, default=0.0)
+    parser.add_argument("--logic-wrapper-ne-lr-gain", type=float, default=0.0)
+    parser.add_argument("--logic-wrapper-ht-extra-weight-decay", type=float, default=0.0)
+    parser.add_argument(
+        "--logic-excitability-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument("--logic-excitability-ach-gain", type=float, default=0.0)
+    parser.add_argument("--logic-excitability-ne-gain", type=float, default=0.0)
+    parser.add_argument("--logic-excitability-ht-gain", type=float, default=0.0)
+    parser.add_argument(
         "--logic-gate",
         choices=["and", "or", "xor", "nand", "nor", "xnor"],
         default=None,
         help="logic gate override for logic_* demos (default follows selected demo)",
     )
     parser.add_argument(
+        "--logic-backend",
+        choices=["harness", "engine"],
+        default="harness",
+        help="execution backend tag for logic_* demos (harness or engine)",
+    )
+    parser.add_argument(
         "--logic-learning-mode",
         choices=["rstdp", "surrogate", "none"],
         default="rstdp",
         help="learning mode for logic_* demos",
+    )
+    parser.add_argument(
+        "--logic-neuron-model",
+        choices=["adex_3c", "lif_3c"],
+        default="adex_3c",
+        help="neuron model for logic_* demos",
     )
     parser.add_argument("--logic-sim-steps-per-trial", type=int, default=10)
     parser.add_argument(
@@ -1208,6 +1389,13 @@ def _parse_true_false(value: str | None) -> bool:
     if normalized in {"false", "0", "no", "n", "off"}:
         return False
     raise ValueError(f"Invalid boolean literal: {value}")
+
+
+def _resolve_logic_neuron_model_arg(args: argparse.Namespace) -> LogicGateNeuronModel:
+    model = str(getattr(args, "logic_neuron_model", "adex_3c")).strip().lower()
+    if model == "lif_3c":
+        return "lif_3c"
+    return "adex_3c"
 
 
 def _apply_large_network_safety_overrides(*, args: argparse.Namespace, device: str) -> None:

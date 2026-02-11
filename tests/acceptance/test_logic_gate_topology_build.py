@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from biosnn.biophysics.models.adex_3c import AdEx3CompModel
 from biosnn.biophysics.models.lif_3c import LIF3CompModel
 from biosnn.contracts.simulation import SimulationConfig
 from biosnn.tasks.logic_gates import (
@@ -18,7 +19,7 @@ torch = pytest.importorskip("torch")
 
 def test_logic_gate_topology_build_ff_runs_cpu() -> None:
     engine, topology, handles = build_logic_gate_ff(LogicGate.AND, device="cpu", seed=13)
-    _assert_sparse_projection_topologies(topology)
+    _assert_sparse_projection_topologies(topology, model_type=AdEx3CompModel)
     assert handles.input_population == "In"
     assert handles.output_population == "Out"
     assert "bit0_0" in handles.input_neuron_indices
@@ -28,9 +29,22 @@ def test_logic_gate_topology_build_ff_runs_cpu() -> None:
     engine.run(steps=10)
 
 
+def test_logic_gate_topology_build_ff_supports_lif_cpu() -> None:
+    engine, topology, _ = build_logic_gate_ff(
+        LogicGate.AND,
+        device="cpu",
+        seed=14,
+        neuron_model="lif_3c",
+    )
+    _assert_sparse_projection_topologies(topology, model_type=LIF3CompModel)
+
+    engine.reset(config=SimulationConfig(dt=1e-3, device="cpu", dtype="float32", seed=14))
+    engine.run(steps=10)
+
+
 def test_logic_gate_topology_build_xor_variant_runs_cpu() -> None:
     engine, topology, handles = build_logic_gate_xor_variant(device="cpu", seed=17)
-    _assert_sparse_projection_topologies(topology)
+    _assert_sparse_projection_topologies(topology, model_type=AdEx3CompModel)
     assert handles.hidden_populations == ("Hidden0", "Hidden1")
 
     engine.reset(config=SimulationConfig(dt=1e-3, device="cpu", dtype="float32", seed=17))
@@ -39,17 +53,17 @@ def test_logic_gate_topology_build_xor_variant_runs_cpu() -> None:
 
 def test_logic_gate_topology_build_xor_runs_cpu() -> None:
     engine, topology, handles = build_logic_gate_xor(device="cpu", seed=21)
-    _assert_sparse_projection_topologies(topology)
+    _assert_sparse_projection_topologies(topology, model_type=AdEx3CompModel)
     assert handles.hidden_populations == ("Hidden0", "Hidden1")
 
     engine.reset(config=SimulationConfig(dt=1e-3, device="cpu", dtype="float32", seed=21))
     engine.run(steps=10)
 
 
-def _assert_sparse_projection_topologies(topology) -> None:
+def _assert_sparse_projection_topologies(topology, *, model_type: type[object]) -> None:
     pop_sizes = {pop.name: pop.n for pop in topology.populations}
     for pop in topology.populations:
-        assert isinstance(pop.model, LIF3CompModel)
+        assert isinstance(pop.model, model_type)
 
     for proj in topology.projections:
         topo = proj.topology

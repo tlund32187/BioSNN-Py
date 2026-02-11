@@ -1,7 +1,8 @@
 # Synapses Guide
 
 This guide shows how to build a synapse topology, compute per-edge delays, and
-step a simple delayed-current synapse model.
+step the most advanced biologically accurate synapse dynamics currently
+available in this repo.
 
 ## Concepts
 - Topology: fixed pre/post edge lists plus optional per-edge annotations
@@ -20,8 +21,8 @@ from biosnn.api import (
     ReceptorKind,
     SynapseInputs,
     SynapseTopology,
-    DelayedCurrentParams,
-    DelayedCurrentSynapse,
+    DelayedSparseMatmulParams,
+    DelayedSparseMatmulSynapse,
 )
 
 # 1) Define a tiny graph (2 pre -> 2 post)
@@ -56,8 +57,8 @@ syn_topology = SynapseTopology(
 
 # 6) Create synapse model + state
 ctx = StepContext(device="cpu", dtype="float32")
-model = DelayedCurrentSynapse(
-    DelayedCurrentParams(init_weight=1e-9, receptor_scale={ReceptorKind.GABA: -1.0})
+model = DelayedSparseMatmulSynapse(
+    DelayedSparseMatmulParams(init_weight=1e-9, receptor_scale={ReceptorKind.GABA: -1.0})
 )
 state = model.init_state(e=pre_idx.numel(), ctx=ctx)
 
@@ -83,6 +84,10 @@ print(post_drive[Compartment.DENDRITE])
 - To validate input shapes, set ctx.extras["validate_shapes"] = True (default).
 - To require inputs already on the same device (avoid CPU->GPU copies), set
   ctx.extras["require_inputs_on_device"] = True.
+- In this repo, "most advanced biologically accurate synapse dynamics" still
+  means a simplified model: linear delayed sparse matmul with
+  single-exponential receptor traces (no voltage-dependent NMDA Mg block, no
+  conductance-based reversal potentials, no STP).
 
 ## Monitoring
 Monitoring is supported via engine monitors; wire these through `Trainer` or the engine

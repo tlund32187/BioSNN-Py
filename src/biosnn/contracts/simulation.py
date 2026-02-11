@@ -3,10 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from biosnn.contracts.monitors import IMonitor
+
+
+@dataclass(frozen=True, slots=True)
+class ExcitabilityModulationConfig:
+    enabled: bool = False
+    targets: tuple[str, ...] = ("hidden", "out")
+    compartment: str = "soma"
+    ach_gain: float = 0.0
+    ne_gain: float = 0.0
+    ht_gain: float = 0.0
+    clamp_abs: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +44,9 @@ class SimulationConfig:
     newborn_duration_steps: int = 250
     max_total_neurons: int = 20000
     neurogenesis_verbose: bool = False
+    excitability_modulation: ExcitabilityModulationConfig | Mapping[str, Any] | None = field(
+        default_factory=ExcitabilityModulationConfig
+    )
     meta: Mapping[str, Any] | None = None
 
 

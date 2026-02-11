@@ -10,6 +10,11 @@ from biosnn.learning.rules.metaplastic_projection import (
     MetaplasticProjectionRule,
     MetaplasticProjectionState,
 )
+from biosnn.learning.rules.modulated_wrapper import (
+    ModulatedRuleWrapper,
+    ModulatedRuleWrapperParams,
+    ModulatedRuleWrapperState,
+)
 from biosnn.learning.rules.rstdp_eligibility import (
     RStdpEligibilityParams,
     RStdpEligibilityRule,
@@ -33,6 +38,9 @@ __all__ = [
     "MetaplasticProjectionParams",
     "MetaplasticProjectionRule",
     "MetaplasticProjectionState",
+    "ModulatedRuleWrapper",
+    "ModulatedRuleWrapperParams",
+    "ModulatedRuleWrapperState",
     "RStdpEligibilityParams",
     "RStdpEligibilityRule",
     "RStdpEligibilityState",

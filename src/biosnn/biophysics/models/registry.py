@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from biosnn.biophysics.models.adex_2c import AdEx2CompModel
+from biosnn.biophysics.models.adex_3c import AdEx3CompModel
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.biophysics.models.lif_3c import LIF3CompModel
 from biosnn.contracts.factories import Registry
@@ -14,6 +15,8 @@ NEURON_MODELS = Registry[INeuronModel](label="neuron_models")
 NEURON_MODELS.register("glif", GLIFModel)
 NEURON_MODELS.register("adex_2c", AdEx2CompModel)
 NEURON_MODELS.register_alias("adex2c", "adex_2c", deprecated=True)
+NEURON_MODELS.register("adex_3c", AdEx3CompModel)
+NEURON_MODELS.register_alias("adex3c", "adex_3c", deprecated=True)
 NEURON_MODELS.register("lif_3c", LIF3CompModel)
 NEURON_MODELS.register_alias("lif3c", "lif_3c", deprecated=True)
 

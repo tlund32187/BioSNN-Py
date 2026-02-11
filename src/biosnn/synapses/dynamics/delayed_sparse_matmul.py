@@ -41,6 +41,19 @@ class DelayedSparseMatmulParams:
     ring_capacity_max: int = 2_000_000
     receptor_profile: ReceptorProfile | None = None
     receptor_state_dtype: str | None = None
+    conductance_mode: bool = False
+    reversal_potential: Mapping[ReceptorKind, float] | None = None
+    nmda_voltage_block: bool = False
+    nmda_mg_concentration: float = 1.0
+    nmda_mg_slope: float = 0.062
+    nmda_mg_scale: float = 3.57
+    post_voltage_compartment: Compartment = Compartment.SOMA
+    post_voltage_meta_key: str = "post_membrane"
+    stp_enabled: bool = False
+    stp_u: float = 0.2
+    stp_tau_rec: float = 0.2
+    stp_tau_facil: float = 0.0
+    stp_state_dtype: str | None = None
 
 
 @dataclass(slots=True)
@@ -61,6 +74,15 @@ class DelayedSparseMatmulState:
     receptor_profile_dt: float | None = None
     receptor_profile_dtype: Any | None = None
     receptor_input_buf: dict[Compartment, Tensor] | None = None
+    receptor_post_v_buf: dict[Compartment, Tensor] | None = None
+    receptor_current_buf: dict[Compartment, Tensor] | None = None
+    receptor_nmda_block_buf: dict[Compartment, Tensor] | None = None
+    receptor_e_rev: Tensor | None = None
+    receptor_nmda_mask: Tensor | None = None
+    receptor_nmda_mask_values: tuple[bool, ...] | None = None
+    stp_u_state: Tensor | None = None
+    stp_x_state: Tensor | None = None
+    stp_last_step: Tensor | None = None
 
 
 class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
@@ -120,6 +142,21 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
             if state.receptor_input_buf is not None:
                 for buf in state.receptor_input_buf.values():
                     buf.zero_()
+            if state.receptor_post_v_buf is not None:
+                for buf in state.receptor_post_v_buf.values():
+                    buf.zero_()
+            if state.receptor_current_buf is not None:
+                for buf in state.receptor_current_buf.values():
+                    buf.zero_()
+            if state.receptor_nmda_block_buf is not None:
+                for buf in state.receptor_nmda_block_buf.values():
+                    buf.zero_()
+            if state.stp_u_state is not None:
+                state.stp_u_state.fill_(_stp_release_u(self.params))
+            if state.stp_x_state is not None:
+                state.stp_x_state.fill_(1.0)
+            if state.stp_last_step is not None:
+                state.stp_last_step.zero_()
             return state
         state.weights[edge_indices] = self.params.init_weight
         if state.post_ring is not None:
@@ -139,6 +176,21 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         if state.receptor_input_buf is not None:
             for buf in state.receptor_input_buf.values():
                 buf.zero_()
+        if state.receptor_post_v_buf is not None:
+            for buf in state.receptor_post_v_buf.values():
+                buf.zero_()
+        if state.receptor_current_buf is not None:
+            for buf in state.receptor_current_buf.values():
+                buf.zero_()
+        if state.receptor_nmda_block_buf is not None:
+            for buf in state.receptor_nmda_block_buf.values():
+                buf.zero_()
+        if state.stp_u_state is not None:
+            state.stp_u_state.index_fill_(0, edge_indices, _stp_release_u(self.params))
+        if state.stp_x_state is not None:
+            state.stp_x_state.index_fill_(0, edge_indices, 1.0)
+        if state.stp_last_step is not None:
+            state.stp_last_step.index_fill_(0, edge_indices, 0)
         return state
 
     def step(
@@ -170,7 +222,8 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                 require_on_device=require_on_device,
             )
 
-            if self.params.backend == "event_driven":
+            use_event_driven = _use_event_driven_backend(self.params)
+            if use_event_driven:
                 post_drive, extras = _step_event_driven(
                     self,
                     state,
@@ -179,6 +232,8 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                     device,
                     weights,
                     dt,
+                    inputs_meta=inputs.meta,
+                    step_index=_time_to_step_index(t=t, dt=dt),
                 )
                 return state, SynapseStepResult(post_drive=post_drive, extras=extras)
             post_drive = _step_sparse_matmul(
@@ -189,6 +244,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                 device,
                 weights,
                 dt,
+                inputs_meta=inputs.meta,
             )
             return state, SynapseStepResult(post_drive=post_drive)
 
@@ -203,6 +259,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         topology = kwargs.get("topology")
         ctx = kwargs.get("ctx")
         dt = kwargs.get("dt")
+        inputs_meta = kwargs.get("inputs_meta")
         if topology is None or ctx is None or dt is None:
             raise ValueError("step_into requires topology, dt, and ctx keyword arguments")
 
@@ -223,7 +280,8 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                 expected_len=_infer_n_pre(topology),
                 require_on_device=require_on_device,
             )
-            if self.params.backend == "event_driven":
+            use_event_driven = _use_event_driven_backend(self.params)
+            if use_event_driven:
                 _step_event_driven_into(
                     self,
                     state,
@@ -233,6 +291,8 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                     weights,
                     out_drive,
                     dt,
+                    inputs_meta=cast(Mapping[str, Any] | None, inputs_meta),
+                    step_index=int(t),
                 )
                 return
             _step_sparse_matmul_into(
@@ -244,13 +304,19 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
                 weights,
                 out_drive,
                 dt,
+                inputs_meta=cast(Mapping[str, Any] | None, inputs_meta),
             )
 
     def state_tensors(self, state: DelayedSparseMatmulState) -> Mapping[str, Tensor]:
-        return {"weights": state.weights}
+        tensors: dict[str, Tensor] = {"weights": state.weights}
+        if state.stp_u_state is not None:
+            tensors["stp_u"] = state.stp_u_state
+        if state.stp_x_state is not None:
+            tensors["stp_x"] = state.stp_x_state
+        return tensors
 
     def compilation_requirements(self) -> Mapping[str, bool | str | None]:
-        use_event_driven = self.params.backend == "event_driven"
+        use_event_driven = _use_event_driven_backend(self.params)
         wants_by_delay_sparse = bool(self.params.store_sparse_by_delay) and not use_event_driven
         wants_fused_sparse = not use_event_driven
         requirements: dict[str, bool | str | None] = {
@@ -266,6 +332,9 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
             "wants_fused_layout": self.params.fused_layout if wants_fused_sparse else "auto",
             "ring_strategy": self.params.ring_strategy if use_event_driven else "dense",
             "ring_dtype": self.params.ring_dtype,
+            "needs_post_membrane": bool(
+                self.params.conductance_mode or self.params.nmda_voltage_block
+            ),
         }
         if wants_fused_sparse and self.params.fused_layout == "csr":
             requirements["wants_fused_csr"] = True
@@ -378,6 +447,8 @@ def _step_sparse_matmul(
     device: Any,
     weights: Tensor,
     dt: float,
+    *,
+    inputs_meta: Mapping[str, Any] | None,
 ) -> Mapping[Compartment, Tensor]:
     torch = require_torch()
     max_delay = _max_delay_steps(topology)
@@ -452,6 +523,7 @@ def _step_sparse_matmul(
         n_post=n_post,
         device=device,
         weights_dtype=weights.dtype,
+        inputs_meta=inputs_meta,
     )
 
     state.cursor = (cursor + 1) % depth
@@ -467,6 +539,8 @@ def _step_sparse_matmul_into(
     weights: Tensor,
     out_drive: MutableMapping[Compartment, Tensor],
     dt: float,
+    *,
+    inputs_meta: Mapping[str, Any] | None,
 ) -> None:
     torch = require_torch()
     max_delay = _max_delay_steps(topology)
@@ -556,6 +630,7 @@ def _step_sparse_matmul_into(
             n_post=n_post,
             device=device,
             weights_dtype=weights.dtype,
+            inputs_meta=inputs_meta,
         )
         for comp, proj_out in proj_drive.items():
             if comp not in out_drive:
@@ -573,6 +648,9 @@ def _step_event_driven(
     device: Any,
     weights: Tensor,
     dt: float,
+    *,
+    inputs_meta: Mapping[str, Any] | None,
+    step_index: int,
 ) -> tuple[Mapping[Compartment, Tensor], Mapping[str, Tensor]]:
     torch = require_torch()
     max_delay = _max_delay_steps(topology)
@@ -639,6 +717,7 @@ def _step_event_driven(
             n_post=n_post,
             device=device,
             weights_dtype=weights.dtype,
+            inputs_meta=inputs_meta,
         )
         state.cursor = (cursor + 1) % depth
         return post_drive, {"processed_edges": weights.new_zeros(())}
@@ -655,6 +734,7 @@ def _step_event_driven(
             n_post=n_post,
             device=device,
             weights_dtype=weights.dtype,
+            inputs_meta=inputs_meta,
         )
         state.cursor = (cursor + 1) % depth
         return post_drive, {"processed_edges": weights.new_zeros(())}
@@ -664,6 +744,17 @@ def _step_event_driven(
     edge_activity = pre_activity.index_select(0, edge_pre)
     edge_weights = weights.index_select(0, edges)
     edge_current = edge_activity * edge_weights
+    stp_eff = _apply_stp_if_enabled(
+        model=model,
+        state=state,
+        edges=edges,
+        step_index=step_index,
+        dt=dt,
+        device=device,
+        weights_dtype=edge_current.dtype,
+    )
+    if stp_eff is not None:
+        edge_current = edge_current * stp_eff
     edge_current = _apply_receptor_scale_edges(model, topology, edges, edge_current)
 
     delay_steps = topology.delay_steps
@@ -716,6 +807,7 @@ def _step_event_driven(
         n_post=n_post,
         device=device,
         weights_dtype=weights.dtype,
+        inputs_meta=inputs_meta,
     )
 
     state.cursor = (cursor + 1) % depth
@@ -731,6 +823,9 @@ def _step_event_driven_into(
     weights: Tensor,
     out_drive: MutableMapping[Compartment, Tensor],
     dt: float,
+    *,
+    inputs_meta: Mapping[str, Any] | None,
+    step_index: int,
 ) -> None:
     torch = require_torch()
     max_delay = _max_delay_steps(topology)
@@ -816,6 +911,7 @@ def _step_event_driven_into(
                 n_post=n_post,
                 device=device,
                 weights_dtype=weights.dtype,
+                inputs_meta=inputs_meta,
             )
             for comp, proj_out in proj_drive.items():
                 if comp not in out_drive:
@@ -837,6 +933,7 @@ def _step_event_driven_into(
                 n_post=n_post,
                 device=device,
                 weights_dtype=weights.dtype,
+                inputs_meta=inputs_meta,
             )
             for comp, proj_out in proj_drive.items():
                 if comp not in out_drive:
@@ -850,6 +947,17 @@ def _step_event_driven_into(
     edge_activity = pre_activity.index_select(0, edge_pre)
     edge_weights = weights.index_select(0, edges)
     edge_current = edge_activity * edge_weights
+    stp_eff = _apply_stp_if_enabled(
+        model=model,
+        state=state,
+        edges=edges,
+        step_index=step_index,
+        dt=dt,
+        device=device,
+        weights_dtype=edge_current.dtype,
+    )
+    if stp_eff is not None:
+        edge_current = edge_current * stp_eff
     edge_current = _apply_receptor_scale_edges(model, topology, edges, edge_current)
 
     delay_steps = topology.delay_steps
@@ -905,6 +1013,7 @@ def _step_event_driven_into(
             n_post=n_post,
             device=device,
             weights_dtype=weights.dtype,
+            inputs_meta=inputs_meta,
         )
         for comp, proj_out in proj_drive.items():
             if comp not in out_drive:
@@ -1111,6 +1220,7 @@ def _apply_receptor_profile_if_enabled(
     n_post: int,
     device: Any,
     weights_dtype: Any,
+    inputs_meta: Mapping[str, Any] | None,
 ) -> None:
     profile = model.params.receptor_profile
     if profile is None:
@@ -1126,6 +1236,9 @@ def _apply_receptor_profile_if_enabled(
     )
     if state.receptor_g is None or state.receptor_decay is None or state.receptor_mix is None:
         return
+    use_conductance = _use_conductance_mode(model.params)
+    e_rev = state.receptor_e_rev
+    nmda_mask_values = state.receptor_nmda_mask_values or ()
     signs = state.receptor_sign_values or ()
     for comp, out in drive_by_comp.items():
         g = state.receptor_g.get(comp)
@@ -1144,6 +1257,31 @@ def _apply_receptor_profile_if_enabled(
         g.mul_(state.receptor_decay)
         g.addcmul_(state.receptor_mix, receptor_in.unsqueeze(0))
         out.zero_()
+        if use_conductance:
+            if e_rev is None:
+                raise RuntimeError("Conductance mode requires receptor reversal potentials.")
+            post_v = _resolve_post_voltage(
+                model=model,
+                state=state,
+                inputs_meta=inputs_meta,
+                comp=comp,
+                n_post=n_post,
+                device=device,
+                dtype=g.dtype,
+            )
+            _apply_conductance_profile(
+                model=model,
+                state=state,
+                comp=comp,
+                out=out,
+                post_v=post_v,
+                g=g,
+                e_rev=e_rev,
+                nmda_mask_values=nmda_mask_values,
+                n_post=n_post,
+                device=device,
+            )
+            continue
         if out.dtype == g.dtype:
             for ridx, sign in enumerate(signs):
                 if sign != 0.0:
@@ -1201,7 +1339,17 @@ def _ensure_receptor_profile_state(
         or state.receptor_mix.device != device
         or state.receptor_sign.device != device
     )
-    if cache_invalid:
+    conductance_cache_invalid = (
+        _use_conductance_mode(model.params)
+        and (
+            state.receptor_e_rev is None
+            or state.receptor_nmda_mask is None
+            or state.receptor_e_rev.device != device
+            or state.receptor_nmda_mask.device != device
+            or state.receptor_e_rev.dtype != receptor_dtype
+        )
+    )
+    if cache_invalid or conductance_cache_invalid:
         tau_vals = [
             max(resolve_profile_value(profile.tau, kind, default=1.0), 1e-9)
             for kind in kinds
@@ -1228,6 +1376,171 @@ def _ensure_receptor_profile_state(
         state.receptor_profile_kinds = kinds
         state.receptor_profile_dt = float(dt)
         state.receptor_profile_dtype = receptor_dtype
+        if _use_conductance_mode(model.params):
+            reversal = model.params.reversal_potential or {}
+            e_rev_vals = [
+                resolve_profile_value(
+                    reversal,
+                    kind,
+                    default=_default_reversal_potential(kind),
+                )
+                for kind in kinds
+            ]
+            e_rev = cast(
+                Tensor,
+                torch.tensor(e_rev_vals, device=device, dtype=receptor_dtype),
+            ).unsqueeze(1)
+            nmda_mask_vals = tuple(
+                bool(model.params.nmda_voltage_block and kind == ReceptorKind.NMDA)
+                for kind in kinds
+            )
+            nmda_mask = cast(
+                Tensor,
+                torch.tensor(nmda_mask_vals, device=device, dtype=torch.bool),
+            ).unsqueeze(1)
+            state.receptor_e_rev = e_rev
+            state.receptor_nmda_mask = nmda_mask
+            state.receptor_nmda_mask_values = nmda_mask_vals
+        else:
+            state.receptor_e_rev = None
+            state.receptor_nmda_mask = None
+            state.receptor_nmda_mask_values = None
+
+
+def _apply_conductance_profile(
+    *,
+    model: DelayedSparseMatmulSynapse,
+    state: DelayedSparseMatmulState,
+    comp: Compartment,
+    out: Tensor,
+    post_v: Tensor,
+    g: Tensor,
+    e_rev: Tensor,
+    nmda_mask_values: tuple[bool, ...],
+    n_post: int,
+    device: Any,
+) -> None:
+    target_out = out
+    if out.dtype != g.dtype:
+        target_out = _ensure_receptor_current_buf(
+            state=state,
+            comp=comp,
+            n_post=n_post,
+            device=device,
+            dtype=g.dtype,
+        )
+        target_out.zero_()
+    nmda_block = _nmda_block_if_enabled(
+        model=model,
+        state=state,
+        comp=comp,
+        post_v=post_v,
+        n_post=n_post,
+        device=device,
+        dtype=g.dtype,
+        nmda_mask_values=nmda_mask_values,
+    )
+    for ridx in range(g.shape[0]):
+        g_row = g[ridx]
+        if ridx < len(nmda_mask_values) and nmda_mask_values[ridx] and nmda_block is not None:
+            g_row = g_row * nmda_block
+        target_out.addcmul_(g_row, e_rev[ridx] - post_v)
+    if target_out is not out:
+        out.add_(target_out.to(dtype=out.dtype))
+
+
+def _resolve_post_voltage(
+    *,
+    model: DelayedSparseMatmulSynapse,
+    state: DelayedSparseMatmulState,
+    inputs_meta: Mapping[str, Any] | None,
+    comp: Compartment,
+    n_post: int,
+    device: Any,
+    dtype: Any,
+) -> Tensor:
+    key = model.params.post_voltage_meta_key
+    if inputs_meta is None:
+        raise ValueError(
+            "conductance_mode/nmda_voltage_block requires post-membrane voltage meta; "
+            "enable engine voltage meta plumbing "
+            f"(missing SynapseInputs.meta['{key}'])."
+        )
+    post_membrane = inputs_meta.get(key)
+    if not isinstance(post_membrane, Mapping):
+        raise ValueError(
+            "conductance_mode/nmda_voltage_block requires post-membrane voltage meta; "
+            f"SynapseInputs.meta['{key}'] must map compartments to voltage tensors."
+        )
+    preferred = model.params.post_voltage_compartment
+    post_v = _compartment_tensor_from_mapping(post_membrane, preferred)
+    if post_v is None:
+        post_v = _compartment_tensor_from_mapping(post_membrane, comp)
+    if post_v is None and preferred != Compartment.SOMA:
+        post_v = _compartment_tensor_from_mapping(post_membrane, Compartment.SOMA)
+    if post_v is None:
+        raise ValueError(
+            f"Missing post membrane tensor for compartment {preferred} in SynapseInputs.meta['{key}']."
+        )
+    if post_v.device != device:
+        raise ValueError(f"post membrane tensor must be on device {device}, got {post_v.device}")
+    if post_v.dim() != 1 or int(post_v.shape[0]) != n_post:
+        raise ValueError(f"post membrane tensor must have shape [{n_post}], got {tuple(post_v.shape)}")
+    if post_v.dtype == dtype:
+        return post_v
+    buf = _ensure_receptor_post_v_buf(
+        state=state,
+        comp=comp,
+        n_post=n_post,
+        device=device,
+        dtype=dtype,
+    )
+    buf.copy_(post_v)
+    return buf
+
+
+def _compartment_tensor_from_mapping(
+    mapping: Mapping[Any, Any],
+    compartment: Compartment,
+) -> Tensor | None:
+    value = mapping.get(compartment)
+    if value is None:
+        value = mapping.get(compartment.value)
+    if value is None:
+        return None
+    return cast(Tensor, value)
+
+
+def _nmda_block_if_enabled(
+    *,
+    model: DelayedSparseMatmulSynapse,
+    state: DelayedSparseMatmulState,
+    comp: Compartment,
+    post_v: Tensor,
+    n_post: int,
+    device: Any,
+    dtype: Any,
+    nmda_mask_values: tuple[bool, ...],
+) -> Tensor | None:
+    if not model.params.nmda_voltage_block:
+        return None
+    if not any(nmda_mask_values):
+        return None
+    block = _ensure_receptor_nmda_block_buf(
+        state=state,
+        comp=comp,
+        n_post=n_post,
+        device=device,
+        dtype=dtype,
+    )
+    block.copy_(post_v)
+    block.mul_(-float(model.params.nmda_mg_slope) * 1_000.0)
+    block.exp_()
+    mg_scale = max(float(model.params.nmda_mg_scale), 1e-9)
+    block.mul_(float(model.params.nmda_mg_concentration) / mg_scale)
+    block.add_(1.0)
+    block.reciprocal_()
+    return block
 
 
 def _ensure_receptor_input_buf(
@@ -1246,6 +1559,74 @@ def _ensure_receptor_input_buf(
         buf = torch.zeros((n_post,), device=device, dtype=dtype)
         state.receptor_input_buf[comp] = buf
     return buf
+
+
+def _ensure_receptor_post_v_buf(
+    *,
+    state: DelayedSparseMatmulState,
+    comp: Compartment,
+    n_post: int,
+    device: Any,
+    dtype: Any,
+) -> Tensor:
+    torch = require_torch()
+    if state.receptor_post_v_buf is None:
+        state.receptor_post_v_buf = {}
+    buf = state.receptor_post_v_buf.get(comp)
+    if buf is None or buf.shape != (n_post,) or buf.device != device or buf.dtype != dtype:
+        buf = torch.zeros((n_post,), device=device, dtype=dtype)
+        state.receptor_post_v_buf[comp] = buf
+    return buf
+
+
+def _ensure_receptor_current_buf(
+    *,
+    state: DelayedSparseMatmulState,
+    comp: Compartment,
+    n_post: int,
+    device: Any,
+    dtype: Any,
+) -> Tensor:
+    torch = require_torch()
+    if state.receptor_current_buf is None:
+        state.receptor_current_buf = {}
+    buf = state.receptor_current_buf.get(comp)
+    if buf is None or buf.shape != (n_post,) or buf.device != device or buf.dtype != dtype:
+        buf = torch.zeros((n_post,), device=device, dtype=dtype)
+        state.receptor_current_buf[comp] = buf
+    return buf
+
+
+def _ensure_receptor_nmda_block_buf(
+    *,
+    state: DelayedSparseMatmulState,
+    comp: Compartment,
+    n_post: int,
+    device: Any,
+    dtype: Any,
+) -> Tensor:
+    torch = require_torch()
+    if state.receptor_nmda_block_buf is None:
+        state.receptor_nmda_block_buf = {}
+    buf = state.receptor_nmda_block_buf.get(comp)
+    if buf is None or buf.shape != (n_post,) or buf.device != device or buf.dtype != dtype:
+        buf = torch.zeros((n_post,), device=device, dtype=dtype)
+        state.receptor_nmda_block_buf[comp] = buf
+    return buf
+
+
+def _default_reversal_potential(kind: ReceptorKind) -> float:
+    if kind in {ReceptorKind.AMPA, ReceptorKind.NMDA}:
+        return 0.0
+    if kind in {ReceptorKind.GABA, ReceptorKind.GABA_A}:
+        return -0.070
+    if kind == ReceptorKind.GABA_B:
+        return -0.095
+    return 0.0
+
+
+def _use_conductance_mode(params: DelayedSparseMatmulParams) -> bool:
+    return bool(params.conductance_mode)
 
 
 def _resolve_receptor_profile_dtype(
@@ -1580,15 +1961,158 @@ def _ensure_supported_topology(topology: SynapseTopology) -> None:
     _ = topology
 
 
+def _use_event_driven_backend(params: DelayedSparseMatmulParams) -> bool:
+    # STP is edge-state dependent and currently uses the event-driven execution path.
+    return bool(params.backend == "event_driven" or params.stp_enabled)
+
+
+def _time_to_step_index(*, t: float, dt: float) -> int:
+    if dt <= 0.0:
+        return 0
+    return max(int(round(float(t) / float(dt))), 0)
+
+
+def _stp_release_u(params: DelayedSparseMatmulParams) -> float:
+    return float(params.stp_u)
+
+
+def _resolve_stp_state_dtype(
+    *,
+    stp_state_dtype: str | None,
+    weights_dtype: Any,
+    device: Any,
+) -> Any:
+    torch = require_torch()
+    if stp_state_dtype is None:
+        if device is not None and getattr(device, "type", None) == "cuda":
+            return torch.float16
+        return weights_dtype
+    return _resolve_dtype(torch, stp_state_dtype)
+
+
+def _ensure_stp_state(
+    *,
+    model: DelayedSparseMatmulSynapse,
+    state: DelayedSparseMatmulState,
+    edge_count: int,
+    device: Any,
+    weights_dtype: Any,
+) -> None:
+    if not model.params.stp_enabled:
+        return
+    torch = require_torch()
+    stp_dtype = _resolve_stp_state_dtype(
+        stp_state_dtype=model.params.stp_state_dtype,
+        weights_dtype=weights_dtype,
+        device=device,
+    )
+    u0 = _stp_release_u(model.params)
+    if (
+        state.stp_u_state is None
+        or state.stp_u_state.shape != (edge_count,)
+        or state.stp_u_state.device != device
+        or state.stp_u_state.dtype != stp_dtype
+    ):
+        state.stp_u_state = torch.full((edge_count,), u0, device=device, dtype=stp_dtype)
+    if (
+        state.stp_x_state is None
+        or state.stp_x_state.shape != (edge_count,)
+        or state.stp_x_state.device != device
+        or state.stp_x_state.dtype != stp_dtype
+    ):
+        state.stp_x_state = torch.ones((edge_count,), device=device, dtype=stp_dtype)
+    if (
+        state.stp_last_step is None
+        or state.stp_last_step.shape != (edge_count,)
+        or state.stp_last_step.device != device
+    ):
+        state.stp_last_step = torch.zeros((edge_count,), device=device, dtype=torch.int32)
+
+
+def _apply_stp_if_enabled(
+    *,
+    model: DelayedSparseMatmulSynapse,
+    state: DelayedSparseMatmulState,
+    edges: Tensor,
+    step_index: int,
+    dt: float,
+    device: Any,
+    weights_dtype: Any,
+) -> Tensor | None:
+    if not model.params.stp_enabled:
+        return None
+    if edges.numel() == 0:
+        return None
+    _ensure_stp_state(
+        model=model,
+        state=state,
+        edge_count=int(state.weights.numel()),
+        device=device,
+        weights_dtype=weights_dtype,
+    )
+    if state.stp_u_state is None or state.stp_x_state is None or state.stp_last_step is None:
+        return None
+    torch = require_torch()
+    u_state = state.stp_u_state
+    x_state = state.stp_x_state
+    step_state = state.stp_last_step
+
+    u = u_state.index_select(0, edges)
+    x = x_state.index_select(0, edges)
+    last_step = step_state.index_select(0, edges)
+    now_step = max(int(step_index), 0)
+    now_step_vec = torch.full_like(last_step, now_step)
+    elapsed_steps = (now_step_vec - last_step).clamp(min=0)
+    elapsed = elapsed_steps.to(dtype=u.dtype) * float(dt)
+
+    tau_rec = float(model.params.stp_tau_rec)
+    tau_facil = float(model.params.stp_tau_facil)
+    u0 = _stp_release_u(model.params)
+
+    if tau_facil > 0.0:
+        u = u0 + (u - u0) * torch.exp(-elapsed / tau_facil)
+        u = u + u0 * (1.0 - u)
+    else:
+        u.fill_(u0)
+
+    if tau_rec > 0.0:
+        x = 1.0 - (1.0 - x) * torch.exp(-elapsed / tau_rec)
+    else:
+        x.fill_(1.0)
+
+    eff = u * x
+    x = (x - eff).clamp_(min=0.0, max=1.0)
+    u = u.clamp_(min=0.0, max=1.0)
+
+    u_state.index_copy_(0, edges, u)
+    x_state.index_copy_(0, edges, x)
+    step_state.index_copy_(0, edges, now_step_vec)
+
+    if eff.dtype == weights_dtype:
+        return eff
+    return eff.to(dtype=weights_dtype)
+
+
 def _validate_backend_config(params: DelayedSparseMatmulParams) -> None:
-    if params.backend == "event_driven":
+    use_event_driven = _use_event_driven_backend(params)
+    if use_event_driven:
         if params.ring_strategy not in {"dense", "event_bucketed"}:
             raise RuntimeError(f"Unsupported ring_strategy={params.ring_strategy}.")
-        return
-    if params.ring_strategy != "dense":
+    elif params.ring_strategy != "dense":
         raise RuntimeError(
             f"ring_strategy={params.ring_strategy} requires backend='event_driven'."
         )
+    if params.conductance_mode and params.receptor_profile is None:
+        raise RuntimeError("conductance_mode requires receptor_profile.")
+    if params.nmda_voltage_block and not params.conductance_mode:
+        raise RuntimeError("nmda_voltage_block requires conductance_mode=True.")
+    if params.stp_enabled:
+        if params.stp_u < 0.0 or params.stp_u > 1.0:
+            raise RuntimeError("stp_u must be in [0, 1].")
+        if params.stp_tau_rec < 0.0:
+            raise RuntimeError("stp_tau_rec must be >= 0.")
+        if params.stp_tau_facil < 0.0:
+            raise RuntimeError("stp_tau_facil must be >= 0.")
 
 
 def _as_like(

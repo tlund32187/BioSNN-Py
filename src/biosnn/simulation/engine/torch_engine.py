@@ -145,10 +145,19 @@ class TorchSimulationEngine(ISimulationEngine):
             if pre_spikes.shape[0] > n_pre:
                 pre_spikes = pre_spikes[:n_pre]
 
+        syn_inputs_meta: Mapping[str, Any] | None = None
+        if _synapse_needs_post_membrane(self._synapse_model):
+            membrane = _extract_membrane_views(self._neuron_model.state_tensors(self._neuron_state))
+            if not membrane:
+                raise RuntimeError(
+                    "Synapse requires post membrane tensors but neuron model does not expose them."
+                )
+            syn_inputs_meta = {"post_membrane": membrane}
+
         self._synapse_state, synapse_result = self._synapse_model.step(
             self._synapse_state,
             self._topology,
-            SynapseInputs(pre_spikes=pre_spikes),
+            SynapseInputs(pre_spikes=pre_spikes, meta=syn_inputs_meta),
             dt=self._dt,
             t=self._t,
             ctx=self._ctx,
@@ -336,6 +345,47 @@ def _merge_tensors(
         else:
             merged[key] = value
     return merged
+
+
+def _synapse_needs_post_membrane(synapse: ISynapseModel) -> bool:
+    reqs = None
+    if hasattr(synapse, "compilation_requirements"):
+        try:
+            reqs = synapse.compilation_requirements()
+        except Exception:
+            reqs = None
+    if isinstance(reqs, Mapping) and "needs_post_membrane" in reqs:
+        return bool(reqs.get("needs_post_membrane"))
+    params = getattr(synapse, "params", None)
+    return bool(getattr(params, "conductance_mode", False))
+
+
+def _extract_membrane_views(tensors: Mapping[str, Tensor]) -> dict[Compartment, Tensor]:
+    membrane: dict[Compartment, Tensor] = {}
+
+    v_soma = tensors.get("v_soma")
+    if v_soma is not None:
+        membrane[Compartment.SOMA] = v_soma
+    v_dend = tensors.get("v_dend")
+    if v_dend is not None:
+        membrane[Compartment.DENDRITE] = v_dend
+    v_axon = tensors.get("v_axon")
+    if v_axon is not None:
+        membrane[Compartment.AXON] = v_axon
+    v_ais = tensors.get("v_ais")
+    if v_ais is not None:
+        membrane[Compartment.AIS] = v_ais
+
+    packed = tensors.get("v")
+    if packed is not None and packed.dim() == 2:
+        cols = int(packed.shape[1])
+        if cols >= 1 and Compartment.SOMA not in membrane:
+            membrane[Compartment.SOMA] = packed[:, 0]
+        if cols >= 2 and Compartment.DENDRITE not in membrane:
+            membrane[Compartment.DENDRITE] = packed[:, 1]
+        if cols >= 3 and Compartment.AXON not in membrane:
+            membrane[Compartment.AXON] = packed[:, 2]
+    return membrane
 
 
 __all__ = ["TorchSimulationEngine"]

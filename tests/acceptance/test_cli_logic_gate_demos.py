@@ -12,13 +12,29 @@ pytestmark = pytest.mark.acceptance
 
 
 @pytest.mark.parametrize(
-    ("demo_name", "extra_args"),
+    ("demo_name", "logic_backend", "extra_args"),
     [
-        ("logic_and", ["--logic-learning-mode", "none"]),
-        ("logic_or", ["--logic-learning-mode", "none"]),
-        ("logic_xor", ["--logic-learning-mode", "none"]),
+        ("logic_and", "harness", ["--logic-learning-mode", "none"]),
+        ("logic_and", "engine", ["--logic-learning-mode", "none"]),
+        ("logic_or", "harness", ["--logic-learning-mode", "none"]),
+        ("logic_or", "engine", ["--logic-learning-mode", "none"]),
+        ("logic_xor", "harness", ["--logic-learning-mode", "none"]),
+        ("logic_xor", "engine", ["--logic-learning-mode", "none"]),
         (
             "logic_curriculum",
+            "harness",
+            [
+                "--logic-curriculum-gates",
+                "or,and,xor",
+                "--logic-curriculum-replay-ratio",
+                "0.5",
+                "--logic-learning-mode",
+                "rstdp",
+            ],
+        ),
+        (
+            "logic_curriculum",
+            "engine",
             [
                 "--logic-curriculum-gates",
                 "or,and,xor",
@@ -34,10 +50,12 @@ def test_cli_logic_gate_demos_smoke(
     monkeypatch,
     tmp_path: Path,
     demo_name: str,
+    logic_backend: str,
     extra_args: list[str],
 ) -> None:
     pytest.importorskip("torch")
     run_dir = tmp_path / demo_name
+    steps = "200" if demo_name == "logic_curriculum" else "40"
     args = cli._parse_args(
         [
             "--demo",
@@ -47,8 +65,10 @@ def test_cli_logic_gate_demos_smoke(
             "--device",
             "cpu",
             "--steps",
-            "40",
+            steps,
             "--no-open",
+            "--logic-backend",
+            logic_backend,
             *extra_args,
         ]
     )
@@ -73,6 +93,9 @@ def test_cli_logic_gate_demos_smoke(
         path = run_dir / name
         assert path.exists(), f"Missing artifact {name} for demo {demo_name}"
         assert path.stat().st_size > 0, f"Empty artifact {name} for demo {demo_name}"
+    with (run_dir / "run_features.json").open("r", encoding="utf-8") as handle:
+        run_features = json.load(handle)
+    assert run_features.get("logic_backend") == logic_backend
     with (run_dir / "topology.json").open("r", encoding="utf-8") as handle:
         topology_payload = json.load(handle)
     node_models = {
@@ -80,7 +103,7 @@ def test_cli_logic_gate_demos_smoke(
         for node in topology_payload.get("nodes", [])
         if isinstance(node, dict)
     }
-    assert "lif_3c" in node_models
+    assert "adex_3c" in node_models
 
     if demo_name == "logic_curriculum":
         with (run_dir / "trials.csv").open("r", encoding="utf-8", newline="") as handle:

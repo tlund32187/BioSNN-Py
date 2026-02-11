@@ -22,6 +22,7 @@ from .models import (
 )
 from .modulators import ModulatorSubsystem
 from .monitors import MonitorSubsystem
+from .neuromodulated_excitability import NeuromodulatedExcitabilitySubsystem
 from .topology import TopologySubsystem
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "LearningScratch",
     "LearningSubsystem",
     "ModulatorSubsystem",
+    "NeuromodulatedExcitabilitySubsystem",
     "MonitorSubsystem",
     "NetworkRequirements",
     "ProjectionPlan",

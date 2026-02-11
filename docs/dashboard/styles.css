@@ -136,6 +136,40 @@ h1 {
   margin-bottom: 8px;
 }
 
+.run-controls.run-controls-advanced {
+  grid-template-columns: repeat(4, minmax(100px, 1fr));
+  margin-bottom: 0;
+}
+
+.run-controls.run-controls-advanced select[multiple] {
+  min-height: 72px;
+}
+
+.run-advanced {
+  margin: 4px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(14, 20, 35, 0.75);
+  padding: 6px 8px;
+}
+
+.run-advanced summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+}
+
+.run-advanced summary::-webkit-details-marker {
+  display: none;
+}
+
+.run-advanced[open] summary {
+  margin-bottom: 8px;
+}
+
 .run-controls label {
   display: flex;
   flex-direction: column;

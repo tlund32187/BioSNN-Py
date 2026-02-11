@@ -29,6 +29,7 @@ def test_cli_demo_flag_defaults():
     assert args.learning_lr == 0.1
     assert args.da_amount == 1.0
     assert args.da_step == 10
+    assert args.logic_neuron_model == "adex_3c"
     assert args.fused_layout == "auto"
     assert args.ring_dtype is None
     assert args.receptor_state_dtype is None
@@ -101,6 +102,8 @@ def test_cli_demo_flag_defaults():
             "xor",
             "--logic-learning-mode",
             "surrogate",
+            "--logic-neuron-model",
+            "lif_3c",
             "--logic-sim-steps-per-trial",
             "12",
             "--logic-sampling-method",
@@ -152,6 +155,7 @@ def test_cli_demo_flag_defaults():
     assert args.da_step == 9
     assert args.logic_gate == "xor"
     assert args.logic_learning_mode == "surrogate"
+    assert args.logic_neuron_model == "lif_3c"
     assert args.logic_sim_steps_per_trial == 12
     assert args.logic_sampling_method == "random_balanced"
     assert args.logic_curriculum_gates == "or,and,xor"

@@ -91,11 +91,118 @@
                 <input id="runLearningToggle" type="checkbox" />
                 Learning
               </label>
-              <label class="checkbox-inline">
-                <input id="runModulatorToggle" type="checkbox" />
-                Modulators
-              </label>
             </div>
+            <details class="run-advanced" id="runAdvancedSection">
+              <summary>Advanced Biology</summary>
+              <div class="run-controls run-controls-advanced">
+                <label id="runLogicBackendWrap">Logic backend
+                  <select id="runLogicBackendSelect">
+                    <option value="harness">harness</option>
+                    <option value="engine">engine</option>
+                  </select>
+                </label>
+                <label class="checkbox-inline">
+                  <input id="runAdvancedSynapseEnabledToggle" type="checkbox" />
+                  Advanced synapse
+                </label>
+                <label class="checkbox-inline">
+                  <input id="runAdvancedSynapseConductanceToggle" type="checkbox" />
+                  conductance_mode
+                </label>
+                <label class="checkbox-inline">
+                  <input id="runAdvancedSynapseNmdaBlockToggle" type="checkbox" />
+                  nmda_block
+                </label>
+                <label class="checkbox-inline">
+                  <input id="runAdvancedSynapseStpToggle" type="checkbox" />
+                  stp_enabled
+                </label>
+                <label>Receptor mode
+                  <select id="runReceptorModeSelect">
+                    <option value="exc_only">exc_only</option>
+                    <option value="ei_ampa_nmda_gabaa">ei_ampa_nmda_gabaa</option>
+                    <option value="ei_ampa_nmda_gabaa_gabab">ei_ampa_nmda_gabaa_gabab</option>
+                  </select>
+                </label>
+                <label class="checkbox-inline">
+                  <input id="runModulatorToggle" type="checkbox" />
+                  Modulators
+                </label>
+                <label>Modulator field
+                  <select id="runModulatorFieldTypeSelect">
+                    <option value="global_scalar">global_scalar</option>
+                    <option value="grid_diffusion_2d">grid_diffusion_2d</option>
+                  </select>
+                </label>
+                <label>Modulator kinds
+                  <select id="runModulatorKindsSelect" multiple size="4">
+                    <option value="dopamine">DA</option>
+                    <option value="acetylcholine">ACh</option>
+                    <option value="noradrenaline">NA</option>
+                    <option value="serotonin">5HT</option>
+                  </select>
+                </label>
+                <label class="checkbox-inline">
+                  <input id="runWrapperEnabledToggle" type="checkbox" />
+                  Wrapper
+                </label>
+                <label>wrapper ach_lr_gain
+                  <input id="runWrapperAchGainInput" type="number" step="0.01" value="0.0" />
+                </label>
+                <label>wrapper ne_lr_gain
+                  <input id="runWrapperNeGainInput" type="number" step="0.01" value="0.0" />
+                </label>
+                <label>wrapper ht_extra_weight_decay
+                  <input id="runWrapperHtDecayInput" type="number" min="0" step="0.01" value="0.0" />
+                </label>
+                <label class="checkbox-inline">
+                  <input id="runExcitabilityEnabledToggle" type="checkbox" />
+                  Excitability modulation
+                </label>
+                <label>excitability ach_gain
+                  <input id="runExcitabilityAchGainInput" type="number" step="0.01" value="0.0" />
+                </label>
+                <label>excitability ne_gain
+                  <input id="runExcitabilityNeGainInput" type="number" step="0.01" value="0.0" />
+                </label>
+                <label>excitability ht_gain
+                  <input id="runExcitabilityHtGainInput" type="number" step="0.01" value="0.0" />
+                </label>
+                <label class="checkbox-inline">
+                  <input id="runHomeostasisEnabledToggle" type="checkbox" />
+                  Homeostasis
+                </label>
+                <label>alpha
+                  <input id="runHomeostasisAlphaInput" type="number" min="0.0001" max="1" step="0.0001" value="0.01" />
+                </label>
+                <label>eta
+                  <input id="runHomeostasisEtaInput" type="number" min="0" step="0.0001" value="0.001" />
+                </label>
+                <label>r_target
+                  <input id="runHomeostasisTargetInput" type="number" min="0" step="0.0001" value="0.05" />
+                </label>
+                <label>clamp_min
+                  <input id="runHomeostasisClampMinInput" type="number" min="0" step="0.0001" value="0.0" />
+                </label>
+                <label>clamp_max
+                  <input id="runHomeostasisClampMaxInput" type="number" min="0" step="0.0001" value="0.05" />
+                </label>
+                <label>scope
+                  <select id="runHomeostasisScopeSelect">
+                    <option value="per_population">per_population</option>
+                    <option value="per_neuron">per_neuron</option>
+                  </select>
+                </label>
+                <label class="checkbox-inline">
+                  <input id="runPruningEnabledToggle" type="checkbox" />
+                  Pruning
+                </label>
+                <label class="checkbox-inline">
+                  <input id="runNeurogenesisEnabledToggle" type="checkbox" />
+                  Neurogenesis
+                </label>
+              </div>
+            </details>
             <div class="run-actions">
               <button id="runStartButton" type="button">Start Run</button>
               <button id="runStopButton" type="button">Stop</button>

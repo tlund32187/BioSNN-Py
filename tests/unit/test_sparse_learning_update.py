@@ -146,3 +146,26 @@ def test_sparse_learning_update_matches_compiled() -> None:
     expected = torch.zeros_like(w_dense)
     expected[0] = 0.5
     torch.testing.assert_close(w_dense, expected)
+
+
+@pytest.mark.parametrize("compiled_mode", [False, True])
+def test_set_training_controls_learning_updates(compiled_mode: bool) -> None:
+    config = SimulationConfig(dt=1e-3, device="cpu")
+
+    training_engine = _build_engine(compiled_mode=compiled_mode)
+    training_engine.reset(config=config)
+    initial_training_weights = training_engine._proj_states["P"].state.weights.clone()
+    training_engine.set_training(True)
+    training_engine.step()
+    training_engine.step()
+    trained_weights = training_engine._proj_states["P"].state.weights
+    assert not torch.equal(trained_weights, initial_training_weights)
+
+    eval_engine = _build_engine(compiled_mode=compiled_mode)
+    eval_engine.reset(config=config)
+    initial_eval_weights = eval_engine._proj_states["P"].state.weights.clone()
+    eval_engine.set_training(False)
+    eval_engine.step()
+    eval_engine.step()
+    eval_weights = eval_engine._proj_states["P"].state.weights
+    torch.testing.assert_close(eval_weights, initial_eval_weights)

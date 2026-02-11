@@ -94,8 +94,13 @@ By default the demos enable safe defaults to avoid huge CSV output on large netw
 You can disable or override these with the CLI flags above.
 
 ### CUDA-clean demos
-When `--device cuda` is selected (or CUDA is auto-detected), the demo defaults to the CUDA-friendly
-`DelayedSparseMatmulSynapse`. `DelayedCurrentSynapse` is kept as a CPU reference path.
+When `--device cuda` is selected (or CUDA is auto-detected), the demo defaults to
+`DelayedSparseMatmulSynapse`, the most advanced biologically accurate synapse
+dynamics currently available in this repo. This is still a simplified
+current-based model (linear delayed sparse matmul + single-exponential receptor
+traces): no voltage-dependent NMDA Mg block, no conductance-based reversal
+potentials, and no STP. `DelayedCurrentSynapse` is kept as a CPU reference
+path.
 
 ### Profiling (optional)
 Use `--profile` to capture a short `torch.profiler` trace after the demo run:

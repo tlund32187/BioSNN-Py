@@ -62,44 +62,66 @@ class RStdpEligibilityRule(ILearningRule):
         _ = (t, ctx)
         torch = require_torch()
         weights = batch.weights
-        if state.eligibility.shape != weights.shape:
-            raise ValueError(
-                "Eligibility shape must match weights shape: "
-                f"{tuple(state.eligibility.shape)} != {tuple(weights.shape)}"
-            )
-
         pre = _as_dtype(batch.pre_spikes, like=weights)
         post = _as_dtype(batch.post_spikes, like=weights)
+        active_edges = _active_edges_from_batch(batch, like=state.eligibility)
+        sparse_mode = active_edges is not None
 
         decay = math.exp(-float(dt) / max(float(self.params.tau_e), 1e-12))
         state.eligibility.mul_(decay)
-        state.eligibility.add_(float(self.params.a_plus) * pre * post)
-        state.eligibility.add_(-float(self.params.a_minus) * pre * (1.0 - post))
+        inc = float(self.params.a_plus) * (pre * post)
+        inc.add_(pre * (1.0 - post), alpha=-float(self.params.a_minus))
 
-        dopamine = _resolve_dopamine(batch=batch, like=weights)
+        if sparse_mode:
+            assert active_edges is not None
+            if active_edges.numel() != weights.numel():
+                raise ValueError(
+                    "Sparse learning requires active_edges shape to match batch weights shape: "
+                    f"{tuple(active_edges.shape)} vs {tuple(weights.shape)}"
+                )
+            elig_active = state.eligibility.index_select(0, active_edges)
+            elig_active.add_(inc)
+            state.eligibility.index_copy_(0, active_edges, elig_active)
+            e_local = elig_active
+            weights_local = weights
+        else:
+            if state.eligibility.shape != weights.shape:
+                raise ValueError(
+                    "Dense learning requires eligibility shape to match weights shape: "
+                    f"{tuple(state.eligibility.shape)} != {tuple(weights.shape)}"
+                )
+            state.eligibility.add_(inc)
+            e_local = state.eligibility
+            weights_local = weights
+
+        dopamine = _resolve_dopamine(batch=batch, like=weights_local)
         effective_dopamine = dopamine * float(self.params.dopamine_scale) + float(self.params.baseline)
 
-        dw = state.eligibility * effective_dopamine
+        dw = e_local * effective_dopamine
         dw.mul_(float(self.params.lr))
         if self.params.weight_decay:
-            dw.add_(weights, alpha=-float(self.params.weight_decay) * float(self.params.lr))
+            dw.add_(weights_local, alpha=-float(self.params.weight_decay) * float(self.params.lr))
 
-        dw = _apply_weight_bounds(dw=dw, weights=weights, w_min=self.params.w_min, w_max=self.params.w_max)
+        dw = _apply_weight_bounds(
+            dw=dw,
+            weights=weights_local,
+            w_min=self.params.w_min,
+            w_max=self.params.w_max,
+        )
 
         state.last_mean_abs_dw = dw.abs().mean() if dw.numel() else torch.zeros_like(state.last_mean_abs_dw)
         state.last_mean_abs_eligibility = (
-            state.eligibility.abs().mean()
-            if state.eligibility.numel()
+            e_local.abs().mean()
+            if e_local.numel()
             else torch.zeros_like(state.last_mean_abs_eligibility)
         )
-
-        return state, LearningStepResult(
-            d_weights=dw,
-            extras={
-                "mean_abs_dw": state.last_mean_abs_dw,
-                "mean_abs_eligibility": state.last_mean_abs_eligibility,
-            },
-        )
+        extras: dict[str, Tensor] = {
+            "mean_abs_dw": state.last_mean_abs_dw,
+            "mean_abs_eligibility": state.last_mean_abs_eligibility,
+        }
+        if sparse_mode and active_edges is not None:
+            extras["active_edges"] = active_edges
+        return state, LearningStepResult(d_weights=dw, extras=extras)
 
     def state_tensors(self, state: RStdpEligibilityState) -> dict[str, Tensor]:
         return {
@@ -113,6 +135,16 @@ def _as_dtype(value: Tensor, *, like: Tensor) -> Tensor:
     if value.dtype == like.dtype and value.device == like.device:
         return value
     return value.to(device=like.device, dtype=like.dtype)
+
+
+def _active_edges_from_batch(batch: LearningBatch, *, like: Tensor) -> Tensor | None:
+    if not batch.extras or "active_edges" not in batch.extras:
+        return None
+    torch = require_torch()
+    active_edges = batch.extras["active_edges"]
+    if active_edges.device == like.device and active_edges.dtype == torch.long:
+        return active_edges
+    return active_edges.to(device=like.device, dtype=torch.long)
 
 
 def _resolve_dopamine(*, batch: LearningBatch, like: Tensor) -> Tensor:

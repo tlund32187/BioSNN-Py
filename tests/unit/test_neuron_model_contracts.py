@@ -1,6 +1,7 @@
 import pytest
 
 from biosnn.biophysics.models.adex_2c import AdEx2CompModel
+from biosnn.biophysics.models.adex_3c import AdEx3CompModel
 from biosnn.biophysics.models.glif import GLIFModel
 from biosnn.biophysics.models.template_neuron import TemplateNeuronModel
 from biosnn.contracts.neurons import NeuronInputs, StepContext
@@ -15,6 +16,7 @@ torch = pytest.importorskip("torch")
     [
         GLIFModel,
         AdEx2CompModel,
+        AdEx3CompModel,
         TemplateNeuronModel,
     ],
 )
