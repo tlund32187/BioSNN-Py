@@ -9,7 +9,7 @@ import socket
 import time
 import webbrowser
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 from urllib.parse import quote
@@ -89,7 +89,7 @@ def main() -> None:
             {
                 "run_id": run_dir.name,
                 "state": "running",
-                "started_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "started_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
             },
         )
 
@@ -162,7 +162,7 @@ def main() -> None:
                     "run_id": run_dir.name,
                     "state": "error",
                     "last_error": str(exc),
-                    "finished_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "finished_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
                 },
             )
         raise
@@ -174,7 +174,7 @@ def main() -> None:
                     "run_id": run_dir.name,
                     "state": "done",
                     "last_error": None,
-                    "finished_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "finished_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
                 },
             )
 

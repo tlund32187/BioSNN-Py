@@ -22,11 +22,16 @@ class ThreeFactorEligibilityStdpParams:
     clamp_min: float | None = None
     clamp_max: float | None = None
     modulator_kind: ModulatorKind = ModulatorKind.DOPAMINE
+    lazy_decay_enabled: bool = True
+    lazy_decay_step_dtype: str = "int32"
+    lazy_decay_dense: bool = False
 
 
 @dataclass(slots=True)
 class ThreeFactorEligibilityStdpState:
     eligibility: Tensor
+    last_update_step: Tensor | None
+    step: int
     last_mean_dw: Tensor
 
 
@@ -48,8 +53,14 @@ class ThreeFactorEligibilityStdpRule(ILearningRule):
     def init_state(self, e: int, *, ctx: Any) -> ThreeFactorEligibilityStdpState:
         torch = require_torch()
         device, dtype = resolve_device_dtype(ctx)
+        last_update_step = None
+        if self.params.lazy_decay_enabled:
+            step_dtype = _resolve_step_dtype(torch, self.params.lazy_decay_step_dtype)
+            last_update_step = torch.zeros((e,), device=device, dtype=step_dtype)
         return ThreeFactorEligibilityStdpState(
             eligibility=torch.zeros((e,), device=device, dtype=dtype),
+            last_update_step=last_update_step,
+            step=0,
             last_mean_dw=torch.zeros((), device=device, dtype=dtype),
         )
 
@@ -71,8 +82,10 @@ class ThreeFactorEligibilityStdpRule(ILearningRule):
         active_edges = _active_edges_from_batch(batch, like=state.eligibility)
         sparse_mode = active_edges is not None
 
-        decay = math.exp(-float(dt) / max(float(self.params.tau_e), 1e-12))
-        state.eligibility.mul_(decay)
+        tau_e = float(self.params.tau_e)
+        if tau_e <= 0.0:
+            raise ValueError("tau_e must be > 0 for eligibility decay.")
+        decay = math.exp(-float(dt) / tau_e)
 
         inc = float(self.params.a_plus) * (pre * post)
         inc.add_(pre * (1.0 - post), alpha=-float(self.params.a_minus))
@@ -86,11 +99,31 @@ class ThreeFactorEligibilityStdpRule(ILearningRule):
                     "Sparse learning requires active_edges shape to match batch weights shape: "
                     f"{tuple(active_edges.shape)} vs {tuple(weights.shape)}"
                 )
-            elig_active = state.eligibility.index_select(0, active_edges)
-            elig_active.add_(inc)
-            state.eligibility.index_copy_(0, active_edges, elig_active)
+            if self.params.lazy_decay_enabled:
+                if state.last_update_step is None:
+                    raise ValueError(
+                        "Lazy decay is enabled but ThreeFactorEligibilityStdpState.last_update_step is missing."
+                    )
+                last = state.last_update_step.index_select(0, active_edges)
+                delta_steps = (float(state.step) - last).to(dtype=state.eligibility.dtype)
+                decay_active = torch.exp(delta_steps * (-float(dt) / tau_e))
+                elig_active = state.eligibility.index_select(0, active_edges)
+                elig_active.mul_(decay_active)
+                elig_active.add_(inc)
+                state.eligibility.index_copy_(0, active_edges, elig_active)
+                state.last_update_step.index_copy_(
+                    0,
+                    active_edges,
+                    torch.full_like(last, fill_value=int(state.step)),
+                )
+            else:
+                state.eligibility.mul_(decay)
+                elig_active = state.eligibility.index_select(0, active_edges)
+                elig_active.add_(inc)
+                state.eligibility.index_copy_(0, active_edges, elig_active)
             e_local = elig_active
         else:
+            state.eligibility.mul_(decay)
             if state.eligibility.shape != weights.shape:
                 raise ValueError(
                     "Dense learning requires eligibility shape to match weights shape: "
@@ -98,6 +131,8 @@ class ThreeFactorEligibilityStdpRule(ILearningRule):
                 )
             state.eligibility.add_(inc)
             e_local = state.eligibility
+            if state.last_update_step is not None:
+                state.last_update_step.fill_(int(state.step))
 
         gate = _resolve_gate(batch=batch, like=weights, kind=self.params.modulator_kind)
         dw = e_local * gate
@@ -116,6 +151,7 @@ class ThreeFactorEligibilityStdpRule(ILearningRule):
         extras: dict[str, Tensor] = {"mean_dw": state.last_mean_dw}
         if sparse_mode and active_edges is not None:
             extras["active_edges"] = active_edges
+        state.step += 1
         return state, LearningStepResult(d_weights=dw, extras=extras)
 
     def state_tensors(self, state: ThreeFactorEligibilityStdpState) -> dict[str, Tensor]:
@@ -129,6 +165,13 @@ def _as_dtype(value: Tensor, *, like: Tensor) -> Tensor:
     if value.dtype == like.dtype and value.device == like.device:
         return value
     return value.to(device=like.device, dtype=like.dtype)
+
+
+def _resolve_step_dtype(torch: Any, raw: str) -> Any:
+    token = str(raw).split(".", 1)[-1].strip().lower()
+    if token in {"int32", "int64"}:
+        return getattr(torch, token)
+    return torch.int32
 
 
 def _active_edges_from_batch(batch: LearningBatch, *, like: Tensor) -> Tensor | None:

@@ -101,7 +101,7 @@ class LearningSubsystem:
                 n_active = active_edges.numel()
                 if (
                     scratch.size != n_active
-                    or scratch.edge_pre_idx.device != device
+                    or not _devices_match(scratch.edge_pre_idx.device, device)
                     or scratch.edge_pre.dtype != pre_spikes.dtype
                     or scratch.edge_post.dtype != post_spikes.dtype
                     or scratch.edge_weights.dtype != weights.dtype
@@ -174,12 +174,12 @@ class LearningSubsystem:
                 "Topology meta missing pre adjacency; compile_topology(..., build_pre_adjacency=True) "
                 "must be called."
             )
-        if pre_ptr.device != device or edge_idx.device != device:
+        if not _devices_match(pre_ptr.device, device) or not _devices_match(edge_idx.device, device):
             raise ValueError("Adjacency tensors must be on the projection device")
         return cast(Tensor, pre_ptr), cast(Tensor, edge_idx)
 
     def get_arange(self, scratch: LearningScratch, needed: int, *, device: Any) -> Tensor:
-        if scratch.arange_size < needed or scratch.arange_buf.device != device:
+        if scratch.arange_size < needed or not _devices_match(scratch.arange_buf.device, device):
             torch = require_torch()
             scratch.arange_buf = torch.arange(needed, device=device, dtype=torch.long)
             scratch.arange_size = needed
@@ -276,3 +276,26 @@ class LearningSubsystem:
 
 
 __all__ = ["LearningSubsystem"]
+
+
+def _devices_match(actual_device: Any, expected_device: Any) -> bool:
+    torch = require_torch()
+    try:
+        actual = torch.device(actual_device)
+        expected = torch.device(expected_device)
+    except Exception:
+        return bool(actual_device == expected_device)
+
+    if actual == expected:
+        return True
+    if actual.type != expected.type:
+        return False
+    if actual.type != "cuda":
+        return False
+    if not torch.cuda.is_available():
+        return False
+
+    current_idx = int(torch.cuda.current_device())
+    actual_idx = current_idx if actual.index is None else int(actual.index)
+    expected_idx = current_idx if expected.index is None else int(expected.index)
+    return actual_idx == expected_idx

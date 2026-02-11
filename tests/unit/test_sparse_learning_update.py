@@ -60,7 +60,10 @@ class FixedSpikesModel(INeuronModel):
         ctx: StepContext,
     ) -> tuple[DummyState, NeuronStepResult]:
         _ = inputs, dt, t, ctx
-        return state, NeuronStepResult(spikes=self._spikes)
+        spikes = self._spikes
+        if ctx.device:
+            spikes = spikes.to(device=torch.device(ctx.device))
+        return state, NeuronStepResult(spikes=spikes)
 
     def state_tensors(self, state: DummyState):
         _ = state
@@ -98,7 +101,44 @@ class SparseDeltaRule(ILearningRule):
         return {}
 
 
-def _build_engine(*, compiled_mode: bool) -> TorchNetworkEngine:
+@dataclass(slots=True)
+class DtCaptureState:
+    seen_dts: list[float]
+
+
+class DtCaptureRule(ILearningRule):
+    name = "dt_capture"
+    supports_sparse = False
+
+    def init_state(self, e: int, *, ctx: StepContext) -> DtCaptureState:
+        _ = e, ctx
+        return DtCaptureState(seen_dts=[])
+
+    def step(
+        self,
+        state: DtCaptureState,
+        batch: LearningBatch,
+        *,
+        dt: float,
+        t: float,
+        ctx: StepContext,
+    ) -> tuple[DtCaptureState, LearningStepResult]:
+        _ = t, ctx
+        state.seen_dts.append(float(dt))
+        return state, LearningStepResult(d_weights=torch.zeros_like(batch.weights))
+
+    def state_tensors(self, state: DtCaptureState):
+        _ = state
+        return {}
+
+
+def _build_engine(
+    *,
+    compiled_mode: bool,
+    learning: ILearningRule | None = None,
+    sparse_learning: bool = True,
+    learn_every: int = 1,
+) -> TorchNetworkEngine:
     pre_spikes = torch.tensor([True, False, False])
     post_spikes = torch.tensor([True, False])
 
@@ -117,8 +157,9 @@ def _build_engine(*, compiled_mode: bool) -> TorchNetworkEngine:
         topology=topology,
         pre="Pre",
         post="Post",
-        learning=SparseDeltaRule(),
-        sparse_learning=True,
+        learning=learning or SparseDeltaRule(),
+        sparse_learning=sparse_learning,
+        learn_every=learn_every,
     )
 
     return TorchNetworkEngine(
@@ -169,3 +210,34 @@ def test_set_training_controls_learning_updates(compiled_mode: bool) -> None:
     eval_engine.step()
     eval_weights = eval_engine._proj_states["P"].state.weights
     torch.testing.assert_close(eval_weights, initial_eval_weights)
+
+
+@pytest.mark.parametrize("compiled_mode", [False, True])
+def test_learning_dt_scales_with_learn_every(compiled_mode: bool) -> None:
+    sim_dt = 1e-3
+    learn_every = 3
+    engine = _build_engine(
+        compiled_mode=compiled_mode,
+        learning=DtCaptureRule(),
+        sparse_learning=False,
+        learn_every=learn_every,
+    )
+    engine.reset(config=SimulationConfig(dt=sim_dt, device="cpu"))
+
+    for _ in range(7):
+        engine.step()
+
+    state = engine._proj_states["P"].learning_state
+    assert isinstance(state, DtCaptureState)
+    assert len(state.seen_dts) == 3
+    for dt in state.seen_dts:
+        assert dt == pytest.approx(sim_dt * learn_every)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.parametrize("compiled_mode", [False, True])
+def test_sparse_learning_accepts_cuda_device_alias(compiled_mode: bool) -> None:
+    engine = _build_engine(compiled_mode=compiled_mode, sparse_learning=True)
+    engine.reset(config=SimulationConfig(dt=1e-3, device="cuda"))
+    engine.step()
+    assert "P" in engine.last_d_weights

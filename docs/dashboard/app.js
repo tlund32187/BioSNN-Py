@@ -173,6 +173,10 @@ const dataConfig = (() => {
   const apiParamRaw = params.get("api");
   const apiParam = apiParamRaw ? String(apiParamRaw).trim().toLowerCase() : "";
   const apiDisabled = apiParam === "0" || apiParam === "false" || apiParam === "off" || apiParam === "no";
+  const apiTimeoutRaw = Number(params.get("api_timeout_ms") || 8000);
+  const apiTimeoutMs = Number.isFinite(apiTimeoutRaw)
+    ? Math.min(60000, Math.max(1000, apiTimeoutRaw))
+    : 8000;
   const pathFromRun = (filename) => (runPath ? `${runPath}/${filename}` : null);
   const topologyJson = readParam("topology", pathFromRun("topology.json") || "data/topology.json");
   const neuronCsv = readParam("neuron", pathFromRun("neuron.csv") || "data/neuron.csv");
@@ -204,6 +208,7 @@ const dataConfig = (() => {
     runFeaturesJson: pathFromRun("run_features.json"),
     runStatusJson: pathFromRun("run_status.json"),
     useApi: !apiDisabled,
+    apiTimeoutMs,
     refreshMs: Number(params.get("refresh") || 1200),
     totalSteps: Number(params.get("total_steps") || params.get("steps") || 0),
   };
@@ -247,6 +252,7 @@ const runState = {
   demos: [],
   status: null,
   apiAvailable: false,
+  apiBootstrapInFlight: false,
   activeRunPath: dataConfig.runPath || null,
   lastAppliedRunId: null,
 };
@@ -1517,7 +1523,11 @@ function getTotalSteps() {
   }
   const meta = dataState.topology?.meta ?? dataState.topology?.metadata ?? null;
   const candidate =
-    meta?.total_steps ?? meta?.steps ?? dataState.topology?.total_steps ?? dataState.topology?.steps;
+    dataState.runConfig?.steps ??
+    meta?.total_steps ??
+    meta?.steps ??
+    dataState.topology?.total_steps ??
+    dataState.topology?.steps;
   const asNumber = Number(candidate || 0);
   return Number.isFinite(asNumber) && asNumber > 0 ? asNumber : 0;
 }
@@ -1535,6 +1545,82 @@ function isLearningDisabled(rows) {
   return allMissing;
 }
 
+function getConfiguredLearningEnabled() {
+  const featureEnabled = dataState.runFeatures?.learning?.enabled;
+  if (typeof featureEnabled === "boolean") {
+    return featureEnabled;
+  }
+  const configEnabled = dataState.runConfig?.learning?.enabled;
+  if (typeof configEnabled === "boolean") {
+    return configEnabled;
+  }
+  const logicMode = String(
+    dataState.runConfig?.logic_learning_mode ?? dataState.runConfig?.learning_mode ?? ""
+  )
+    .trim()
+    .toLowerCase();
+  if (logicMode) {
+    return logicMode !== "none";
+  }
+  return null;
+}
+
+function formatMaybeNumber(value, digits = 3) {
+  if (value === null || value === undefined || value === "") return "--";
+  const asNumber = Number(value);
+  if (!Number.isFinite(asNumber)) return String(value);
+  return asNumber.toFixed(digits);
+}
+
+function getProgressLabel() {
+  const totalSteps = getTotalSteps();
+  const metricsStep =
+    latestValue(dataState.metricsRows, "step") ??
+    latestValue(dataState.metricsRows, "time_step") ??
+    latestValue(dataState.metricsRows, "timestep");
+  const simStepEnd = latestValue(dataState.trialsRows, "sim_step_end");
+  const phase = latestValue(dataState.evalRows, "phase") ?? latestValue(dataState.trialsRows, "phase");
+  const phaseTrial =
+    latestValue(dataState.evalRows, "phase_trial") ?? latestValue(dataState.trialsRows, "phase_trial");
+  const globalTrial = latestValue(dataState.evalRows, "trial") ?? latestValue(dataState.trialsRows, "trial");
+  const isCurriculum = resolveDemoId() === "logic_curriculum";
+
+  const phaseTrialNumber = phaseTrial !== null ? Number(phaseTrial) : null;
+  if (
+    isCurriculum &&
+    phaseTrialNumber !== null &&
+    Number.isFinite(phaseTrialNumber) &&
+    totalSteps > 0
+  ) {
+    const pct = Math.min(100, Math.max(0, (phaseTrialNumber / totalSteps) * 100));
+    const phaseText =
+      phase !== null && Number.isFinite(Number(phase)) ? `Phase ${Number(phase)} ` : "";
+    const globalText =
+      globalTrial !== null && Number.isFinite(Number(globalTrial))
+        ? ` | Global trial ${Number(globalTrial)}`
+        : "";
+    const simText =
+      simStepEnd !== null && Number.isFinite(Number(simStepEnd))
+        ? ` | Sim step ${Number(simStepEnd)}`
+        : "";
+    return `${phaseText}trial ${phaseTrialNumber} / ${totalSteps} (${pct.toFixed(1)}%)${globalText}${simText}`;
+  }
+
+  const fallbackStep =
+    metricsStep !== null
+      ? Number(metricsStep)
+      : simStepEnd !== null
+        ? Number(simStepEnd)
+        : null;
+  if (fallbackStep === null || !Number.isFinite(fallbackStep)) {
+    return "Step: --";
+  }
+  if (totalSteps > 0) {
+    return `Step: ${fallbackStep} / ${totalSteps} (${((fallbackStep / totalSteps) * 100).toFixed(1)}%)`;
+  }
+  return `Step: ${fallbackStep}`;
+}
+
 function updateMetrics() {
   metricNodes.fps.textContent = fpsSmooth.toFixed(0);
   metricNodes.activeEdges.textContent = network.edges.length.toString();
@@ -1543,19 +1629,17 @@ function updateMetrics() {
   metricNodes.spikeRate.textContent =
     spikeRateValue !== null ? `${(Number(spikeRateValue) * 100).toFixed(1)}%` : "--";
 
-  const learningDisabled = isLearningDisabled(dataState.metricsRows);
-  const stepValue =
-    latestValue(dataState.metricsRows, "step") ??
-    latestValue(dataState.metricsRows, "time_step") ??
-    latestValue(dataState.metricsRows, "timestep");
-  const totalSteps = getTotalSteps();
-  const stepNumber = stepValue !== null ? Number(stepValue) : null;
-  const progressLabel =
-    stepNumber !== null && Number.isFinite(stepNumber)
-      ? totalSteps > 0
-        ? `Step: ${stepNumber} / ${totalSteps} (${((stepNumber / totalSteps) * 100).toFixed(1)}%)`
-        : `Step: ${stepNumber}`
-      : "Step: --";
+  const configuredLearningEnabled = getConfiguredLearningEnabled();
+  const learningDisabled =
+    configuredLearningEnabled === null
+      ? isLearningDisabled(dataState.metricsRows) && isLearningDisabled(dataState.evalRows)
+      : !configuredLearningEnabled;
+  const progressLabel = getProgressLabel();
+  const currentAccuracy =
+    latestValue(dataState.metricsRows, "train_accuracy") ??
+    latestValue(dataState.evalRows, "sample_accuracy_phase_gate") ??
+    latestValue(dataState.evalRows, "sample_accuracy") ??
+    latestValue(dataState.evalRows, "eval_accuracy");
 
   const weightMean =
     latestValue(dataState.synapseRows, "weights_mean") ??
@@ -1572,7 +1656,7 @@ function updateMetrics() {
       "Current Accuracy",
       learningDisabled
         ? "Learning disabled"
-        : latestValue(dataState.metricsRows, "train_accuracy") ?? latestValue(dataState.evalRows, "sample_accuracy") ?? "--",
+        : formatMaybeNumber(currentAccuracy),
     ],
     [
       "Weight Mean",
@@ -1588,7 +1672,7 @@ function updateMetrics() {
     ],
     [
       "Progress",
-      learningDisabled ? progressLabel : progressLabel,
+      progressLabel,
     ],
   ];
 
@@ -3734,7 +3818,7 @@ async function apiJson(path, options) {
   const timeoutId = controller
     ? setTimeout(() => {
         controller.abort();
-      }, 2500)
+      }, dataConfig.apiTimeoutMs)
     : null;
   try {
     const response = await fetch(path, {
@@ -3756,49 +3840,62 @@ async function apiJson(path, options) {
 }
 
 async function refreshDashboardApiBootstrap() {
-  if (!dataConfig.useApi) {
-    runState.demos = fallbackDemos();
-    renderDemoSelectOptions(runState.demos);
-    runState.apiAvailable = false;
-    setRunStateText({ state: "api-disabled" });
-    setRunControlsEnabled(false);
-    return;
-  }
-  const demosPayload = await apiJson("/api/demos");
-  const statusPayload = await apiJson("/api/run/status");
-  if (!demosPayload || !Array.isArray(demosPayload.demos)) {
-    runState.apiAvailable = false;
-    runState.demos = fallbackDemos();
-    renderDemoSelectOptions(runState.demos);
-    setRunStateText({ state: "api-unavailable" });
-    setRunControlsEnabled(false);
-    return;
-  }
-  runState.apiAvailable = true;
-  setRunControlsEnabled(true);
-  runState.demos = normalizeDemoDefinitions(demosPayload.demos);
-  if (runState.demos.length === 0) {
-    runState.demos = fallbackDemos();
-  }
-  renderDemoSelectOptions(runState.demos);
-  if (statusPayload && typeof statusPayload === "object") {
-    runState.status = statusPayload;
-    dataState.runStatus = statusPayload;
-    setRunStateText(statusPayload);
-    const queryRun = new URLSearchParams(window.location.search).get("run");
-    if (!queryRun && statusPayload.run_dir) {
-      applyRunDirectory(statusPayload.run_dir, { updateUrl: false });
+  if (runState.apiBootstrapInFlight) return;
+  runState.apiBootstrapInFlight = true;
+  try {
+    if (!dataConfig.useApi) {
+      runState.demos = fallbackDemos();
+      renderDemoSelectOptions(runState.demos);
+      runState.apiAvailable = false;
+      setRunStateText({ state: "api-disabled" });
+      setRunControlsEnabled(false);
+      return;
     }
-  } else {
-    setRunStateText({ state: "api-ready" });
+    const demosPayload = await apiJson("/api/demos");
+    const statusPayload = await apiJson("/api/run/status");
+    if (!demosPayload || !Array.isArray(demosPayload.demos)) {
+      runState.apiAvailable = false;
+      runState.demos = fallbackDemos();
+      renderDemoSelectOptions(runState.demos);
+      setRunStateText({ state: "api-unavailable" });
+      setRunControlsEnabled(false);
+      return;
+    }
+    runState.apiAvailable = true;
+    setRunControlsEnabled(true);
+    runState.demos = normalizeDemoDefinitions(demosPayload.demos);
+    if (runState.demos.length === 0) {
+      runState.demos = fallbackDemos();
+    }
+    renderDemoSelectOptions(runState.demos);
+    if (statusPayload && typeof statusPayload === "object") {
+      runState.status = statusPayload;
+      dataState.runStatus = statusPayload;
+      setRunStateText(statusPayload);
+      const queryRun = new URLSearchParams(window.location.search).get("run");
+      if (!queryRun && statusPayload.run_dir) {
+        applyRunDirectory(statusPayload.run_dir, { updateUrl: false });
+      }
+    } else {
+      setRunStateText({ state: "api-ready" });
+    }
+  } finally {
+    runState.apiBootstrapInFlight = false;
   }
 }
 
 async function refreshDashboardRunStatus() {
-  if (!runState.apiAvailable) return;
+  if (!runState.apiAvailable) {
+    if (dataConfig.useApi) {
+      await refreshDashboardApiBootstrap();
+    }
+    return;
+  }
   const statusPayload = await apiJson("/api/run/status");
   if (!statusPayload) {
-    setRunStateText({ state: "api-ready" });
+    runState.apiAvailable = false;
+    setRunStateText({ state: "api-unavailable" });
+    setRunControlsEnabled(false);
     return;
   }
   runState.status = statusPayload;
@@ -3811,6 +3908,9 @@ async function refreshDashboardRunStatus() {
 }
 
 async function onStartRunClick() {
+  if (!runState.apiAvailable && dataConfig.useApi) {
+    await refreshDashboardApiBootstrap();
+  }
   if (!runState.apiAvailable) {
     setRunStateText({ state: dataConfig.useApi ? "api-unavailable" : "api-disabled" });
     return;
@@ -3833,6 +3933,9 @@ async function onStartRunClick() {
 }
 
 async function onStopRunClick() {
+  if (!runState.apiAvailable && dataConfig.useApi) {
+    await refreshDashboardApiBootstrap();
+  }
   if (!runState.apiAvailable) {
     setRunStateText({ state: dataConfig.useApi ? "api-unavailable" : "api-disabled" });
     return;

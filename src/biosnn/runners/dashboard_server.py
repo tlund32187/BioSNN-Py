@@ -10,7 +10,7 @@ import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,7 +27,7 @@ from biosnn.io.export.run_manifest import write_run_config, write_run_features, 
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _tail_text(text: str, *, max_lines: int = 40) -> str:
@@ -349,12 +349,16 @@ class DashboardServerHandler(SimpleHTTPRequestHandler):
 
     def _send_json(self, payload: dict[str, Any], *, status: HTTPStatus) -> None:
         data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-        self.send_response(status.value)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status.value)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # Browser/client disconnected before the response could be written.
+            return
 
 
 class _ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
