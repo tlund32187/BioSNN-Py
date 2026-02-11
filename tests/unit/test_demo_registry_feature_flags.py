@@ -52,7 +52,7 @@ def test_logic_curriculum_feature_flags_differ_between_harness_and_engine() -> N
     assert engine_features["modulators"]["enabled"] is True
     assert engine_features["modulators"]["kinds"] == ["dopamine"]
     assert engine_features["modulators"]["pulse_step"] == 50
-    assert engine_features["modulators"]["amount"] == 1.0
+    assert engine_features["modulators"]["amount"] == 0.1
 
 
 def test_logic_curriculum_rstdp_reports_internal_dopamine_modulator() -> None:
@@ -65,6 +65,59 @@ def test_logic_curriculum_rstdp_reports_internal_dopamine_modulator() -> None:
     assert features["synapse"]["ring_strategy"] is None
     assert features["modulators"]["enabled"] is True
     assert "dopamine" in features["modulators"]["kinds"]
+
+
+def test_logic_curriculum_can_disable_learning_in_engine_mode() -> None:
+    resolved = resolve_run_spec(
+        {
+            "demo_id": "logic_curriculum",
+            "logic_backend": "engine",
+            "learning": {"enabled": False},
+        }
+    )
+    features = feature_flags_for_run_spec(resolved)
+
+    assert resolved["logic_learning_mode"] == "none"
+    assert resolved["learning"]["enabled"] is False
+    assert features["learning"]["enabled"] is False
+    assert features["learning"]["rule"] is None
+
+
+def test_logic_engine_feature_flags_include_exploration_and_reward_window() -> None:
+    features = feature_flags_for_run_spec(
+        {
+            "demo_id": "logic_curriculum",
+            "logic_backend": "engine",
+            "logic": {
+                "reward_delivery_steps": 2,
+                "reward_delivery_clamp_input": True,
+                "exploration": {
+                    "enabled": True,
+                    "mode": "epsilon_greedy",
+                    "epsilon_start": 0.25,
+                    "epsilon_end": 0.05,
+                    "epsilon_decay_trials": 1000,
+                    "tie_break": "alternate",
+                    "seed": 7,
+                },
+            },
+        }
+    )
+
+    assert features["exploration"]["enabled"] is True
+    assert features["exploration"]["mode"] == "epsilon_greedy"
+    assert features["exploration"]["tie_break"] == "alternate"
+    assert features["reward_window"]["steps"] == 2
+    assert features["reward_window"]["clamp_input"] is True
+
+
+def test_feature_flags_reflect_monitor_toggle() -> None:
+    features = feature_flags_for_run_spec(
+        {"demo_id": "network", "monitor_mode": "dashboard", "monitors_enabled": False}
+    )
+
+    assert features["monitor"]["enabled"] is False
+    assert features["monitor"]["sync_policy"] == "disabled"
 
 
 def test_resolve_run_spec_accepts_logic_backend_and_coerces_invalid_values() -> None:
@@ -168,6 +221,7 @@ def test_run_spec_cli_round_trip_extended_fields(tmp_path) -> None:
     start = resolve_run_spec(
         {
             "demo_id": "logic_xor",
+            "monitors_enabled": False,
             "logic_backend": "engine",
             "synapse": {
                 "backend": "event_driven",
@@ -237,6 +291,20 @@ def test_run_spec_cli_round_trip_extended_fields(tmp_path) -> None:
                 "max_total_neurons": 12345,
                 "verbose": True,
             },
+            "logic": {
+                "learn_every": 3,
+                "reward_delivery_steps": 2,
+                "reward_delivery_clamp_input": True,
+                "exploration": {
+                    "enabled": True,
+                    "mode": "epsilon_greedy",
+                    "epsilon_start": 0.3,
+                    "epsilon_end": 0.05,
+                    "epsilon_decay_trials": 250,
+                    "tie_break": "prefer_last",
+                    "seed": 13,
+                },
+            },
         }
     )
 
@@ -244,6 +312,7 @@ def test_run_spec_cli_round_trip_extended_fields(tmp_path) -> None:
     parsed = cli._parse_args(cli_args)
     rt = run_spec_from_cli_args(args=parsed, device=str(parsed.device or "cpu"))
 
+    assert rt["monitors_enabled"] is False
     assert rt["logic_backend"] == "engine"
     assert rt["synapse"]["backend"] == "event_driven"
     assert rt["synapse"]["fused_layout"] == "csr"
@@ -281,3 +350,32 @@ def test_run_spec_cli_round_trip_extended_fields(tmp_path) -> None:
     assert rt["pruning"]["prune_interval_steps"] == 111
     assert rt["neurogenesis"]["enabled"] is True
     assert rt["neurogenesis"]["growth_interval_steps"] == 333
+    assert rt["logic"]["learn_every"] == 3
+    assert rt["logic"]["reward_delivery_steps"] == 2
+    assert rt["logic"]["reward_delivery_clamp_input"] is True
+    assert rt["logic"]["exploration"]["enabled"] is True
+    assert rt["logic"]["exploration"]["epsilon_start"] == 0.3
+    assert rt["logic"]["exploration"]["epsilon_end"] == 0.05
+    assert rt["logic"]["exploration"]["epsilon_decay_trials"] == 250
+    assert rt["logic"]["exploration"]["tie_break"] == "prefer_last"
+
+
+def test_logic_curriculum_cli_round_trip_preserves_disabled_learning(tmp_path) -> None:
+    start = resolve_run_spec(
+        {
+            "demo_id": "logic_curriculum",
+            "logic_backend": "engine",
+            "learning": {"enabled": False, "rule": "rstdp"},
+            "logic_curriculum_gates": "or,and,xor",
+            "logic_curriculum_replay_ratio": 0.5,
+        }
+    )
+
+    cli_args = run_spec_to_cli_args(run_spec=start, run_id="rt", artifacts_dir=tmp_path)
+    parsed = cli._parse_args(cli_args)
+    rt = run_spec_from_cli_args(args=parsed, device=str(parsed.device or "cpu"))
+
+    assert rt["demo_id"] == "logic_curriculum"
+    assert rt["logic_backend"] == "engine"
+    assert rt["logic_learning_mode"] == "none"
+    assert rt["learning"]["enabled"] is False

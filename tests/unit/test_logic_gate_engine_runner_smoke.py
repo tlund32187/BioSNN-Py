@@ -143,6 +143,9 @@ def test_run_logic_gate_curriculum_engine_writes_phase_summary(tmp_path) -> None
     assert (out_dir / "eval.csv").exists()
     assert (out_dir / "confusion.csv").exists()
     assert (out_dir / "phase_summary.csv").exists()
+    assert (out_dir / "spikes.csv").exists()
+    assert (out_dir / "weights.csv").exists()
+    assert (out_dir / "weights.csv").stat().st_size > 0
 
 
 def test_run_logic_gate_curriculum_engine_bio_modulation_toggles_change_behavior(tmp_path) -> None:
@@ -237,3 +240,48 @@ def test_run_logic_gate_curriculum_engine_bio_modulation_toggles_change_behavior
         reader = csv.DictReader(handle)
         dopamine = [float((row.get("dopamine_pulse") or "0").strip() or 0.0) for row in reader]
     assert any(abs(value) > 0.0 for value in dopamine)
+
+
+def test_logic_engine_monitors_write_dashboard_spike_and_weight_artifacts(tmp_path) -> None:
+    pytest.importorskip("torch")
+    cfg = LogicGateRunConfig(
+        gate=LogicGate.OR,
+        seed=21,
+        steps=12,
+        sim_steps_per_trial=2,
+        device="cpu",
+        learning_mode="rstdp",
+        out_dir=tmp_path / "logic_engine_monitors_on",
+        export_every=3,
+    )
+
+    result = run_logic_gate_engine(cfg, _base_run_spec())
+    out_dir = result["out_dir"]
+    spikes_csv = out_dir / "spikes.csv"
+    weights_csv = out_dir / "weights.csv"
+
+    assert spikes_csv.exists()
+    assert weights_csv.exists()
+    assert weights_csv.stat().st_size > 0
+
+
+def test_logic_engine_monitors_can_be_disabled(tmp_path) -> None:
+    pytest.importorskip("torch")
+    cfg = LogicGateRunConfig(
+        gate=LogicGate.OR,
+        seed=22,
+        steps=8,
+        sim_steps_per_trial=2,
+        device="cpu",
+        learning_mode="rstdp",
+        out_dir=tmp_path / "logic_engine_monitors_off",
+        export_every=4,
+    )
+    run_spec = _base_run_spec()
+    run_spec["monitors_enabled"] = False
+
+    result = run_logic_gate_engine(cfg, run_spec)
+    out_dir = result["out_dir"]
+
+    assert not (out_dir / "spikes.csv").exists()
+    assert not (out_dir / "weights.csv").exists()

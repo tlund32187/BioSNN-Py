@@ -16,6 +16,8 @@ LearningRuleChoice = Literal["three_factor_elig_stdp", "rstdp_elig", "none"]
 ModulatorFieldType = Literal["global_scalar", "grid_diffusion_2d"]
 WrapperCombineMode = Literal["exp", "linear"]
 LearningModulatorKind = Literal["dopamine", "acetylcholine", "noradrenaline", "serotonin"]
+ExplorationMode = Literal["epsilon_greedy"]
+ExplorationTieBreak = Literal["random_among_max", "alternate", "prefer_last"]
 
 
 def _default_reversal_potential_v() -> dict[str, float]:
@@ -137,6 +139,28 @@ class ExcitabilityModulationRunConfig:
 
 
 @dataclass(slots=True)
+class ExplorationConfig:
+    enabled: bool = True
+    mode: ExplorationMode = "epsilon_greedy"
+    epsilon_start: float = 0.20
+    epsilon_end: float = 0.01
+    epsilon_decay_trials: int = 3000
+    tie_break: ExplorationTieBreak = "random_among_max"
+    seed: int = 123
+
+    def __post_init__(self) -> None:
+        self.mode = cast(
+            ExplorationMode,
+            "epsilon_greedy",
+        )
+        self.tie_break = cast_exploration_tie_break(self.tie_break)
+        self.epsilon_start = float(self.epsilon_start)
+        self.epsilon_end = float(self.epsilon_end)
+        self.epsilon_decay_trials = max(1, int(self.epsilon_decay_trials))
+        self.seed = int(self.seed)
+
+
+@dataclass(slots=True)
 class LogicGateRunConfig:
     gate: LogicGate | str = LogicGate.AND
     seed: int = 7
@@ -161,6 +185,13 @@ class LogicGateRunConfig:
     modulators: LogicModulatorConfig = field(default_factory=LogicModulatorConfig)
     wrapper: LearningWrapperConfig = field(default_factory=LearningWrapperConfig)
     excitability_modulation: ExcitabilityModulationRunConfig = field(default_factory=ExcitabilityModulationRunConfig)
+    exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
+    reward_delivery_steps: int = 2
+    reward_delivery_clamp_input: bool = True
+    learning_lr_default: float = 1e-3
+    dopamine_amount_default: float = 0.10
+    dopamine_decay_tau_default: float = 0.05
+    learn_every_default: int = 1
 
     def __post_init__(self) -> None:
         self.gate = coerce_gate(self.gate)
@@ -243,6 +274,28 @@ class LogicGateRunConfig:
             )
         elif not isinstance(self.excitability_modulation, ExcitabilityModulationRunConfig):
             self.excitability_modulation = ExcitabilityModulationRunConfig()
+        if isinstance(self.exploration, Mapping):
+            exploration = self.exploration
+            self.exploration = ExplorationConfig(
+                enabled=bool(exploration.get("enabled", True)),
+                mode=cast(ExplorationMode, "epsilon_greedy"),
+                epsilon_start=float(exploration.get("epsilon_start", 0.20)),
+                epsilon_end=float(exploration.get("epsilon_end", 0.01)),
+                epsilon_decay_trials=int(exploration.get("epsilon_decay_trials", 3000)),
+                tie_break=cast(
+                    ExplorationTieBreak,
+                    str(exploration.get("tie_break", "random_among_max")).strip().lower(),
+                ),
+                seed=int(exploration.get("seed", 123)),
+            )
+        elif not isinstance(self.exploration, ExplorationConfig):
+            self.exploration = ExplorationConfig()
+        self.reward_delivery_steps = max(0, int(self.reward_delivery_steps))
+        self.reward_delivery_clamp_input = bool(self.reward_delivery_clamp_input)
+        self.learning_lr_default = max(1e-9, float(self.learning_lr_default))
+        self.dopamine_amount_default = max(0.0, float(self.dopamine_amount_default))
+        self.dopamine_decay_tau_default = max(1e-9, float(self.dopamine_decay_tau_default))
+        self.learn_every_default = max(1, int(self.learn_every_default))
         if self.steps <= 0:
             raise ValueError("steps must be > 0")
         if self.dt <= 0.0:
@@ -317,6 +370,13 @@ def cast_learning_modulator_kind(value: str) -> LearningModulatorKind:
     return cast(LearningModulatorKind, token)
 
 
+def cast_exploration_tie_break(value: str) -> ExplorationTieBreak:
+    token = str(value).strip().lower()
+    if token not in {"random_among_max", "alternate", "prefer_last"}:
+        token = "random_among_max"
+    return cast(ExplorationTieBreak, token)
+
+
 def _coerce_kind_sequence(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
         items = [part.strip() for part in value.split(",")]
@@ -378,6 +438,9 @@ __all__ = [
     "AdvancedPostVoltageSource",
     "AdvancedSynapseConfig",
     "ExcitabilityModulationRunConfig",
+    "ExplorationConfig",
+    "ExplorationMode",
+    "ExplorationTieBreak",
     "LearningModulatorKind",
     "LearningRuleChoice",
     "LearningWrapperConfig",
@@ -390,6 +453,7 @@ __all__ = [
     "cast_learning_rule_choice",
     "cast_learning_modulator_kind",
     "cast_learning_mode",
+    "cast_exploration_tie_break",
     "cast_modulator_field_type",
     "cast_neuron_model",
     "cast_sampling_method",

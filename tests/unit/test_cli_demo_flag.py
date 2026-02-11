@@ -13,6 +13,7 @@ def test_cli_demo_flag_defaults():
     args = cli._parse_args([])
     assert args.demo == cli._default_demo()
     assert args.mode == "dashboard"
+    assert args.monitors is True
     assert args.torch_threads == "auto"
     assert args.torch_interop_threads == "auto"
     assert args.set_omp_env is False
@@ -75,6 +76,7 @@ def test_cli_demo_flag_defaults():
             "--torch-interop-threads",
             "2",
             "--set-omp-env",
+            "--no-monitors",
             "--no-monitor-safe-defaults",
             "--monitor-neuron-sample",
             "256",
@@ -140,6 +142,7 @@ def test_cli_demo_flag_defaults():
     assert args.torch_threads == "4"
     assert args.torch_interop_threads == "2"
     assert args.set_omp_env is True
+    assert args.monitors is False
     assert args.monitor_safe_defaults is False
     assert args.monitor_neuron_sample == 256
     assert args.monitor_edge_sample == 10000

@@ -40,6 +40,7 @@ DashboardMode = Literal["dashboard", "fast"]
 class FeatureDemoConfig:
     out_dir: Path
     mode: DashboardMode = "dashboard"
+    monitors_enabled: bool = True
     steps: int = 20
     dt: float = 1e-3
     seed: int | None = 7
@@ -460,6 +461,8 @@ def _build_demo_monitors(
     tap_tensor_keys: Sequence[str],
     expected_arrival_steps: Mapping[str, int] | None = None,
 ) -> list[IMonitor]:
+    if not bool(cfg.monitors_enabled):
+        return []
     run_mode = cfg.mode.lower().strip()
     fast_mode = run_mode == "fast"
     cuda_device = cfg.device == "cuda"
@@ -553,6 +556,7 @@ def _resolve_runtime_device(cfg: FeatureDemoConfig) -> FeatureDemoConfig:
     return FeatureDemoConfig(
         out_dir=cfg.out_dir,
         mode=cfg.mode,
+        monitors_enabled=cfg.monitors_enabled,
         steps=cfg.steps,
         dt=cfg.dt,
         seed=cfg.seed,

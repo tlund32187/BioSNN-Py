@@ -63,10 +63,17 @@ const runNodes = {
   fusedLayoutSelect: document.getElementById("runFusedLayoutSelect"),
   ringStrategySelect: document.getElementById("runRingStrategySelect"),
   learningToggle: document.getElementById("runLearningToggle"),
+  monitorsToggle: document.getElementById("runMonitorsToggle"),
   modulatorToggle: document.getElementById("runModulatorToggle"),
   advancedSection: document.getElementById("runAdvancedSection"),
   logicBackendWrap: document.getElementById("runLogicBackendWrap"),
   logicBackendSelect: document.getElementById("runLogicBackendSelect"),
+  explorationEnabledToggle: document.getElementById("runExplorationEnabledToggle"),
+  epsilonStartInput: document.getElementById("runEpsilonStartInput"),
+  epsilonEndInput: document.getElementById("runEpsilonEndInput"),
+  epsilonDecayTrialsInput: document.getElementById("runEpsilonDecayTrialsInput"),
+  tieBreakSelect: document.getElementById("runTieBreakSelect"),
+  rewardDeliveryStepsInput: document.getElementById("runRewardDeliveryStepsInput"),
   advancedSynapseEnabledToggle: document.getElementById("runAdvancedSynapseEnabledToggle"),
   advancedSynapseConductanceToggle: document.getElementById("runAdvancedSynapseConductanceToggle"),
   advancedSynapseNmdaBlockToggle: document.getElementById("runAdvancedSynapseNmdaBlockToggle"),
@@ -301,37 +308,37 @@ const FALLBACK_DEMO_DEFINITIONS = [
   {
     id: "logic_curriculum",
     name: "Logic Curriculum",
-    defaults: { demo_id: "logic_curriculum", steps: 2500, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_curriculum_gates: "or,and,nor,nand,xor,xnor", logic_curriculum_replay_ratio: 0.35 },
+    defaults: { demo_id: "logic_curriculum", steps: 2500, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_curriculum_gates: "or,and,nor,nand,xor,xnor", logic_curriculum_replay_ratio: 0.35, logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
   {
     id: "logic_and",
     name: "Logic AND",
-    defaults: { demo_id: "logic_and", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "and", logic_learning_mode: "rstdp" },
+    defaults: { demo_id: "logic_and", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "and", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
   {
     id: "logic_or",
     name: "Logic OR",
-    defaults: { demo_id: "logic_or", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "or", logic_learning_mode: "rstdp" },
+    defaults: { demo_id: "logic_or", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "or", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
   {
     id: "logic_xor",
     name: "Logic XOR",
-    defaults: { demo_id: "logic_xor", steps: 20000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "xor", logic_learning_mode: "rstdp" },
+    defaults: { demo_id: "logic_xor", steps: 20000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "xor", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
   {
     id: "logic_nand",
     name: "Logic NAND",
-    defaults: { demo_id: "logic_nand", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "nand", logic_learning_mode: "rstdp" },
+    defaults: { demo_id: "logic_nand", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "nand", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
   {
     id: "logic_nor",
     name: "Logic NOR",
-    defaults: { demo_id: "logic_nor", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "nor", logic_learning_mode: "rstdp" },
+    defaults: { demo_id: "logic_nor", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "nor", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
   {
     id: "logic_xnor",
     name: "Logic XNOR",
-    defaults: { demo_id: "logic_xnor", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "xnor", logic_learning_mode: "rstdp" },
+    defaults: { demo_id: "logic_xnor", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "xnor", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
 ];
 
@@ -3464,8 +3471,15 @@ function setRunControlsEnabled(enabled) {
     runNodes.fusedLayoutSelect,
     runNodes.ringStrategySelect,
     runNodes.learningToggle,
+    runNodes.monitorsToggle,
     runNodes.modulatorToggle,
     runNodes.logicBackendSelect,
+    runNodes.explorationEnabledToggle,
+    runNodes.epsilonStartInput,
+    runNodes.epsilonEndInput,
+    runNodes.epsilonDecayTrialsInput,
+    runNodes.tieBreakSelect,
+    runNodes.rewardDeliveryStepsInput,
     runNodes.advancedSynapseEnabledToggle,
     runNodes.advancedSynapseConductanceToggle,
     runNodes.advancedSynapseNmdaBlockToggle,
@@ -3518,7 +3532,10 @@ function renderFeatureChecklist(features) {
   const advancedSynapse = features.advanced_synapse || {};
   const wrapper = features.wrapper || {};
   const excitability = features.excitability_modulation || {};
+  const exploration = features.exploration || {};
+  const rewardWindow = features.reward_window || {};
   const monitor = features.monitor || {};
+  const monitorsEnabled = monitor.enabled !== false;
   const items = [
     `Learning: <strong>${learning.enabled ? "ON" : "OFF"}</strong>` +
       (learning.enabled ? ` (${learning.rule || "rule?"}, lr=${learning.lr ?? "?"})` : ""),
@@ -3533,9 +3550,16 @@ function renderFeatureChecklist(features) {
         : ""),
     `Wrapper: <strong>${wrapper.enabled ? "ON" : "OFF"}</strong>`,
     `Excitability modulation: <strong>${excitability.enabled ? "ON" : "OFF"}</strong>`,
+    `Exploration: <strong>${exploration.enabled ? "ON" : "OFF"}</strong>` +
+      (exploration.enabled
+        ? ` (${exploration.mode || "epsilon_greedy"}, ${exploration.epsilon_start ?? "?"}→${exploration.epsilon_end ?? "?"})`
+        : ""),
+    `Reward window: <strong>${(rewardWindow.steps || 0) > 0 ? "ON" : "OFF"}</strong>` +
+      ` (${rewardWindow.steps ?? 0} step${Number(rewardWindow.steps || 0) === 1 ? "" : "s"})`,
     `Fused layout: <strong>${synapse.fused_layout || "unknown"}</strong>`,
     `Ring: <strong>${synapse.ring_strategy || "unknown"}</strong>` +
       ` (dtype=${synapse.ring_dtype || "none"})`,
+    `Monitors: <strong>${monitorsEnabled ? "ON" : "OFF"}</strong>`,
     `Monitor policy: <strong>${monitor.sync_policy || monitor.mode || "unknown"}</strong>`,
   ];
   runNodes.featureList.innerHTML = items.map((item) => `<li>${item}</li>`).join("");
@@ -3552,6 +3576,8 @@ function applyRunSpecToControls(spec) {
     spec.excitability_modulation && typeof spec.excitability_modulation === "object"
       ? spec.excitability_modulation
       : {};
+  const logic = spec.logic && typeof spec.logic === "object" ? spec.logic : {};
+  const exploration = logic.exploration && typeof logic.exploration === "object" ? logic.exploration : {};
   const homeostasis = spec.homeostasis && typeof spec.homeostasis === "object" ? spec.homeostasis : {};
   const pruning = spec.pruning && typeof spec.pruning === "object" ? spec.pruning : {};
   const neurogenesis = spec.neurogenesis && typeof spec.neurogenesis === "object" ? spec.neurogenesis : {};
@@ -3569,11 +3595,36 @@ function applyRunSpecToControls(spec) {
   if (runNodes.learningToggle) {
     runNodes.learningToggle.checked = Boolean(spec.learning?.enabled);
   }
+  if (runNodes.monitorsToggle) {
+    runNodes.monitorsToggle.checked = spec.monitors_enabled !== false;
+  }
   if (runNodes.modulatorToggle) {
     runNodes.modulatorToggle.checked = Boolean(modulators.enabled);
   }
   if (runNodes.logicBackendSelect) {
     runNodes.logicBackendSelect.value = String(spec.logic_backend || "harness");
+  }
+  if (runNodes.explorationEnabledToggle) {
+    runNodes.explorationEnabledToggle.checked = Boolean(exploration.enabled);
+  }
+  if (runNodes.epsilonStartInput) {
+    runNodes.epsilonStartInput.value = String(parseNumberOr(exploration.epsilon_start, 0.2));
+  }
+  if (runNodes.epsilonEndInput) {
+    runNodes.epsilonEndInput.value = String(parseNumberOr(exploration.epsilon_end, 0.01));
+  }
+  if (runNodes.epsilonDecayTrialsInput) {
+    runNodes.epsilonDecayTrialsInput.value = String(
+      Math.max(1, parseInteger(exploration.epsilon_decay_trials) || 3000)
+    );
+  }
+  if (runNodes.tieBreakSelect) {
+    runNodes.tieBreakSelect.value = String(exploration.tie_break || "random_among_max");
+  }
+  if (runNodes.rewardDeliveryStepsInput) {
+    runNodes.rewardDeliveryStepsInput.value = String(
+      Math.max(0, parseInteger(logic.reward_delivery_steps) || 2)
+    );
   }
   if (runNodes.advancedSynapseEnabledToggle) {
     runNodes.advancedSynapseEnabledToggle.checked = Boolean(advancedSynapse.enabled);
@@ -3665,6 +3716,8 @@ function selectedDemoDefaults() {
 
 function buildRunSpecFromControls() {
   const base = selectedDemoDefaults() || {};
+  const demoId = String(runNodes.demoSelect?.value || base.demo_id || "network");
+  const isLogicDemo = isLogicDemoId(demoId);
   const steps = Math.max(1, Number(runNodes.stepsInput?.value || base.steps || 200));
   const device = runNodes.deviceSelect?.value || base.device || "cpu";
   const baseSynapse = base.synapse && typeof base.synapse === "object" ? base.synapse : {};
@@ -3675,6 +3728,11 @@ function buildRunSpecFromControls() {
   const baseExcitability =
     base.excitability_modulation && typeof base.excitability_modulation === "object"
       ? base.excitability_modulation
+      : {};
+  const baseLogic = base.logic && typeof base.logic === "object" ? base.logic : {};
+  const baseExploration =
+    baseLogic.exploration && typeof baseLogic.exploration === "object"
+      ? baseLogic.exploration
       : {};
   const baseHomeostasis = base.homeostasis && typeof base.homeostasis === "object" ? base.homeostasis : {};
   const basePruning = base.pruning && typeof base.pruning === "object" ? base.pruning : {};
@@ -3691,6 +3749,7 @@ function buildRunSpecFromControls() {
       : (base.store_sparse_by_delay ?? null);
 
   const learningEnabled = Boolean(runNodes.learningToggle?.checked);
+  const monitorsEnabled = runNodes.monitorsToggle ? Boolean(runNodes.monitorsToggle.checked) : base.monitors_enabled !== false;
   const modEnabled = Boolean(runNodes.modulatorToggle?.checked);
   const baseModKinds = Array.isArray(baseModulators.kinds)
     ? baseModulators.kinds.map((item) => String(item).trim()).filter(Boolean)
@@ -3710,20 +3769,67 @@ function buildRunSpecFromControls() {
   const advancedSynapseStp = Boolean(runNodes.advancedSynapseStpToggle?.checked);
   const wrapperEnabled = Boolean(runNodes.wrapperEnabledToggle?.checked);
   const excitabilityEnabled = Boolean(runNodes.excitabilityEnabledToggle?.checked);
+  const explorationEnabled = Boolean(runNodes.explorationEnabledToggle?.checked);
+  const epsilonStart = parseNumberOr(
+    runNodes.epsilonStartInput?.value,
+    parseNumberOr(baseExploration.epsilon_start, 0.2)
+  );
+  const epsilonEnd = parseNumberOr(
+    runNodes.epsilonEndInput?.value,
+    parseNumberOr(baseExploration.epsilon_end, 0.01)
+  );
+  const epsilonDecayTrials = Math.max(
+    1,
+    parseInteger(runNodes.epsilonDecayTrialsInput?.value) ||
+      parseInteger(baseExploration.epsilon_decay_trials) ||
+      3000
+  );
+  const tieBreak = String(runNodes.tieBreakSelect?.value || baseExploration.tie_break || "random_among_max");
+  const rewardDeliverySteps = Math.max(
+    0,
+    parseInteger(runNodes.rewardDeliveryStepsInput?.value) ||
+      parseInteger(baseLogic.reward_delivery_steps) ||
+      2
+  );
+  const baseLogicLearningMode = String(base.logic_learning_mode || "rstdp").trim().toLowerCase();
+  const logicLearningMode = isLogicDemo
+    ? (learningEnabled
+      ? (baseLogicLearningMode === "none" ? "rstdp" : baseLogicLearningMode)
+      : "none")
+    : baseLogicLearningMode;
 
   return {
     ...base,
-    demo_id: runNodes.demoSelect?.value || base.demo_id || "network",
+    demo_id: demoId,
     steps,
     device,
     logic_backend: logicBackend,
+    logic_learning_mode: isLogicDemo ? logicLearningMode : base.logic_learning_mode,
     fused_layout: fusedLayout,
     synapse_backend: synapseBackend,
     ring_strategy: ringStrategy,
     ring_dtype: ringDtype,
     store_sparse_by_delay: storeSparseByDelay,
     receptor_mode: receptorMode,
+    monitors_enabled: monitorsEnabled,
     monitor_mode: "dashboard",
+    logic: {
+      ...baseLogic,
+      reward_delivery_steps: rewardDeliverySteps,
+      reward_delivery_clamp_input:
+        baseLogic.reward_delivery_clamp_input === undefined
+          ? true
+          : Boolean(baseLogic.reward_delivery_clamp_input),
+      exploration: {
+        ...baseExploration,
+        enabled: explorationEnabled,
+        mode: "epsilon_greedy",
+        epsilon_start: epsilonStart,
+        epsilon_end: epsilonEnd,
+        epsilon_decay_trials: epsilonDecayTrials,
+        tie_break: tieBreak,
+      },
+    },
     synapse: {
       ...baseSynapse,
       backend: synapseBackend,

@@ -76,6 +76,7 @@ def main() -> None:
     print(f"Demo: {args.demo}")
 
     mode = args.mode
+    monitors_enabled = bool(getattr(args, "monitors", True))
 
     run_spec: dict[str, Any] | None = None
     if args.demo in ALLOWED_DEMOS:
@@ -100,6 +101,7 @@ def main() -> None:
                 DemoMinimalConfig(
                     out_dir=run_dir,
                     mode=mode,
+                    monitors_enabled=monitors_enabled,
                     n_neurons=args.n,
                     p_connect=args.p,
                     steps=steps,
@@ -147,6 +149,8 @@ def main() -> None:
                     dt=float(dt),
                     device=device,
                 )
+                if not monitors_enabled:
+                    monitors = []
                 run_demo_from_spec(model_spec, runtime_cfg, monitors)
         if run_spec is not None and logic_result is not None:
             backend = str(logic_result.get("logic_backend", run_spec.get("logic_backend", "harness"))).strip().lower()
@@ -321,10 +325,10 @@ def _run_logic_curriculum_demo_from_cli(
         logic_backend = "harness"
     if logic_backend == "harness" and learning_mode != "rstdp":
         print(
-            f"[logic-curriculum] overriding learning_mode={learning_mode!r} to 'rstdp' "
-            "for persistent cross-gate learning."
+            f"[logic-curriculum] harness backend requires learning_mode='rstdp'; "
+            f"switching backend to 'engine' to honor learning_mode={learning_mode!r}."
         )
-        learning_mode = "rstdp"
+        logic_backend = "engine"
 
     sampling_method = str(spec.get("logic_sampling_method", getattr(args, "logic_sampling_method", "sequential"))).strip().lower()
     if sampling_method not in {"sequential", "random_balanced"}:
@@ -534,7 +538,7 @@ def _build_vision_demo_from_cli(
         dt=dt,
         device=device,
     )
-    cfg.enable_vision_monitors = mode == "dashboard"
+    cfg.enable_vision_monitors = mode == "dashboard" and bool(args.monitors)
     return build_network_demo(cfg)
 
 
@@ -704,6 +708,7 @@ def _build_feature_config_from_args(
     return FeatureDemoConfig(
         out_dir=run_dir,
         mode=mode,
+        monitors_enabled=bool(args.monitors),
         steps=steps,
         dt=dt,
         seed=args.seed,
@@ -746,6 +751,7 @@ def _build_network_config_from_args(
     return DemoNetworkConfig(
         out_dir=run_dir,
         mode=mode,
+        monitors_enabled=bool(args.monitors),
         steps=steps,
         dt=dt,
         seed=args.seed,
@@ -875,6 +881,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=["dashboard", "fast"],
         default="dashboard",
         help="run mode: dashboard (full artifacts) or fast (throughput-oriented)",
+    )
+    parser.add_argument(
+        "--monitors",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="enable runtime monitors/artifact exporters (default: enabled)",
     )
     parser.add_argument(
         "--max-ring-mib",
@@ -1153,6 +1165,29 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="enable per-trial debug logs for logic_* demos",
     )
     parser.add_argument("--logic-debug-every", type=int, default=25)
+    parser.add_argument(
+        "--logic-exploration-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="enable epsilon-greedy exploration for logic engine backend",
+    )
+    parser.add_argument("--logic-epsilon-start", type=float, default=0.20)
+    parser.add_argument("--logic-epsilon-end", type=float, default=0.01)
+    parser.add_argument("--logic-epsilon-decay-trials", type=int, default=3000)
+    parser.add_argument(
+        "--logic-tie-break",
+        choices=["random_among_max", "alternate", "prefer_last"],
+        default="random_among_max",
+    )
+    parser.add_argument("--logic-exploration-seed", type=int, default=123)
+    parser.add_argument("--logic-learn-every", type=int, default=1)
+    parser.add_argument("--logic-reward-delivery-steps", type=int, default=2)
+    parser.add_argument(
+        "--logic-reward-delivery-clamp-input",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="force zero input during post-trial reward delivery steps",
+    )
     parser.add_argument("--n", type=int, default=100, help="number of neurons")
     parser.add_argument("--p", type=float, default=0.05, help="connection probability")
     parser.add_argument("--dt", type=float, default=1e-3)

@@ -169,3 +169,50 @@ def test_cli_vision_demo_writes_optional_monitor_artifacts(monkeypatch, tmp_path
         path = run_dir / name
         assert path.exists(), f"Missing artifact {name} for vision demo"
         assert path.stat().st_size > 0, f"Empty artifact {name} for vision demo"
+
+
+def test_cli_feature_demo_can_disable_monitors(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    run_dir = tmp_path / "propagation_no_monitors"
+    args = cli._parse_args(
+        [
+            "--demo",
+            "propagation_impulse",
+            "--mode",
+            "dashboard",
+            "--device",
+            "cpu",
+            "--steps",
+            "20",
+            "--no-monitors",
+            "--no-open",
+        ]
+    )
+
+    monkeypatch.setattr(cli, "_parse_args", lambda *_: args)
+    monkeypatch.setattr(cli, "_make_run_dir", lambda *_: run_dir)
+    monkeypatch.setattr(cli, "_should_launch_dashboard", lambda *_: False)
+
+    cli.main()
+
+    required = (
+        "topology.json",
+        "run_config.json",
+        "run_features.json",
+        "run_status.json",
+    )
+    for name in required:
+        path = run_dir / name
+        assert path.exists(), f"Missing artifact {name} for propagation_impulse"
+        assert path.stat().st_size > 0, f"Empty artifact {name} for propagation_impulse"
+
+    monitor_outputs = (
+        "neuron.csv",
+        "tap.csv",
+        "spikes.csv",
+        "synapse.csv",
+        "weights.csv",
+        "metrics.csv",
+    )
+    for name in monitor_outputs:
+        assert not (run_dir / name).exists(), f"Monitor artifact should be disabled: {name}"

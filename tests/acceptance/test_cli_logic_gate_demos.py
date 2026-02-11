@@ -122,3 +122,84 @@ def test_cli_logic_gate_demos_smoke(
         assert str(last_metrics.get("eval_accuracy", "")).strip() == str(
             last_metrics.get("global_eval_accuracy", "")
         ).strip()
+
+
+def test_cli_logic_curriculum_engine_can_disable_learning(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    run_dir = tmp_path / "logic_curriculum_engine_no_learning"
+    args = cli._parse_args(
+        [
+            "--demo",
+            "logic_curriculum",
+            "--mode",
+            "dashboard",
+            "--device",
+            "cpu",
+            "--steps",
+            "80",
+            "--logic-backend",
+            "engine",
+            "--logic-learning-mode",
+            "none",
+            "--logic-curriculum-gates",
+            "or,and,xor",
+            "--no-open",
+        ]
+    )
+
+    monkeypatch.setattr(cli, "_parse_args", lambda *_: args)
+    monkeypatch.setattr(cli, "_make_run_dir", lambda *_: run_dir)
+    monkeypatch.setattr(cli, "_should_launch_dashboard", lambda *_: False)
+
+    cli.main()
+
+    with (run_dir / "run_config.json").open("r", encoding="utf-8") as handle:
+        run_config = json.load(handle)
+    with (run_dir / "run_features.json").open("r", encoding="utf-8") as handle:
+        run_features = json.load(handle)
+
+    assert run_config.get("logic_backend") == "engine"
+    assert bool(run_config.get("learning", {}).get("enabled")) is False
+    assert run_config.get("logic_learning_mode") == "none"
+    assert bool(run_features.get("learning", {}).get("enabled")) is False
+
+
+def test_cli_logic_curriculum_harness_falls_back_to_engine_when_learning_disabled(
+    monkeypatch, tmp_path: Path
+) -> None:
+    pytest.importorskip("torch")
+    run_dir = tmp_path / "logic_curriculum_harness_learning_none"
+    args = cli._parse_args(
+        [
+            "--demo",
+            "logic_curriculum",
+            "--mode",
+            "dashboard",
+            "--device",
+            "cpu",
+            "--steps",
+            "80",
+            "--logic-backend",
+            "harness",
+            "--logic-learning-mode",
+            "none",
+            "--logic-curriculum-gates",
+            "or,and",
+            "--no-open",
+        ]
+    )
+
+    monkeypatch.setattr(cli, "_parse_args", lambda *_: args)
+    monkeypatch.setattr(cli, "_make_run_dir", lambda *_: run_dir)
+    monkeypatch.setattr(cli, "_should_launch_dashboard", lambda *_: False)
+
+    cli.main()
+
+    with (run_dir / "run_config.json").open("r", encoding="utf-8") as handle:
+        run_config = json.load(handle)
+    with (run_dir / "run_features.json").open("r", encoding="utf-8") as handle:
+        run_features = json.load(handle)
+
+    assert run_config.get("logic_backend") == "engine"
+    assert run_features.get("logic_backend") == "engine"
+    assert bool(run_config.get("learning", {}).get("enabled")) is False

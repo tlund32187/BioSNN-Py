@@ -66,6 +66,8 @@ ALLOWED_HOMEOSTASIS_RULE = {"rate_ema_threshold"}
 ALLOWED_HOMEOSTASIS_SCOPE = {"per_population", "per_neuron"}
 ALLOWED_MODULATOR_FIELD_TYPE = {"global_scalar", "grid_diffusion_2d"}
 ALLOWED_SYNAPSE_RECEPTOR_MODE = {"exc_only", "ei_ampa_nmda_gabaa", "ei_ampa_nmda_gabaa_gabab"}
+ALLOWED_EXPLORATION_MODE = {"epsilon_greedy"}
+ALLOWED_EXPLORATION_TIE_BREAK = {"random_among_max", "alternate", "prefer_last"}
 
 _LOGIC_DEMO_TO_GATE: dict[DemoId, str] = {
     "logic_and": "and",
@@ -96,6 +98,7 @@ _BASE_RUN_SPEC_DEFAULTS: dict[str, Any] = {
     "store_sparse_by_delay": None,
     "delay_steps": 3,
     "monitor_mode": "dashboard",
+    "monitors_enabled": True,
     "learning": {
         "enabled": False,
         "rule": "three_factor_hebbian",
@@ -171,6 +174,20 @@ _BASE_RUN_SPEC_DEFAULTS: dict[str, Any] = {
         "newborn_duration_steps": 250,
         "max_total_neurons": 20000,
         "verbose": False,
+    },
+    "logic": {
+        "learn_every": 1,
+        "reward_delivery_steps": 2,
+        "reward_delivery_clamp_input": True,
+        "exploration": {
+            "enabled": True,
+            "mode": "epsilon_greedy",
+            "epsilon_start": 0.20,
+            "epsilon_end": 0.01,
+            "epsilon_decay_trials": 3000,
+            "tie_break": "random_among_max",
+            "seed": 123,
+        },
     },
 }
 
@@ -538,6 +555,12 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     excitability_map = (
         cast(Mapping[str, Any], excitability_raw) if isinstance(excitability_raw, Mapping) else {}
     )
+    logic_raw = merged.get("logic")
+    logic_map = cast(Mapping[str, Any], logic_raw) if isinstance(logic_raw, Mapping) else {}
+    exploration_raw = _first_non_none(logic_map.get("exploration"), merged.get("exploration"))
+    exploration_map = (
+        cast(Mapping[str, Any], exploration_raw) if isinstance(exploration_raw, Mapping) else {}
+    )
 
     default_learning = cast(Mapping[str, Any], default_spec.get("learning", {}))
     default_modulators = cast(Mapping[str, Any], default_spec.get("modulators", {}))
@@ -552,6 +575,8 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     default_homeostasis = cast(Mapping[str, Any], default_spec.get("homeostasis", {}))
     default_pruning = cast(Mapping[str, Any], default_spec.get("pruning", {}))
     default_neurogenesis = cast(Mapping[str, Any], default_spec.get("neurogenesis", {}))
+    default_logic = cast(Mapping[str, Any], default_spec.get("logic", {}))
+    default_exploration = cast(Mapping[str, Any], default_logic.get("exploration", {}))
 
     synapse_backend = _coerce_choice(
         _first_non_none(synapse_map.get("backend"), merged.get("synapse_backend")),
@@ -625,6 +650,28 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         allowed={"auto", "soma", "dendrite"},
         default="auto",
     )
+    exploration_mode = _coerce_choice(
+        _first_non_none(exploration_map.get("mode"), default_exploration.get("mode")),
+        allowed=ALLOWED_EXPLORATION_MODE,
+        default=str(default_exploration.get("mode", "epsilon_greedy")),
+    )
+    exploration_tie_break = _coerce_choice(
+        _first_non_none(exploration_map.get("tie_break"), default_exploration.get("tie_break")),
+        allowed=ALLOWED_EXPLORATION_TIE_BREAK,
+        default=str(default_exploration.get("tie_break", "random_among_max")),
+    )
+    reward_clamp_input = _coerce_optional_bool(
+        _first_non_none(
+            logic_map.get("reward_delivery_clamp_input"),
+            merged.get("reward_delivery_clamp_input"),
+            default_logic.get("reward_delivery_clamp_input", True),
+        )
+    )
+    if reward_clamp_input is None:
+        reward_clamp_input = bool(default_logic.get("reward_delivery_clamp_input", True))
+    monitors_enabled = _coerce_optional_bool(merged.get("monitors_enabled"))
+    if monitors_enabled is None:
+        monitors_enabled = bool(default_spec.get("monitors_enabled", True))
 
     resolved: dict[str, Any] = {
         "demo_id": demo_id,
@@ -646,6 +693,7 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         "monitor_mode": _coerce_choice(
             merged.get("monitor_mode"), allowed=ALLOWED_MONITOR_MODE, default="dashboard"
         ),
+        "monitors_enabled": bool(monitors_enabled),
         "learning": {
             "enabled": bool(learning_map.get("enabled", default_learning.get("enabled", False))),
             "rule": str(
@@ -903,6 +951,58 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
             ),
             "verbose": bool(neurogenesis_map.get("verbose", default_neurogenesis.get("verbose", False))),
         },
+        "logic": {
+            "learn_every": _coerce_positive_int(
+                _first_non_none(logic_map.get("learn_every"), merged.get("logic_learn_every")),
+                _coerce_positive_int(default_logic.get("learn_every"), 1),
+            ),
+            "reward_delivery_steps": _coerce_nonnegative_int(
+                _first_non_none(
+                    logic_map.get("reward_delivery_steps"),
+                    merged.get("reward_delivery_steps"),
+                ),
+                _coerce_nonnegative_int(default_logic.get("reward_delivery_steps"), 2),
+            ),
+            "reward_delivery_clamp_input": bool(reward_clamp_input),
+            "exploration": {
+                "enabled": bool(
+                    _first_non_none(
+                        exploration_map.get("enabled"),
+                        default_exploration.get("enabled", True),
+                    )
+                ),
+                "mode": exploration_mode,
+                "epsilon_start": _coerce_float(
+                    _first_non_none(
+                        exploration_map.get("epsilon_start"),
+                        default_exploration.get("epsilon_start", 0.20),
+                    ),
+                    float(default_exploration.get("epsilon_start", 0.20)),
+                ),
+                "epsilon_end": _coerce_float(
+                    _first_non_none(
+                        exploration_map.get("epsilon_end"),
+                        default_exploration.get("epsilon_end", 0.01),
+                    ),
+                    float(default_exploration.get("epsilon_end", 0.01)),
+                ),
+                "epsilon_decay_trials": _coerce_positive_int(
+                    _first_non_none(
+                        exploration_map.get("epsilon_decay_trials"),
+                        default_exploration.get("epsilon_decay_trials", 3000),
+                    ),
+                    int(default_exploration.get("epsilon_decay_trials", 3000)),
+                ),
+                "tie_break": exploration_tie_break,
+                "seed": _coerce_nonnegative_int(
+                    _first_non_none(
+                        exploration_map.get("seed"),
+                        default_exploration.get("seed", 123),
+                    ),
+                    int(default_exploration.get("seed", 123)),
+                ),
+            },
+        },
     }
 
     if resolved["dt"] <= 0:
@@ -949,6 +1049,11 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         resolved["neurogenesis"]["newborn_plasticity_multiplier"] = float(
             default_neurogenesis.get("newborn_plasticity_multiplier", 1.5)
         )
+    logic_exploration = cast(Mapping[str, Any], resolved.get("logic", {}).get("exploration", {}))
+    if float(logic_exploration.get("epsilon_start", 0.0)) < 0.0:
+        resolved["logic"]["exploration"]["epsilon_start"] = 0.0
+    if float(logic_exploration.get("epsilon_end", 0.0)) < 0.0:
+        resolved["logic"]["exploration"]["epsilon_end"] = 0.0
 
     # Demo-specific behavior defaults.
     if demo_id in {"learning_gate", "dopamine_plasticity"}:
@@ -973,11 +1078,24 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
             allowed=_LOGIC_GATE_VALUES,
             default=_LOGIC_DEMO_TO_GATE[demo_id],
         )
+        learning_rule = str(resolved["learning"]["rule"]).strip().lower()
+        inferred_mode = "none"
+        if bool(resolved["learning"]["enabled"]):
+            inferred_mode = "surrogate" if learning_rule == "surrogate" else "rstdp"
         resolved["logic_learning_mode"] = _coerce_choice(
-            merged.get("logic_learning_mode"),
+            payload.get("logic_learning_mode"),
             allowed=_LOGIC_LEARNING_MODES,
-            default="rstdp",
+            default=inferred_mode,
         )
+        if resolved["logic_learning_mode"] == "none":
+            resolved["learning"]["enabled"] = False
+        elif resolved["logic_learning_mode"] == "surrogate":
+            resolved["learning"]["enabled"] = True
+            resolved["learning"]["rule"] = "surrogate"
+        else:
+            resolved["learning"]["enabled"] = True
+            if str(resolved["learning"]["rule"]).strip().lower() == "surrogate":
+                resolved["learning"]["rule"] = "rstdp"
         resolved["logic_sim_steps_per_trial"] = _coerce_positive_int(
             merged.get("logic_sim_steps_per_trial"),
             10,
@@ -1013,14 +1131,42 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         resolved["logic_curriculum_gates"] = ",".join(curriculum_items)
         resolved["logic_curriculum_replay_ratio"] = replay_ratio
         resolved["logic_gate"] = curriculum_items[-1]
-        resolved["logic_learning_mode"] = "rstdp"
+        learning_rule = str(resolved["learning"]["rule"]).strip().lower()
+        inferred_mode = "none"
+        if bool(resolved["learning"]["enabled"]):
+            inferred_mode = "surrogate" if learning_rule == "surrogate" else "rstdp"
+        resolved["logic_learning_mode"] = _coerce_choice(
+            payload.get("logic_learning_mode"),
+            allowed=_LOGIC_LEARNING_MODES,
+            default=inferred_mode,
+        )
+        if resolved["logic_learning_mode"] == "none":
+            resolved["learning"]["enabled"] = False
+        elif resolved["logic_learning_mode"] == "surrogate":
+            resolved["learning"]["enabled"] = True
+            resolved["learning"]["rule"] = "surrogate"
+        else:
+            resolved["learning"]["enabled"] = True
+            if str(resolved["learning"]["rule"]).strip().lower() == "surrogate":
+                resolved["learning"]["rule"] = "rstdp"
         resolved["logic_neuron_model"] = _coerce_choice(
             merged.get("logic_neuron_model"),
             allowed=_LOGIC_NEURON_MODELS,
             default="adex_3c",
         )
-        resolved["learning"]["enabled"] = True
-        resolved["learning"]["rule"] = "rstdp"
+        if resolved.get("logic_backend") == "engine":
+            payload_learning = cast(
+                Mapping[str, Any], payload.get("learning", {})
+            ) if isinstance(payload.get("learning"), Mapping) else {}
+            payload_modulators = cast(
+                Mapping[str, Any], payload.get("modulators", {})
+            ) if isinstance(payload.get("modulators"), Mapping) else {}
+            if "lr" not in payload_learning:
+                resolved["learning"]["lr"] = 1e-3
+            if "amount" not in payload_modulators:
+                resolved["modulators"]["amount"] = 0.10
+            if "decay_tau" not in payload_modulators:
+                resolved["modulators"]["decay_tau"] = 0.05
     return resolved
 
 
@@ -1045,6 +1191,7 @@ def run_spec_from_cli_args(
         "receptor_mode": getattr(args, "receptor_mode", "exc_only"),
         "delay_steps": getattr(args, "delay_steps", 3),
         "monitor_mode": getattr(args, "mode", "dashboard"),
+        "monitors_enabled": bool(getattr(args, "monitors", True)),
         "learning": {
             "enabled": False,
             "rule": "three_factor_hebbian",
@@ -1118,6 +1265,22 @@ def run_spec_from_cli_args(
             "max_total_neurons": getattr(args, "max_total_neurons", 20000),
             "verbose": bool(getattr(args, "neurogenesis_verbose", False)),
         },
+        "logic": {
+            "learn_every": getattr(args, "logic_learn_every", 1),
+            "reward_delivery_steps": getattr(args, "logic_reward_delivery_steps", 2),
+            "reward_delivery_clamp_input": bool(
+                getattr(args, "logic_reward_delivery_clamp_input", True)
+            ),
+            "exploration": {
+                "enabled": bool(getattr(args, "logic_exploration_enabled", True)),
+                "mode": "epsilon_greedy",
+                "epsilon_start": getattr(args, "logic_epsilon_start", 0.20),
+                "epsilon_end": getattr(args, "logic_epsilon_end", 0.01),
+                "epsilon_decay_trials": getattr(args, "logic_epsilon_decay_trials", 3000),
+                "tie_break": getattr(args, "logic_tie_break", "random_among_max"),
+                "seed": getattr(args, "logic_exploration_seed", 123),
+            },
+        },
     }
     demo_name = str(getattr(args, "demo", "")).strip().lower()
     if demo_name in {"learning_gate", "dopamine_plasticity"}:
@@ -1160,9 +1323,12 @@ def run_spec_from_cli_args(
             default="harness",
         )
     if demo_name == "logic_curriculum":
-        raw["learning"]["enabled"] = True
-        raw["learning"]["rule"] = "rstdp"
-        raw["logic_learning_mode"] = "rstdp"
+        logic_mode = str(getattr(args, "logic_learning_mode", "rstdp")).strip().lower()
+        if logic_mode not in _LOGIC_LEARNING_MODES:
+            logic_mode = "rstdp"
+        raw["learning"]["enabled"] = logic_mode != "none"
+        raw["learning"]["rule"] = "surrogate" if logic_mode == "surrogate" else "rstdp"
+        raw["logic_learning_mode"] = logic_mode
         raw["logic_sim_steps_per_trial"] = max(
             1,
             int(getattr(args, "logic_sim_steps_per_trial", 10)),
@@ -1208,6 +1374,8 @@ def run_spec_to_cli_args(
     homeostasis_cfg = cast(Mapping[str, Any], spec.get("homeostasis", {}))
     pruning_cfg = cast(Mapping[str, Any], spec.get("pruning", {}))
     neurogenesis_cfg = cast(Mapping[str, Any], spec.get("neurogenesis", {}))
+    logic_cfg = cast(Mapping[str, Any], spec.get("logic", {}))
+    exploration_cfg = cast(Mapping[str, Any], logic_cfg.get("exploration", {}))
 
     grid_size = _coerce_grid_size(modulators_cfg.get("grid_size"), (16, 16))
     world_extent = _coerce_float_pair(modulators_cfg.get("world_extent"), (1.0, 1.0))
@@ -1311,6 +1479,20 @@ def run_spec_to_cli_args(
         str(int(neurogenesis_cfg.get("newborn_duration_steps", 250))),
         "--max-total-neurons",
         str(int(neurogenesis_cfg.get("max_total_neurons", 20000))),
+        "--logic-learn-every",
+        str(int(logic_cfg.get("learn_every", 1))),
+        "--logic-reward-delivery-steps",
+        str(int(logic_cfg.get("reward_delivery_steps", 2))),
+        "--logic-epsilon-start",
+        str(float(exploration_cfg.get("epsilon_start", 0.20))),
+        "--logic-epsilon-end",
+        str(float(exploration_cfg.get("epsilon_end", 0.01))),
+        "--logic-epsilon-decay-trials",
+        str(int(exploration_cfg.get("epsilon_decay_trials", 3000))),
+        "--logic-tie-break",
+        str(exploration_cfg.get("tie_break", "random_among_max")),
+        "--logic-exploration-seed",
+        str(int(exploration_cfg.get("seed", 123))),
         "--run-id",
         run_id,
         "--artifacts-dir",
@@ -1318,6 +1500,8 @@ def run_spec_to_cli_args(
         "--no-open",
         "--no-server",
     ]
+    if not bool(spec.get("monitors_enabled", True)):
+        args.append("--no-monitors")
     seed = spec.get("seed")
     if seed is not None:
         args.extend(["--seed", str(int(seed))])
@@ -1373,6 +1557,16 @@ def run_spec_to_cli_args(
         if bool(neurogenesis_cfg.get("verbose", False))
         else "--no-neurogenesis-verbose"
     )
+    args.append(
+        "--logic-reward-delivery-clamp-input"
+        if bool(logic_cfg.get("reward_delivery_clamp_input", True))
+        else "--no-logic-reward-delivery-clamp-input"
+    )
+    args.append(
+        "--logic-exploration-enabled"
+        if bool(exploration_cfg.get("enabled", True))
+        else "--no-logic-exploration-enabled"
+    )
     demo_id = cast(DemoId, spec["demo_id"])
     if demo_id in _LOGIC_DEMO_TO_GATE:
         gate = str(spec.get("logic_gate", _LOGIC_DEMO_TO_GATE[demo_id])).strip().lower()
@@ -1404,6 +1598,11 @@ def run_spec_to_cli_args(
         if bool(spec.get("logic_debug", False)):
             args.append("--logic-debug")
     if demo_id == "logic_curriculum":
+        if not bool(spec["learning"]["enabled"]):
+            logic_mode = "none"
+        else:
+            learning_rule = str(spec["learning"]["rule"]).strip().lower()
+            logic_mode = "surrogate" if learning_rule == "surrogate" else "rstdp"
         args.extend(
             [
                 "--logic-curriculum-gates",
@@ -1413,7 +1612,7 @@ def run_spec_to_cli_args(
                 "--logic-backend",
                 str(spec.get("logic_backend", "harness")),
                 "--logic-learning-mode",
-                "rstdp",
+                logic_mode,
                 "--logic-sim-steps-per-trial",
                 str(int(spec.get("logic_sim_steps_per_trial", 10))),
                 "--logic-sampling-method",
@@ -1565,7 +1764,14 @@ def feature_flags_for_run_spec(
         )
 
     monitor_mode = cast(RunMonitorMode, spec["monitor_mode"])
-    monitor_policy = "sync_opt_in" if monitor_mode == "dashboard" else "cuda_safe"
+    monitors_enabled = bool(spec.get("monitors_enabled", True))
+    monitor_policy = "disabled"
+    if monitors_enabled:
+        monitor_policy = "sync_opt_in" if monitor_mode == "dashboard" else "cuda_safe"
+    logic_cfg = cast(Mapping[str, Any], spec.get("logic", {}))
+    exploration_cfg = cast(Mapping[str, Any], logic_cfg.get("exploration", {}))
+    exploration_enabled = bool(exploration_cfg.get("enabled", False)) if is_logic_demo and logic_backend == "engine" else False
+    reward_delivery_steps = int(logic_cfg.get("reward_delivery_steps", 0)) if is_logic_demo and logic_backend == "engine" else 0
     return {
         "demo_id": demo_id,
         "learning": {
@@ -1623,8 +1829,23 @@ def feature_flags_for_run_spec(
             "ht_gain": float(spec.get("excitability_modulation", {}).get("ht_gain", 0.0)),
         },
         "monitor": {
+            "enabled": monitors_enabled,
             "mode": monitor_mode,
             "sync_policy": monitor_policy,
+        },
+        "exploration": {
+            "enabled": exploration_enabled,
+            "mode": str(exploration_cfg.get("mode", "epsilon_greedy")),
+            "epsilon_start": float(exploration_cfg.get("epsilon_start", 0.20)),
+            "epsilon_end": float(exploration_cfg.get("epsilon_end", 0.01)),
+            "epsilon_decay_trials": int(exploration_cfg.get("epsilon_decay_trials", 3000)),
+            "tie_break": str(exploration_cfg.get("tie_break", "random_among_max")),
+        },
+        "reward_window": {
+            "steps": reward_delivery_steps,
+            "clamp_input": bool(logic_cfg.get("reward_delivery_clamp_input", True))
+            if reward_delivery_steps > 0
+            else False,
         },
         "homeostasis": {
             "enabled": bool(spec["homeostasis"]["enabled"]),

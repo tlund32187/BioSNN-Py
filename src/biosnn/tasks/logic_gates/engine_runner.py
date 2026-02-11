@@ -7,6 +7,7 @@ settings from a run spec mapping.
 
 from __future__ import annotations
 
+import random
 import time
 from collections import deque
 from collections.abc import Mapping, Sequence
@@ -50,9 +51,9 @@ from biosnn.simulation.engine import TorchNetworkEngine
 from biosnn.simulation.network import ModulatorSpec, PopulationSpec, ProjectionSpec
 from biosnn.synapses.dynamics.delayed_sparse_matmul import DelayedSparseMatmulSynapse
 
-from .configs import LogicGateRunConfig
+from .configs import ExplorationConfig, LogicGateRunConfig
 from .datasets import LogicGate, coerce_gate, make_truth_table, sample_case_indices
-from .encoding import INPUT_NEURON_INDICES, OUTPUT_NEURON_INDICES, decode_output, encode_inputs
+from .encoding import INPUT_NEURON_INDICES, OUTPUT_NEURON_INDICES, encode_inputs
 from .evaluators import PassTracker, eval_accuracy
 from .topologies import build_logic_gate_ff, build_logic_gate_xor
 
@@ -78,6 +79,184 @@ class _EngineBuild:
     modulator_amount: float
     modulator_state: dict[str, Any]
     learning_proj_name: str | None
+
+
+@dataclass(slots=True)
+class _WeightExportProjection:
+    name: str
+    pre_idx: Any
+    post_idx: Any
+
+
+@dataclass(slots=True)
+class _MonitorWriters:
+    spikes_sink: CsvSink | None
+    weights_sink: CsvSink | None
+    spike_populations: tuple[str, ...]
+    weight_projections: tuple[_WeightExportProjection, ...]
+
+
+def select_action_wta(
+    spike_counts: Any,
+    *,
+    last_action: int | None,
+    exploration: ExplorationConfig,
+    trial_idx: int,
+    is_eval: bool,
+    rng: random.Random,
+) -> tuple[int, dict[str, Any]]:
+    torch = require_torch()
+    counts = spike_counts.reshape(-1).to(dtype=torch.float32)
+    if int(counts.numel()) <= 0:
+        raise ValueError("WTA action selection requires at least one output value.")
+
+    max_value = float(counts.max().item())
+    max_indices_tensor = torch.nonzero(counts == max_value, as_tuple=False).reshape(-1)
+    max_indices = [int(value.item()) for value in max_indices_tensor]
+    if not max_indices:
+        max_indices = [0]
+    tie = len(max_indices) > 1
+    greedy = _select_tie_break_action(
+        max_indices=max_indices,
+        last_action=last_action,
+        tie_break=exploration.tie_break,
+        rng=rng,
+    )
+
+    epsilon = 0.0
+    if exploration.enabled and not is_eval:
+        decay_trials = max(1, int(exploration.epsilon_decay_trials))
+        frac = min(1.0, max(0.0, float(trial_idx)) / float(decay_trials))
+        epsilon = float(exploration.epsilon_start) + frac * (
+            float(exploration.epsilon_end) - float(exploration.epsilon_start)
+        )
+        lo = min(float(exploration.epsilon_start), float(exploration.epsilon_end))
+        hi = max(float(exploration.epsilon_start), float(exploration.epsilon_end))
+        epsilon = _clamp(epsilon, lo, hi)
+
+    explored = False
+    action = int(greedy)
+    if epsilon > 0.0 and int(counts.numel()) > 1 and rng.random() < epsilon:
+        action = int(rng.randrange(int(counts.numel())))
+        explored = True
+
+    return action, {
+        "epsilon": float(epsilon),
+        "explored": bool(explored),
+        "tie": bool(tie),
+        "greedy": int(greedy),
+    }
+
+
+def _select_tie_break_action(
+    *,
+    max_indices: Sequence[int],
+    last_action: int | None,
+    tie_break: str,
+    rng: random.Random,
+) -> int:
+    if not max_indices:
+        return 0
+    mode = str(tie_break).strip().lower()
+    if mode == "random_among_max":
+        return int(rng.choice(list(max_indices)))
+    if mode == "alternate":
+        if last_action is None:
+            return int(max_indices[0])
+        if int(last_action) in max_indices:
+            cursor = list(max_indices).index(int(last_action))
+            return int(max_indices[(cursor + 1) % len(max_indices)])
+        return int(max_indices[0])
+    if mode == "prefer_last":
+        if last_action is not None and int(last_action) in max_indices:
+            return int(last_action)
+        return int(max_indices[0])
+    return int(max_indices[0])
+
+
+def _resolve_exploration_cfg(
+    run_spec: Mapping[str, Any],
+    *,
+    default_cfg: ExplorationConfig,
+) -> ExplorationConfig:
+    logic = _as_mapping(run_spec.get("logic"))
+    raw = _as_mapping(_first_non_none(logic.get("exploration"), run_spec.get("exploration")))
+    return ExplorationConfig(
+        enabled=bool(_first_non_none(raw.get("enabled"), default_cfg.enabled)),
+        mode="epsilon_greedy",
+        epsilon_start=_coerce_float(_first_non_none(raw.get("epsilon_start"), default_cfg.epsilon_start), default_cfg.epsilon_start),
+        epsilon_end=_coerce_float(_first_non_none(raw.get("epsilon_end"), default_cfg.epsilon_end), default_cfg.epsilon_end),
+        epsilon_decay_trials=_coerce_positive_int(
+            _first_non_none(raw.get("epsilon_decay_trials"), default_cfg.epsilon_decay_trials),
+            default_cfg.epsilon_decay_trials,
+        ),
+        tie_break=cast(
+            Any,
+            _coerce_choice(
+                _first_non_none(raw.get("tie_break"), default_cfg.tie_break),
+                allowed={"random_among_max", "alternate", "prefer_last"},
+                default=default_cfg.tie_break,
+            ),
+        ),
+        seed=_coerce_nonnegative_int(_first_non_none(raw.get("seed"), default_cfg.seed), default_cfg.seed),
+    )
+
+
+def _resolve_reward_window_cfg(
+    run_spec: Mapping[str, Any],
+    *,
+    default_steps: int,
+    default_clamp_input: bool,
+) -> tuple[int, bool]:
+    logic = _as_mapping(run_spec.get("logic"))
+    reward_steps = _coerce_nonnegative_int(
+        _first_non_none(
+            logic.get("reward_delivery_steps"),
+            run_spec.get("reward_delivery_steps"),
+            default_steps,
+        ),
+        default_steps,
+    )
+    clamp_raw = _coerce_optional_bool(
+        _first_non_none(
+            logic.get("reward_delivery_clamp_input"),
+            run_spec.get("reward_delivery_clamp_input"),
+            default_clamp_input,
+        )
+    )
+    clamp_input = bool(default_clamp_input if clamp_raw is None else clamp_raw)
+    return int(reward_steps), bool(clamp_input)
+
+
+def _effective_curriculum_engine_run_spec(
+    *,
+    run_spec: Mapping[str, Any],
+    config: LogicGateRunConfig,
+) -> dict[str, Any]:
+    effective = dict(run_spec)
+    learning = dict(_as_mapping(effective.get("learning")))
+    if learning.get("lr") is None:
+        learning["lr"] = float(config.learning_lr_default)
+    effective["learning"] = learning
+
+    modulators = dict(_as_mapping(effective.get("modulators")))
+    if modulators.get("amount") is None:
+        modulators["amount"] = float(config.dopamine_amount_default)
+    if modulators.get("decay_tau") is None:
+        modulators["decay_tau"] = float(config.dopamine_decay_tau_default)
+    effective["modulators"] = modulators
+
+    logic = dict(_as_mapping(effective.get("logic")))
+    if logic.get("learn_every") is None:
+        logic["learn_every"] = int(config.learn_every_default)
+    if logic.get("reward_delivery_steps") is None:
+        logic["reward_delivery_steps"] = int(config.reward_delivery_steps)
+    if logic.get("reward_delivery_clamp_input") is None:
+        logic["reward_delivery_clamp_input"] = bool(config.reward_delivery_clamp_input)
+    if logic.get("exploration") is None:
+        logic["exploration"] = asdict(config.exploration)
+    effective["logic"] = logic
+    return effective
 
 
 def run_logic_gate_engine(
@@ -116,12 +295,39 @@ def run_logic_gate_engine(
         device="cpu",
     )
     case_sequence = [int(value) for value in case_indices.tolist()]
+    exploration_cfg = _resolve_exploration_cfg(
+        run_spec,
+        default_cfg=ExplorationConfig(
+            enabled=False,
+            mode=config.exploration.mode,
+            epsilon_start=config.exploration.epsilon_start,
+            epsilon_end=config.exploration.epsilon_end,
+            epsilon_decay_trials=config.exploration.epsilon_decay_trials,
+            tie_break=config.exploration.tie_break,
+            seed=config.exploration.seed,
+        ),
+    )
+    decision_rng = random.Random(int(exploration_cfg.seed))
+    reward_delivery_steps, reward_delivery_clamp_input = _resolve_reward_window_cfg(
+        run_spec,
+        default_steps=0,
+        default_clamp_input=config.reward_delivery_clamp_input,
+    )
 
-    trial_sink = CsvSink(run_dir / "trials.csv", flush_every=max(1, config.export_every))
+    monitors_enabled = _resolve_monitors_enabled(run_spec)
+    trial_flush_every = 1 if monitors_enabled else max(1, config.export_every)
+    trial_sink = CsvSink(run_dir / "trials.csv", flush_every=trial_flush_every)
     eval_sink = CsvSink(run_dir / "eval.csv", flush_every=1)
     confusion_sink = CsvSink(run_dir / "confusion.csv", flush_every=1)
     last_trials: deque[dict[str, Any]] | None = (
         deque(maxlen=config.dump_last_trials_n) if config.dump_last_trials_csv else None
+    )
+    monitor_writers = _create_monitor_writers(
+        engine=engine,
+        engine_build=engine_build,
+        run_spec=run_spec,
+        run_dir=run_dir,
+        flush_every=max(1, config.export_every),
     )
 
     tracker = PassTracker(gate)
@@ -132,6 +338,7 @@ def run_logic_gate_engine(
     last_trial_acc_rolling = 0.0
     last_mean_abs_dw = 0.0
     t0 = perf_counter()
+    sim_step = 0
 
     predictions = torch.zeros((4,), device=inputs.device, dtype=inputs.dtype)
     case_scores = predictions.clone()
@@ -172,17 +379,21 @@ def run_logic_gate_engine(
         for trial_idx, case_idx in enumerate(case_sequence, start=1):
             target_value = targets_flat[case_idx]
             input_drive = encoded_inputs[case_idx]
-            out_spike_counts, hidden_spike_counts = _run_trial_steps(
+            out_spike_counts, hidden_spike_counts, sim_step = _run_trial_steps(
                 engine_build=engine_build,
                 input_drive=input_drive,
                 sim_steps_per_trial=config.sim_steps_per_trial,
+                step_offset=sim_step,
+                monitor_writers=monitor_writers,
             )
 
-            pred_bit = decode_output(
+            pred_bit, action_info = select_action_wta(
                 out_spike_counts,
-                mode="wta",
-                hysteresis=0.0,
-                last_pred=last_pred,
+                last_action=last_pred,
+                exploration=exploration_cfg,
+                trial_idx=trial_idx - 1,
+                is_eval=False,
+                rng=decision_rng,
             )
             target_bit = int((target_value >= 0.5).item())
             correct = int(pred_bit == target_bit)
@@ -198,6 +409,19 @@ def run_logic_gate_engine(
                 modulator_amount=engine_build.modulator_amount,
                 correct=bool(correct),
             )
+            if reward_delivery_steps > 0:
+                reward_input = (
+                    input_drive.new_zeros(input_drive.shape)
+                    if reward_delivery_clamp_input
+                    else input_drive
+                )
+                _, _, sim_step = _run_trial_steps(
+                    engine_build=engine_build,
+                    input_drive=reward_input,
+                    sim_steps_per_trial=reward_delivery_steps,
+                    step_offset=sim_step,
+                    monitor_writers=monitor_writers,
+                )
             (
                 mean_eligibility_abs,
                 mean_abs_dw,
@@ -209,12 +433,12 @@ def run_logic_gate_engine(
                 learning_proj_name=engine_build.learning_proj_name,
             )
             hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(config.sim_steps_per_trial)
-            tie_behavior = int(float(out_spike_counts[0].item()) == float(out_spike_counts[1].item()))
+            tie_behavior = int(bool(action_info.get("tie", False)))
             no_spikes = int(float(out_spike_counts.sum().item()) <= 0.0)
 
             trial_row = {
                 "trial": trial_idx,
-                "sim_step_end": trial_idx * config.sim_steps_per_trial,
+                "sim_step_end": sim_step,
                 "case_idx": case_idx,
                 "x0": float(inputs[case_idx, 0].item()),
                 "x1": float(inputs[case_idx, 1].item()),
@@ -233,6 +457,9 @@ def run_logic_gate_engine(
                 "weights_max": weights_max,
                 "weights_mean": weights_mean,
                 "tie_wta": tie_behavior,
+                "epsilon": float(action_info.get("epsilon", 0.0)),
+                "explored": int(bool(action_info.get("explored", False))),
+                "greedy_action": int(action_info.get("greedy", pred_bit)),
                 "no_output_spikes": no_spikes,
                 "target": target_bit,
                 "pred": pred_bit,
@@ -271,6 +498,11 @@ def run_logic_gate_engine(
                     }
                 )
                 confusion_sink.write_row({"trial": trial_idx, **confusion})
+                _write_weights_snapshot(
+                    engine=engine,
+                    monitor_writers=monitor_writers,
+                    step=sim_step,
+                )
 
             last_pred = pred_bit
             last_trial_acc_rolling = trial_acc_rolling
@@ -279,6 +511,7 @@ def run_logic_gate_engine(
         trial_sink.close()
         eval_sink.close()
         confusion_sink.close()
+        _close_monitor_writers(monitor_writers)
 
     if last_trials is not None and len(last_trials) > 0:
         last_trials_csv = run_dir / f"trials_last_{config.dump_last_trials_n}.csv"
@@ -329,12 +562,15 @@ def _run_trial_steps(
     engine_build: _EngineBuild,
     input_drive: Any,
     sim_steps_per_trial: int,
-) -> tuple[Any, Any]:
+    step_offset: int = 0,
+    monitor_writers: _MonitorWriters | None = None,
+) -> tuple[Any, Any, int]:
     torch = require_torch()
     engine_build.current_input_drive["tensor"] = input_drive
     mod_state = engine_build.modulator_state
+    input_active = bool(float(input_drive.abs().sum().item()) > 0.0)
     if mod_state:
-        mod_state["input_active"] = True
+        mod_state["input_active"] = input_active
         mod_state["ach_pulse_emitted"] = False
         mod_state["trial_steps"] = max(1, int(sim_steps_per_trial))
     out_spikes = engine_build.engine._pop_states[engine_build.output_population].spikes
@@ -347,12 +583,19 @@ def _run_trial_steps(
     hidden_counts_by_pop = [
         torch.zeros_like(hidden_spikes, dtype=input_drive.dtype) for hidden_spikes in hidden_spikes_by_pop
     ]
+    global_step = int(step_offset)
 
     try:
         for trial_step_idx in range(max(1, int(sim_steps_per_trial))):
             if mod_state:
                 mod_state["trial_step_idx"] = int(trial_step_idx)
             engine_build.engine.step()
+            global_step += 1
+            _write_spike_events_for_step(
+                engine=engine_build.engine,
+                monitor_writers=monitor_writers,
+                step=global_step,
+            )
             output_counts.add_(
                 engine_build.engine._pop_states[engine_build.output_population].spikes.to(
                     dtype=input_drive.dtype
@@ -370,7 +613,7 @@ def _run_trial_steps(
         hidden_counts = hidden_counts_by_pop[0]
     else:
         hidden_counts = torch.cat(hidden_counts_by_pop, dim=0)
-    return output_counts, hidden_counts
+    return output_counts, hidden_counts, global_step
 
 
 def _learning_stats(
@@ -411,6 +654,129 @@ def _learning_stats(
         float(weights.max().item()),
         float(weights.mean().item()),
     )
+
+
+def _resolve_monitors_enabled(run_spec: Mapping[str, Any]) -> bool:
+    explicit = _coerce_optional_bool(run_spec.get("monitors_enabled"))
+    return True if explicit is None else bool(explicit)
+
+
+def _create_monitor_writers(
+    *,
+    engine: TorchNetworkEngine,
+    engine_build: _EngineBuild,
+    run_spec: Mapping[str, Any],
+    run_dir: Path,
+    flush_every: int,
+) -> _MonitorWriters | None:
+    if not _resolve_monitors_enabled(run_spec):
+        return None
+    spikes_sink = CsvSink(run_dir / "spikes.csv", flush_every=max(1, flush_every))
+    weights_sink = CsvSink(run_dir / "weights.csv", flush_every=max(1, flush_every))
+    spike_populations = (
+        engine_build.input_population,
+        *engine_build.hidden_populations,
+        engine_build.output_population,
+    )
+    return _MonitorWriters(
+        spikes_sink=spikes_sink,
+        weights_sink=weights_sink,
+        spike_populations=spike_populations,
+        weight_projections=_prepare_weight_export_projections(engine=engine),
+    )
+
+
+def _prepare_weight_export_projections(*, engine: TorchNetworkEngine) -> tuple[_WeightExportProjection, ...]:
+    torch = require_torch()
+    projections: list[_WeightExportProjection] = []
+    for projection in engine._proj_specs:
+        pre_idx = projection.topology.pre_idx
+        post_idx = projection.topology.post_idx
+        if pre_idx is None or post_idx is None:
+            continue
+        projections.append(
+            _WeightExportProjection(
+                name=projection.name,
+                pre_idx=pre_idx.detach().to(device="cpu", dtype=torch.long).reshape(-1),
+                post_idx=post_idx.detach().to(device="cpu", dtype=torch.long).reshape(-1),
+            )
+        )
+    return tuple(projections)
+
+
+def _write_spike_events_for_step(
+    *,
+    engine: TorchNetworkEngine,
+    monitor_writers: _MonitorWriters | None,
+    step: int,
+) -> None:
+    if monitor_writers is None or monitor_writers.spikes_sink is None:
+        return
+    torch = require_torch()
+    for pop_name in monitor_writers.spike_populations:
+        pop_state = engine._pop_states.get(pop_name)
+        if pop_state is None:
+            continue
+        spikes = pop_state.spikes
+        if spikes is None or int(spikes.numel()) == 0:
+            continue
+        active = torch.nonzero(spikes, as_tuple=False).reshape(-1)
+        if int(active.numel()) == 0:
+            continue
+        active_cpu = active.detach().to(device="cpu", dtype=torch.long)
+        for neuron_idx in active_cpu.tolist():
+            monitor_writers.spikes_sink.write_row(
+                {
+                    "step": int(step),
+                    "pop": pop_name,
+                    "neuron": int(neuron_idx),
+                }
+            )
+
+
+def _write_weights_snapshot(
+    *,
+    engine: TorchNetworkEngine,
+    monitor_writers: _MonitorWriters | None,
+    step: int,
+) -> None:
+    if monitor_writers is None or monitor_writers.weights_sink is None:
+        return
+    for export in monitor_writers.weight_projections:
+        proj_state = engine._proj_states.get(export.name)
+        weights = getattr(proj_state.state, "weights", None) if proj_state is not None else None
+        if weights is None:
+            projection = next((proj for proj in engine._proj_specs if proj.name == export.name), None)
+            weights = projection.topology.weights if projection is not None else None
+        if weights is None or int(weights.numel()) == 0:
+            continue
+        weights_cpu = weights.detach().to(device="cpu").reshape(-1)
+        n_edges = min(
+            int(weights_cpu.numel()),
+            int(export.pre_idx.numel()),
+            int(export.post_idx.numel()),
+        )
+        if n_edges <= 0:
+            continue
+        for edge_idx in range(n_edges):
+            monitor_writers.weights_sink.write_row(
+                {
+                    "step": int(step),
+                    "proj": export.name,
+                    "pre": int(export.pre_idx[edge_idx].item()),
+                    "post": int(export.post_idx[edge_idx].item()),
+                    "w": float(weights_cpu[edge_idx].item()),
+                }
+            )
+
+
+def _close_monitor_writers(monitor_writers: _MonitorWriters | None) -> None:
+    if monitor_writers is None:
+        return
+    if monitor_writers.spikes_sink is not None:
+        monitor_writers.spikes_sink.close()
+    if monitor_writers.weights_sink is not None:
+        monitor_writers.weights_sink.close()
 
 
 _ACH_INPUT_PULSE_SCALE = 0.35
@@ -533,11 +899,12 @@ def run_logic_gate_curriculum_engine(
     run_spec: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Run curriculum-style logic-gate training with one persistent engine."""
+    engine_run_spec = _effective_curriculum_engine_run_spec(run_spec=run_spec, config=config)
     torch = require_torch()
-    gate_sequence = _resolve_curriculum_gates(run_spec)
+    gate_sequence = _resolve_curriculum_gates(engine_run_spec)
     if not gate_sequence:
         raise ValueError("At least one gate is required for curriculum mode.")
-    replay_ratio = _clamp(float(run_spec.get("logic_curriculum_replay_ratio", 0.35)), 0.0, 1.0)
+    replay_ratio = _clamp(float(engine_run_spec.get("logic_curriculum_replay_ratio", 0.35)), 0.0, 1.0)
 
     device = _resolve_device(torch, str(config.device))
     run_dir = _resolve_curriculum_run_dir(config, gates=gate_sequence)
@@ -554,7 +921,7 @@ def run_logic_gate_curriculum_engine(
     engine_build = _build_engine(
         config=config,
         gate=_curriculum_topology_gate(gate_sequence),
-        run_spec=run_spec,
+        run_spec=engine_run_spec,
         device=device,
     )
     engine = engine_build.engine
@@ -570,13 +937,29 @@ def run_logic_gate_curriculum_engine(
     predictions_by_gate: dict[LogicGate, Any] = {
         gate: torch.zeros((4,), device=inputs.device, dtype=inputs.dtype) for gate in gate_sequence
     }
+    exploration_cfg = _resolve_exploration_cfg(engine_run_spec, default_cfg=config.exploration)
+    decision_rng = random.Random(int(exploration_cfg.seed))
+    reward_delivery_steps, reward_delivery_clamp_input = _resolve_reward_window_cfg(
+        engine_run_spec,
+        default_steps=config.reward_delivery_steps,
+        default_clamp_input=config.reward_delivery_clamp_input,
+    )
 
-    trial_sink = CsvSink(run_dir / "trials.csv", flush_every=max(1, config.export_every))
+    monitors_enabled = _resolve_monitors_enabled(engine_run_spec)
+    trial_flush_every = 1 if monitors_enabled else max(1, config.export_every)
+    trial_sink = CsvSink(run_dir / "trials.csv", flush_every=trial_flush_every)
     eval_sink = CsvSink(run_dir / "eval.csv", flush_every=1)
     confusion_sink = CsvSink(run_dir / "confusion.csv", flush_every=1)
     phase_sink = CsvSink(run_dir / "phase_summary.csv", flush_every=1)
     last_trials: deque[dict[str, Any]] | None = (
         deque(maxlen=config.dump_last_trials_n) if config.dump_last_trials_csv else None
+    )
+    monitor_writers = _create_monitor_writers(
+        engine=engine,
+        engine_build=engine_build,
+        run_spec=engine_run_spec,
+        run_dir=run_dir,
+        flush_every=max(1, config.export_every),
     )
 
     debug_every = max(1, int(config.debug_every))
@@ -585,6 +968,7 @@ def run_logic_gate_curriculum_engine(
     rolling_correct: deque[int] = deque(maxlen=100)
     sampled_correct_total = 0
     global_trial = 0
+    sim_step = 0
     t0 = perf_counter()
     phase_results: list[dict[str, Any]] = []
 
@@ -618,16 +1002,20 @@ def run_logic_gate_curriculum_engine(
                 target_value = train_targets[case_idx]
 
                 input_drive = encoded_inputs[case_idx]
-                out_spike_counts, hidden_spike_counts = _run_trial_steps(
+                out_spike_counts, hidden_spike_counts, sim_step = _run_trial_steps(
                     engine_build=engine_build,
                     input_drive=input_drive,
                     sim_steps_per_trial=config.sim_steps_per_trial,
+                    step_offset=sim_step,
+                    monitor_writers=monitor_writers,
                 )
-                pred_bit = decode_output(
+                pred_bit, action_info = select_action_wta(
                     out_spike_counts,
-                    mode="wta",
-                    hysteresis=0.0,
-                    last_pred=last_pred,
+                    last_action=last_pred,
+                    exploration=exploration_cfg,
+                    trial_idx=global_trial - 1,
+                    is_eval=False,
+                    rng=decision_rng,
                 )
 
                 target_bit = int((target_value >= 0.5).item())
@@ -647,6 +1035,19 @@ def run_logic_gate_curriculum_engine(
                     modulator_amount=engine_build.modulator_amount,
                     correct=bool(correct),
                 )
+                if reward_delivery_steps > 0:
+                    reward_input = (
+                        input_drive.new_zeros(input_drive.shape)
+                        if reward_delivery_clamp_input
+                        else input_drive
+                    )
+                    _, _, sim_step = _run_trial_steps(
+                        engine_build=engine_build,
+                        input_drive=reward_input,
+                        sim_steps_per_trial=reward_delivery_steps,
+                        step_offset=sim_step,
+                        monitor_writers=monitor_writers,
+                    )
                 (
                     mean_eligibility_abs,
                     mean_abs_dw,
@@ -660,7 +1061,7 @@ def run_logic_gate_curriculum_engine(
                 hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(config.sim_steps_per_trial)
                 out0 = float(out_spike_counts[OUTPUT_NEURON_INDICES["class_0"]].item())
                 out1 = float(out_spike_counts[OUTPUT_NEURON_INDICES["class_1"]].item())
-                tie_behavior = int(out0 == out1)
+                tie_behavior = int(bool(action_info.get("tie", False)))
                 no_spikes = int((out0 + out1) <= 0.0)
 
                 trial_row = {
@@ -669,7 +1070,7 @@ def run_logic_gate_curriculum_engine(
                     "train_gate": active_gate.value,
                     "phase_trial": local_trial,
                     "trial": global_trial,
-                    "sim_step_end": global_trial * config.sim_steps_per_trial,
+                    "sim_step_end": sim_step,
                     "case_idx": case_idx,
                     "x0": float(inputs[case_idx, 0].item()),
                     "x1": float(inputs[case_idx, 1].item()),
@@ -688,6 +1089,9 @@ def run_logic_gate_curriculum_engine(
                     "weights_max": weights_max,
                     "weights_mean": weights_mean,
                     "tie_wta": tie_behavior,
+                    "epsilon": float(action_info.get("epsilon", 0.0)),
+                    "explored": int(bool(action_info.get("explored", False))),
+                    "greedy_action": int(action_info.get("greedy", pred_bit)),
                     "no_output_spikes": no_spikes,
                     "target": target_bit,
                     "pred": pred_bit,
@@ -758,6 +1162,11 @@ def run_logic_gate_curriculum_engine(
                             **confusion,
                         }
                     )
+                    _write_weights_snapshot(
+                        engine=engine,
+                        monitor_writers=monitor_writers,
+                        step=sim_step,
+                    )
 
                 if config.debug and (
                     local_trial == 1 or local_trial == phase_trials or local_trial % debug_every == 0
@@ -800,6 +1209,7 @@ def run_logic_gate_curriculum_engine(
         eval_sink.close()
         confusion_sink.close()
         phase_sink.close()
+        _close_monitor_writers(monitor_writers)
 
     if last_trials is not None and len(last_trials) > 0:
         last_trials_csv = run_dir / f"trials_last_{config.dump_last_trials_n}.csv"
@@ -856,6 +1266,15 @@ def _build_engine(
     device: str,
 ) -> _EngineBuild:
     torch = require_torch()
+    logic_cfg = _as_mapping(run_spec.get("logic"))
+    learning_learn_every = _coerce_positive_int(
+        _first_non_none(
+            logic_cfg.get("learn_every"),
+            run_spec.get("logic_learn_every"),
+            config.learn_every_default,
+        ),
+        config.learn_every_default,
+    )
     learning_cfg = _resolve_learning_cfg(
         run_spec,
         default_enabled=config.learning_mode == "rstdp",
@@ -910,6 +1329,7 @@ def _build_engine(
         base_projections=base_projections,
         learning_rule=learning_rule,
         output_population=handles.output_population,
+        learn_every=learning_learn_every,
     )
     _validate_advanced_synapse_prerequisites(projections=projections)
 
@@ -1175,6 +1595,7 @@ def _apply_learning_projection(
     base_projections: Sequence[ProjectionSpec],
     learning_rule: ILearningRule | None,
     output_population: str,
+    learn_every: int,
 ) -> tuple[tuple[ProjectionSpec, ...], str | None]:
     if learning_rule is None:
         return tuple(base_projections), None
@@ -1195,7 +1616,7 @@ def _apply_learning_projection(
                     pre=projection.pre,
                     post=projection.post,
                     learning=learning_rule,
-                    learn_every=projection.learn_every,
+                    learn_every=max(1, int(learn_every)),
                     sparse_learning=supports_sparse,
                     meta=projection.meta,
                 )

@@ -35,6 +35,7 @@ from .profile_utils import maybe_write_profile_trace
 class DemoMinimalConfig:
     out_dir: Path
     mode: str = "dashboard"
+    monitors_enabled: bool = True
     n_neurons: int = 100
     p_connect: float = 0.05
     steps: int = 500
@@ -119,7 +120,9 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
     safe_neuron_sample = cfg.monitor_neuron_sample if cfg.monitor_safe_defaults else None
 
     monitors: list[IMonitor]
-    if run_mode == "fast":
+    if not bool(cfg.monitors_enabled):
+        monitors = []
+    elif run_mode == "fast":
         monitors = [
             MetricsCSVMonitor(
                 str(out_dir / "metrics.csv"),

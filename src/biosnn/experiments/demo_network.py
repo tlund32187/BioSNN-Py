@@ -55,6 +55,7 @@ from biosnn.synapses.dynamics.delayed_sparse_matmul import (
 class DemoNetworkConfig:
     out_dir: Path
     mode: Literal["dashboard", "fast"] = "dashboard"
+    monitors_enabled: bool = True
     steps: int = 800
     dt: float = 1e-3
     seed: int | None = None
@@ -625,7 +626,9 @@ def build_network_demo(
     homeostasis_stride = max(1, int(cfg.homeostasis_export_every))
 
     monitors: list[IMonitor]
-    if fast_mode:
+    if not bool(cfg.monitors_enabled):
+        monitors = []
+    elif fast_mode:
         monitors = [
             MetricsCSVMonitor(
                 str(out_dir / "metrics.csv"),
