@@ -53,7 +53,12 @@ from biosnn.synapses.dynamics.delayed_sparse_matmul import DelayedSparseMatmulSy
 
 from .configs import CurriculumGateContextConfig, ExplorationConfig, LogicGateRunConfig
 from .datasets import LogicGate, coerce_gate, make_truth_table, sample_case_indices
-from .encoding import INPUT_NEURON_INDICES, OUTPUT_NEURON_INDICES, encode_inputs
+from .encoding import (
+    INPUT_NEURON_INDICES,
+    OUTPUT_NEURON_INDICES,
+    encode_inputs,
+    gate_context_level_for_gate,
+)
 from .evaluators import PassTracker, eval_accuracy
 from .topologies import build_logic_gate_ff, build_logic_gate_xor
 
@@ -150,6 +155,33 @@ def select_action_wta(
     }
 
 
+def _should_commit_action_force(
+    *,
+    action_info: Mapping[str, Any] | None,
+    chosen_action: int,
+    out_spike_counts: Any,
+    mode: str,
+) -> bool:
+    mode_norm = str(mode).strip().lower()
+    explored = bool(action_info.get("explored", False)) if action_info else False
+    if mode_norm == "always":
+        return True
+    try:
+        chosen_idx = int(chosen_action)
+        if chosen_idx < 0:
+            return False
+        selected_spikes = float(out_spike_counts[chosen_idx].item())
+        silent = selected_spikes <= 0.0
+        if mode_norm == "explore_only":
+            return explored
+        if mode_norm == "silent_only":
+            return silent
+        # Default: explore_or_silent
+        return bool(explored or silent)
+    except Exception:
+        return explored if mode_norm == "explore_only" else False
+
+
 def _select_tie_break_action(
     *,
     max_indices: Sequence[int],
@@ -236,8 +268,9 @@ def _resolve_action_force_cfg(
     default_enabled: bool,
     default_window: str = "reward_window",
     default_steps: int = 1,
-    default_amplitude: float = 0.75,
+    default_amplitude: float = 0.35,
     default_compartment: str = "soma",
+    default_mode: str = "explore_or_silent",
 ) -> dict[str, Any]:
     logic = _as_mapping(run_spec.get("logic"))
     raw = _as_mapping(_first_non_none(logic.get("action_force"), run_spec.get("action_force")))
@@ -260,6 +293,11 @@ def _resolve_action_force_cfg(
             _first_non_none(raw.get("compartment"), default_compartment),
             allowed={"soma", "dendrite", "ais", "axon"},
             default=default_compartment,
+        ),
+        "mode": _coerce_choice(
+            _first_non_none(raw.get("mode"), default_mode),
+            allowed={"explore_only", "silent_only", "explore_or_silent", "always"},
+            default=default_mode,
         ),
     }
 
@@ -306,11 +344,12 @@ def _effective_curriculum_engine_run_spec(
         logic["gate_context"] = asdict(config.curriculum_gate_context)
     if logic.get("action_force") is None:
         logic["action_force"] = {
-            "enabled": True,
+            "enabled": False,
             "window": "reward_window",
             "steps": 1,
-            "amplitude": 0.75,
+            "amplitude": 0.35,
             "compartment": "soma",
+            "mode": "explore_or_silent",
         }
     effective["logic"] = logic
     return effective
@@ -469,7 +508,8 @@ def run_logic_gate_engine(
     try:
         for trial_idx, case_idx in enumerate(case_sequence, start=1):
             target_value = targets_flat[case_idx]
-            input_drive = encoded_inputs[case_idx]
+            input_drive = encoded_inputs[case_idx].clone()
+            _apply_gate_context_drive(input_drive, gate=gate)
             out_spike_counts, hidden_spike_counts, sim_step = _run_trial_steps(
                 engine_build=engine_build,
                 input_drive=input_drive,
@@ -507,16 +547,23 @@ def run_logic_gate_engine(
                 correct=bool(correct),
             )
             if reward_delivery_steps > 0:
-                reward_input = _reward_window_input_drive(
-                    input_drive=input_drive,
-                    clamp_input=reward_delivery_clamp_input,
-                )
-                if (
+                should_force_action = (
                     bool(action_force_cfg["enabled"])
+                    and _should_commit_action_force(
+                        action_info=action_info,
+                        chosen_action=chosen_action,
+                        out_spike_counts=out_spike_counts,
+                        mode=str(action_force_cfg.get("mode", "explore_or_silent")),
+                    )
                     and action_forced == 0
                     and action_window in {"reward_window", "post_decision"}
                     and int(action_steps) > 0
-                ):
+                )
+                reward_input = _reward_window_input_drive(
+                    input_drive=input_drive,
+                    clamp_input=reward_delivery_clamp_input and not should_force_action,
+                )
+                if should_force_action:
                     forced = _set_action_force_drive(
                         engine_build=engine_build,
                         chosen_action=chosen_action,
@@ -568,6 +615,7 @@ def run_logic_gate_engine(
                 "in_bit0_1_drive": float(input_drive[INPUT_NEURON_INDICES["bit0_1"]].item()),
                 "in_bit1_0_drive": float(input_drive[INPUT_NEURON_INDICES["bit1_0"]].item()),
                 "in_bit1_1_drive": float(input_drive[INPUT_NEURON_INDICES["bit1_1"]].item()),
+                "in_gate_context_drive": _gate_context_drive_value(input_drive),
                 "out_spikes_0": float(out_spike_counts[OUTPUT_NEURON_INDICES["class_0"]].item()),
                 "out_spikes_1": float(out_spike_counts[OUTPUT_NEURON_INDICES["class_1"]].item()),
                 "hidden_mean_spikes": hidden_mean_spikes,
@@ -1187,7 +1235,11 @@ def _release_positions_for_field(
 
 def _build_encoded_input_table(*, inputs: Any, dt: float) -> Any:
     torch = require_torch()
-    encoded = torch.zeros((int(inputs.shape[0]), 4), device=inputs.device, dtype=inputs.dtype)
+    encoded = torch.zeros(
+        (int(inputs.shape[0]), len(INPUT_NEURON_INDICES)),
+        device=inputs.device,
+        dtype=inputs.dtype,
+    )
     for idx in range(int(inputs.shape[0])):
         drive = encode_inputs(
             inputs[idx],
@@ -1199,6 +1251,26 @@ def _build_encoded_input_table(*, inputs: Any, dt: float) -> Any:
         )
         encoded[idx].copy_(drive[Compartment.SOMA])
     return encoded
+
+
+def _apply_gate_context_drive(input_drive: Any, *, gate: LogicGate | str) -> None:
+    gate_idx = INPUT_NEURON_INDICES.get("gate_context")
+    if gate_idx is None:
+        return
+    idx = int(gate_idx)
+    if idx < 0 or idx >= int(input_drive.numel()):
+        return
+    input_drive[idx] = float(gate_context_level_for_gate(gate.value if isinstance(gate, LogicGate) else gate))
+
+
+def _gate_context_drive_value(input_drive: Any) -> float:
+    gate_idx = INPUT_NEURON_INDICES.get("gate_context")
+    if gate_idx is None:
+        return 0.0
+    idx = int(gate_idx)
+    if idx < 0 or idx >= int(input_drive.numel()):
+        return 0.0
+    return float(input_drive[idx].item())
 
 
 def run_logic_gate_curriculum_engine(
@@ -1331,7 +1403,8 @@ def run_logic_gate_curriculum_engine(
                     gate_index=int(gate_to_index.get(active_gate, 0)),
                 )
 
-                input_drive = encoded_inputs[case_idx]
+                input_drive = encoded_inputs[case_idx].clone()
+                _apply_gate_context_drive(input_drive, gate=active_gate)
                 out_spike_counts, hidden_spike_counts, sim_step = _run_trial_steps(
                     engine_build=engine_build,
                     input_drive=input_drive,
@@ -1371,16 +1444,23 @@ def run_logic_gate_curriculum_engine(
                     correct=bool(correct),
                 )
                 if reward_delivery_steps > 0:
-                    reward_input = _reward_window_input_drive(
-                        input_drive=input_drive,
-                        clamp_input=reward_delivery_clamp_input,
-                    )
-                    if (
+                    should_force_action = (
                         bool(action_force_cfg["enabled"])
+                        and _should_commit_action_force(
+                            action_info=action_info,
+                            chosen_action=chosen_action,
+                            out_spike_counts=out_spike_counts,
+                            mode=str(action_force_cfg.get("mode", "explore_or_silent")),
+                        )
                         and action_forced == 0
                         and action_window in {"reward_window", "post_decision"}
                         and int(action_steps) > 0
-                    ):
+                    )
+                    reward_input = _reward_window_input_drive(
+                        input_drive=input_drive,
+                        clamp_input=reward_delivery_clamp_input and not should_force_action,
+                    )
+                    if should_force_action:
                         forced = _set_action_force_drive(
                             engine_build=engine_build,
                             chosen_action=chosen_action,
@@ -1437,6 +1517,7 @@ def run_logic_gate_curriculum_engine(
                     "in_bit0_1_drive": float(input_drive[INPUT_NEURON_INDICES["bit0_1"]].item()),
                     "in_bit1_0_drive": float(input_drive[INPUT_NEURON_INDICES["bit1_0"]].item()),
                     "in_bit1_1_drive": float(input_drive[INPUT_NEURON_INDICES["bit1_1"]].item()),
+                    "in_gate_context_drive": _gate_context_drive_value(input_drive),
                     "out_spikes_0": out0,
                     "out_spikes_1": out1,
                     "hidden_mean_spikes": hidden_mean_spikes,
@@ -1924,7 +2005,19 @@ def _make_learning_rule(learning_cfg: Mapping[str, Any]) -> ILearningRule | None
     if rule_name in {"none", "surrogate"}:
         return None
     if rule_name in {"rstdp", "rstdp_eligibility", "rstdp_elig"}:
-        return RStdpEligibilityRule(RStdpEligibilityParams(lr=lr))
+        w_min_raw = learning_cfg.get("w_min")
+        w_max_raw = learning_cfg.get("w_max")
+        w_min = _coerce_float(w_min_raw, 0.0) if w_min_raw is not None else 0.0
+        w_max = _coerce_float(w_max_raw, 0.5) if w_max_raw is not None else 0.5
+        if w_max < w_min:
+            w_min, w_max = w_max, w_min
+        return RStdpEligibilityRule(
+            RStdpEligibilityParams(
+                lr=lr,
+                w_min=w_min,
+                w_max=w_max,
+            )
+        )
     if rule_name in {"three_factor_eligibility_stdp", "three_factor_elig_stdp"}:
         return ThreeFactorEligibilityStdpRule(
             ThreeFactorEligibilityStdpParams(
@@ -2091,6 +2184,8 @@ def _resolve_learning_cfg(
         "rule": _normalize_learning_rule(str(learning.get("rule", default_rule))),
         "lr": _coerce_float(_first_non_none(learning.get("lr"), default_lr), default_lr),
         "modulator_kind": modulator_kind,
+        "w_min": _coerce_optional_float(learning.get("w_min")),
+        "w_max": _coerce_optional_float(learning.get("w_max")),
     }
 
 
@@ -2440,6 +2535,15 @@ def _coerce_float(value: Any, default: float) -> float:
         return float(value)
     except Exception:
         return float(default)
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
 
 
 def _coerce_positive_int(value: Any, default: int) -> int:

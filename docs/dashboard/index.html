@@ -87,9 +87,15 @@
                   <option value="event_bucketed">event_bucketed</option>
                 </select>
               </label>
+              <label>Delay steps
+                <input id="runDelayStepsInput" type="number" min="0" step="1" value="3" />
+              </label>
               <label class="checkbox-inline">
                 <input id="runLearningToggle" type="checkbox" />
                 Learning
+              </label>
+              <label>Learning lr
+                <input id="runLearningLrInput" type="number" min="0.0000001" step="0.0001" value="0.001" />
               </label>
               <label class="checkbox-inline">
                 <input id="runMonitorsToggle" type="checkbox" checked />
@@ -127,6 +133,21 @@
                 </label>
                 <label>reward_delivery_steps
                   <input id="runRewardDeliveryStepsInput" type="number" min="0" max="5" step="1" value="2" />
+                </label>
+                <label class="checkbox-inline">
+                  <input id="runActionForceEnabledToggle" type="checkbox" />
+                  Action force
+                </label>
+                <label>action_force_mode
+                  <select id="runActionForceModeSelect">
+                    <option value="explore_or_silent">explore_or_silent</option>
+                    <option value="explore_only">explore_only</option>
+                    <option value="silent_only">silent_only</option>
+                    <option value="always">always</option>
+                  </select>
+                </label>
+                <label>action_drive_amplitude
+                  <input id="runActionDriveAmplitudeInput" type="number" min="0" step="0.01" value="0.25" />
                 </label>
                 <label class="checkbox-inline">
                   <input id="runGateContextEnabledToggle" type="checkbox" />
@@ -186,6 +207,12 @@
                     <option value="global_scalar">global_scalar</option>
                     <option value="grid_diffusion_2d">grid_diffusion_2d</option>
                   </select>
+                </label>
+                <label>modulator_amount
+                  <input id="runModulatorAmountInput" type="number" min="0" step="0.01" value="1.0" />
+                </label>
+                <label>modulator_decay_tau
+                  <input id="runModulatorDecayTauInput" type="number" min="0.0001" step="0.01" value="0.05" />
                 </label>
                 <label>Modulator kinds
                   <select id="runModulatorKindsSelect" multiple size="4">
@@ -270,7 +297,7 @@
       </header>
 
       <main class="grid">
-        <section class="card card-network">
+        <section class="card card-network" id="networkCard">
           <div class="card-header">
             <h2>Neural Network</h2>
             <div class="header-actions">
@@ -304,6 +331,10 @@
                     <option value="layered">Layered</option>
                     <option value="spatial">Spatial</option>
                   </select>
+                </label>
+                <label>Height
+                  <input id="networkHeight" type="range" min="420" max="980" value="520" step="20" />
+                  <span id="networkHeightValue">520</span>
                 </label>
                 <label>
                   <input id="edgeOpacityByDistance" type="checkbox" checked />

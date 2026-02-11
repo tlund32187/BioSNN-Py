@@ -15,9 +15,17 @@ def test_encode_inputs_per_bit_one_hot_drives_expected_neurons() -> None:
     drive = encode_inputs(inputs, mode="rate", dt=1e-3, high=2.0, low=0.1)
 
     soma = drive[Compartment.SOMA]
-    assert soma.shape == (4,)
-    expected = torch.tensor([2.0, 0.1, 0.1, 2.0], dtype=torch.float32)
+    assert soma.shape == (5,)
+    expected = torch.tensor([2.0, 0.1, 0.1, 2.0, 0.0], dtype=torch.float32)
     assert torch.allclose(soma, expected)
+
+
+def test_encode_inputs_gate_context_channel_is_set() -> None:
+    inputs = torch.tensor([1.0, 0.0], dtype=torch.float32)
+    drive = encode_inputs(inputs, mode="rate", dt=1e-3, high=1.0, low=0.0, gate_context_level=0.6)
+    soma = drive[Compartment.SOMA]
+    assert soma.shape == (5,)
+    assert float(soma[4].item()) == pytest.approx(0.6)
 
 
 def test_decode_output_wta_tie_and_hysteresis_are_deterministic() -> None:
@@ -34,4 +42,3 @@ def test_decode_output_threshold_mode_supports_hysteresis() -> None:
     counts = torch.tensor([9.0, 11.0], dtype=torch.float32)
     assert decode_output(counts, mode="threshold", threshold=0.5) == 1
     assert decode_output(counts, mode="threshold", threshold=0.55, hysteresis=0.1, last_pred=0) == 0
-

@@ -69,8 +69,9 @@ def build_logic_gate_ff(
     excit_profile = profile_exc_ampa_nmda()
     inhib_profile = _inhibitory_profile_for_mode(syn_cfg["receptor_mode"])
     delay_steps = syn_cfg["delay_steps"]
+    n_input = len(INPUT_NEURON_INDICES)
 
-    in_pos = _line_positions(n=4, x=0.0, device=resolved_device, dtype=dtype)
+    in_pos = _line_positions(n=n_input, x=0.0, device=resolved_device, dtype=dtype)
     hidden_pos = _line_positions(n=16, x=1.0, device=resolved_device, dtype=dtype)
     out_pos = _line_positions(n=2, x=2.0, device=resolved_device, dtype=dtype)
 
@@ -78,7 +79,7 @@ def build_logic_gate_ff(
         PopulationSpec(
             name="In",
             model=_make_neuron_model(neuron_model),
-            n=4,
+            n=n_input,
             positions=in_pos,
             meta={"role": "input"},
         ),
@@ -99,7 +100,7 @@ def build_logic_gate_ff(
     )
 
     in_to_hidden_topo = _build_fixed_fanin_topology(
-        n_pre=4,
+        n_pre=n_input,
         n_post=16,
         fan_in=2,
         pre_positions=in_pos,
@@ -197,7 +198,7 @@ def build_logic_gate_ff(
     # Weak skip helps AND/OR convergence but is disabled for XOR-style gates.
     if gate_enum not in {LogicGate.XOR, LogicGate.XNOR}:
         in_to_out_skip = _build_fixed_fanin_topology(
-            n_pre=4,
+            n_pre=n_input,
             n_post=2,
             fan_in=2,
             pre_positions=in_pos,
@@ -312,8 +313,9 @@ def build_logic_gate_xor(
     excit_profile = profile_exc_ampa_nmda()
     inhib_profile = _inhibitory_profile_for_mode(syn_cfg["receptor_mode"])
     delay_steps = syn_cfg["delay_steps"]
+    n_input = len(INPUT_NEURON_INDICES)
 
-    in_pos = _line_positions(n=4, x=0.0, device=resolved_device, dtype=dtype)
+    in_pos = _line_positions(n=n_input, x=0.0, device=resolved_device, dtype=dtype)
     h1_pos = _line_positions(n=16, x=1.0, device=resolved_device, dtype=dtype)
     h2_pos = _line_positions(n=16, x=2.0, device=resolved_device, dtype=dtype)
     out_pos = _line_positions(n=2, x=3.0, device=resolved_device, dtype=dtype)
@@ -322,7 +324,7 @@ def build_logic_gate_xor(
         PopulationSpec(
             name="In",
             model=_make_neuron_model(neuron_model),
-            n=4,
+            n=n_input,
             positions=in_pos,
             meta={"role": "input"},
         ),
@@ -350,7 +352,7 @@ def build_logic_gate_xor(
     )
 
     in_to_h1 = _build_fixed_fanin_topology(
-        n_pre=4,
+        n_pre=n_input,
         n_post=16,
         fan_in=2,
         pre_positions=in_pos,

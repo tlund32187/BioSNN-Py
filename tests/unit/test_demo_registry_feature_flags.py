@@ -109,6 +109,7 @@ def test_logic_engine_feature_flags_include_exploration_and_reward_window() -> N
                 "action_force": {
                     "enabled": True,
                     "window": "reward_window",
+                    "mode": "explore_only",
                     "steps": 2,
                     "amplitude": 0.8,
                     "compartment": "soma",
@@ -124,6 +125,7 @@ def test_logic_engine_feature_flags_include_exploration_and_reward_window() -> N
     assert features["reward_window"]["clamp_input"] is True
     assert features["action_force"]["enabled"] is True
     assert features["action_force"]["window"] == "reward_window"
+    assert features["action_force"]["mode"] == "explore_only"
     assert features["action_force"]["steps"] == 2
     assert features["action_force"]["amplitude"] == pytest.approx(0.8)
     assert features["gate_context"]["enabled"] is True
@@ -323,6 +325,7 @@ def test_run_spec_cli_round_trip_extended_fields(tmp_path) -> None:
                 "action_force": {
                     "enabled": True,
                     "window": "post_decision",
+                    "mode": "silent_only",
                     "steps": 1,
                     "amplitude": 0.9,
                     "compartment": "dendrite",
@@ -387,6 +390,7 @@ def test_run_spec_cli_round_trip_extended_fields(tmp_path) -> None:
     assert rt["logic"]["reward_delivery_clamp_input"] is True
     assert rt["logic"]["action_force"]["enabled"] is True
     assert rt["logic"]["action_force"]["window"] == "post_decision"
+    assert rt["logic"]["action_force"]["mode"] == "silent_only"
     assert rt["logic"]["action_force"]["steps"] == 1
     assert rt["logic"]["action_force"]["amplitude"] == pytest.approx(0.9)
     assert rt["logic"]["action_force"]["compartment"] == "dendrite"

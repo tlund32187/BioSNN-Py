@@ -22,6 +22,7 @@ INPUT_NEURON_INDICES = MappingProxyType(
         "bit0_1": 1,
         "bit1_0": 2,
         "bit1_1": 3,
+        "gate_context": 4,
     }
 )
 
@@ -41,9 +42,18 @@ def encode_inputs(
     dt: float,
     high: float = 1.0,
     low: float = 0.0,
+    gate_context_level: float = 0.0,
     compartment: Compartment = Compartment.SOMA,
 ) -> dict[Compartment, Any]:
-    """Encode 2-bit inputs into a per-bit one-hot, 4-neuron drive vector."""
+    """Encode 2-bit inputs into a per-bit one-hot input drive vector.
+
+    Input channels:
+    - 0: A=0
+    - 1: A=1
+    - 2: B=0
+    - 3: B=1
+    - 4: gate_context (scalar)
+    """
 
     torch = require_torch()
     flat = inputs.reshape(-1)
@@ -57,18 +67,46 @@ def encode_inputs(
         raise ValueError("dt must be > 0")
 
     bits = (flat >= 0.5).to(dtype=torch.long)
-    drive = torch.full((4,), float(low), dtype=flat.dtype, device=flat.device)
+    drive = torch.full(
+        (len(INPUT_NEURON_INDICES),),
+        float(low),
+        dtype=flat.dtype,
+        device=flat.device,
+    )
 
     # bit0 selects neuron 0 or 1; bit1 selects neuron 2 or 3.
     offsets = bits.new_tensor([0, 2])
     high_indices = offsets + bits
     drive.index_fill_(0, high_indices, float(high))
+    gate_idx = INPUT_NEURON_INDICES.get("gate_context")
+    if gate_idx is not None and int(gate_idx) < int(drive.numel()):
+        drive[int(gate_idx)] = float(gate_context_level)
 
     if mode_norm == "spike":
         # Convert to impulse-like magnitude per step (unit-compatible with dt).
         drive = drive / float(dt)
 
     return {compartment: drive}
+
+
+_GATE_CONTEXT_LEVELS = MappingProxyType(
+    {
+        "and": 0.0,
+        "or": 0.2,
+        "xor": 0.4,
+        "nand": 0.6,
+        "nor": 0.8,
+        "xnor": 1.0,
+    }
+)
+
+
+def gate_context_level_for_gate(gate: Any, *, default: float = 0.0) -> float:
+    token = str(gate).strip().lower()
+    level = _GATE_CONTEXT_LEVELS.get(token)
+    if level is None:
+        return float(default)
+    return float(level)
 
 
 def decode_output(
@@ -140,5 +178,5 @@ __all__ = [
     "OutputDecodeMode",
     "decode_output",
     "encode_inputs",
+    "gate_context_level_for_gate",
 ]
-

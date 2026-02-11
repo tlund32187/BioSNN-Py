@@ -10,7 +10,7 @@ from biosnn.contracts.neurons import Compartment
 from biosnn.core.torch_utils import require_torch
 
 from .datasets import LogicGate, coerce_gate, make_truth_table
-from .encoding import decode_output, encode_inputs
+from .encoding import INPUT_NEURON_INDICES, decode_output, encode_inputs
 from .evaluators import eval_accuracy
 
 OptimizerName = Literal["adam", "sgd"]
@@ -218,7 +218,7 @@ def _decode_predictions(*, logits: Any, output_spikes: Any) -> Any:
 
 def _build_encoded_input_table(inputs: Any, *, dt: float) -> Any:
     torch = require_torch()
-    encoded = torch.zeros((int(inputs.shape[0]), 4), device=inputs.device, dtype=inputs.dtype)
+    encoded = torch.zeros((int(inputs.shape[0]), len(INPUT_NEURON_INDICES)), device=inputs.device, dtype=inputs.dtype)
     for idx in range(int(inputs.shape[0])):
         drive = encode_inputs(
             inputs[idx],

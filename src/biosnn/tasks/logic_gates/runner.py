@@ -21,7 +21,13 @@ from biosnn.learning.rules import RStdpEligibilityParams, RStdpEligibilityRule
 
 from .configs import LogicGateNeuronModel, LogicGateRunConfig
 from .datasets import LogicGate, coerce_gate, make_truth_table, sample_case_indices
-from .encoding import INPUT_NEURON_INDICES, OUTPUT_NEURON_INDICES, decode_output, encode_inputs
+from .encoding import (
+    INPUT_NEURON_INDICES,
+    OUTPUT_NEURON_INDICES,
+    decode_output,
+    encode_inputs,
+    gate_context_level_for_gate,
+)
 from .evaluators import PassTracker, eval_accuracy
 from .surrogate_train import train_logic_gate_surrogate
 from .topologies import build_logic_gate_ff, build_logic_gate_xor
@@ -221,13 +227,14 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
 
     output_spike_counts = torch.zeros((2,), device=inputs.device, dtype=inputs.dtype)
     output_step_spikes = torch.zeros((2,), device=inputs.device, dtype=inputs.dtype)
-    input_drive_buf = torch.zeros((4,), device=inputs.device, dtype=inputs.dtype)
+    n_input_neurons = int(encoded_inputs.shape[1])
+    input_drive_buf = torch.zeros((n_input_neurons,), device=inputs.device, dtype=inputs.dtype)
     if rstdp_runtime is not None:
         hidden_size = int(rstdp_runtime.hidden_size)
     else:
         if network is None:
             raise RuntimeError("Reference logic network was not initialized.")
-        hidden_size = network.hidden_size(input_size=4)
+        hidden_size = network.hidden_size(input_size=n_input_neurons)
     hidden_step_spikes = torch.zeros((hidden_size,), device=inputs.device, dtype=inputs.dtype)
     hidden_spike_counts = torch.zeros_like(hidden_step_spikes)
 
@@ -286,6 +293,7 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
         for trial_idx, case_idx in enumerate(case_sequence, start=1):
             target_value = targets_flat[case_idx]
             input_drive_buf.copy_(encoded_inputs[case_idx])
+            _apply_gate_context_drive(input_drive_buf, gate=gate)
             output_spike_counts.zero_()
             hidden_spike_counts.zero_()
             hidden_step_spikes.zero_()
@@ -379,6 +387,7 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
                 "in_bit0_1_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit0_1"]].item()),
                 "in_bit1_0_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit1_0"]].item()),
                 "in_bit1_1_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit1_1"]].item()),
+                "in_gate_context_drive": _gate_context_drive_value(input_drive_buf),
                 "out_spikes_0": float(output_spike_counts[OUTPUT_NEURON_INDICES["class_0"]].item()),
                 "out_spikes_1": float(output_spike_counts[OUTPUT_NEURON_INDICES["class_1"]].item()),
                 "hidden_mean_spikes": hidden_mean_spikes,
@@ -576,7 +585,7 @@ def run_logic_gate_curriculum(
     )
 
     output_spike_counts = torch.zeros((int(runtime.output_dim),), device=inputs.device, dtype=inputs.dtype)
-    input_drive_buf = torch.zeros((4,), device=inputs.device, dtype=inputs.dtype)
+    input_drive_buf = torch.zeros((int(encoded_inputs.shape[1]),), device=inputs.device, dtype=inputs.dtype)
     hidden_step_spikes = torch.zeros((int(runtime.hidden_size),), device=inputs.device, dtype=inputs.dtype)
     hidden_spike_counts = torch.zeros_like(hidden_step_spikes)
     debug_every = max(1, int(cfg.debug_every))
@@ -634,6 +643,7 @@ def run_logic_gate_curriculum(
                 train_targets_flat = targets_by_gate[active_gate]
                 target_value = train_targets_flat[case_idx]
                 input_drive_buf.copy_(encoded_inputs[case_idx])
+                _apply_gate_context_drive(input_drive_buf, gate=active_gate)
                 output_spike_counts.zero_()
                 hidden_spike_counts.zero_()
                 hidden_step_spikes.zero_()
@@ -700,6 +710,7 @@ def run_logic_gate_curriculum(
                     "in_bit0_1_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit0_1"]].item()),
                     "in_bit1_0_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit1_0"]].item()),
                     "in_bit1_1_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit1_1"]].item()),
+                    "in_gate_context_drive": _gate_context_drive_value(input_drive_buf),
                     "out_spikes_0": active_out_0,
                     "out_spikes_1": active_out_1,
                     "hidden_mean_spikes": hidden_mean_spikes,
@@ -1641,8 +1652,9 @@ def _prepare_xor_trial_features(
         if context_features is not None:
             runtime.pre_spikes[ctx_start:ctx_end].copy_(context_features[: runtime.context_dim])
             hidden_step_spikes[ctx_start:ctx_end].copy_(context_features[: runtime.context_dim])
-        elif int(input_drive.numel()) >= 4 + runtime.context_dim:
-            context_slice = input_drive[4 : 4 + runtime.context_dim]
+        elif int(input_drive.numel()) >= len(INPUT_NEURON_INDICES) + runtime.context_dim:
+            start = len(INPUT_NEURON_INDICES)
+            context_slice = input_drive[start : start + runtime.context_dim]
             runtime.pre_spikes[ctx_start:ctx_end].copy_(context_slice)
             hidden_step_spikes[ctx_start:ctx_end].copy_(context_slice)
     runtime.pre_spikes[-1] = 1.0
@@ -1656,7 +1668,11 @@ def _require_tensor(value: Any | None, *, name: str) -> Any:
 
 def _build_encoded_input_table(inputs: Any, *, dt: float) -> Any:
     torch = require_torch()
-    encoded = torch.zeros((int(inputs.shape[0]), 4), device=inputs.device, dtype=inputs.dtype)
+    encoded = torch.zeros(
+        (int(inputs.shape[0]), len(INPUT_NEURON_INDICES)),
+        device=inputs.device,
+        dtype=inputs.dtype,
+    )
     for idx in range(int(inputs.shape[0])):
         drive = encode_inputs(
             inputs[idx],
@@ -1668,6 +1684,26 @@ def _build_encoded_input_table(inputs: Any, *, dt: float) -> Any:
         )
         encoded[idx].copy_(drive[Compartment.SOMA])
     return encoded
+
+
+def _apply_gate_context_drive(input_drive: Any, *, gate: LogicGate | str) -> None:
+    gate_idx = INPUT_NEURON_INDICES.get("gate_context")
+    if gate_idx is None:
+        return
+    idx = int(gate_idx)
+    if idx < 0 or idx >= int(input_drive.numel()):
+        return
+    input_drive[idx] = float(gate_context_level_for_gate(gate.value if isinstance(gate, LogicGate) else gate))
+
+
+def _gate_context_drive_value(input_drive: Any) -> float:
+    gate_idx = INPUT_NEURON_INDICES.get("gate_context")
+    if gate_idx is None:
+        return 0.0
+    idx = int(gate_idx)
+    if idx < 0 or idx >= int(input_drive.numel()):
+        return 0.0
+    return float(input_drive[idx].item())
 
 
 def _build_reference_network(*, gate: LogicGate, device: str, dtype: Any) -> _ReferenceLogicNetwork:

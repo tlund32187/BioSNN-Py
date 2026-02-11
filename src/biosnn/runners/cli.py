@@ -1185,13 +1185,13 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--logic-reward-delivery-clamp-input",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="keep the same trial input during post-trial reward delivery steps",
     )
     parser.add_argument(
         "--logic-action-force-enabled",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="inject drive on chosen output action to commit exploration decisions",
     )
     parser.add_argument(
@@ -1199,8 +1199,13 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=["reward_window", "post_decision"],
         default="reward_window",
     )
+    parser.add_argument(
+        "--logic-action-force-mode",
+        choices=["explore_only", "silent_only", "explore_or_silent", "always"],
+        default="explore_or_silent",
+    )
     parser.add_argument("--logic-action-force-steps", type=int, default=1)
-    parser.add_argument("--logic-action-drive-amplitude", type=float, default=0.75)
+    parser.add_argument("--logic-action-drive-amplitude", type=float, default=0.35)
     parser.add_argument(
         "--logic-action-drive-compartment",
         choices=["soma", "dendrite", "ais", "axon"],

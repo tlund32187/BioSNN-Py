@@ -9,7 +9,13 @@ from .configs import (
     LogicGateRunConfig,
 )
 from .datasets import LogicGate, SamplingMethod, make_truth_table, sample_case_indices
-from .encoding import INPUT_NEURON_INDICES, OUTPUT_NEURON_INDICES, decode_output, encode_inputs
+from .encoding import (
+    INPUT_NEURON_INDICES,
+    OUTPUT_NEURON_INDICES,
+    decode_output,
+    encode_inputs,
+    gate_context_level_for_gate,
+)
 from .engine_runner import run_logic_gate_curriculum_engine, run_logic_gate_engine
 from .evaluators import PassCriterion, PassTracker, eval_accuracy, gate_pass_criterion
 from .runner import run_logic_gate, run_logic_gate_curriculum
@@ -37,6 +43,7 @@ __all__ = [
     "SamplingMethod",
     "decode_output",
     "encode_inputs",
+    "gate_context_level_for_gate",
     "eval_accuracy",
     "gate_pass_criterion",
     "LogicGateHandles",

@@ -69,6 +69,7 @@ ALLOWED_SYNAPSE_RECEPTOR_MODE = {"exc_only", "ei_ampa_nmda_gabaa", "ei_ampa_nmda
 ALLOWED_EXPLORATION_MODE = {"epsilon_greedy"}
 ALLOWED_EXPLORATION_TIE_BREAK = {"random_among_max", "alternate", "prefer_last"}
 ALLOWED_ACTION_FORCE_WINDOW = {"reward_window", "post_decision"}
+ALLOWED_ACTION_FORCE_MODE = {"explore_only", "silent_only", "explore_or_silent", "always"}
 
 _LOGIC_DEMO_TO_GATE: dict[DemoId, str] = {
     "logic_and": "and",
@@ -179,13 +180,14 @@ _BASE_RUN_SPEC_DEFAULTS: dict[str, Any] = {
     "logic": {
         "learn_every": 1,
         "reward_delivery_steps": 2,
-        "reward_delivery_clamp_input": True,
+        "reward_delivery_clamp_input": False,
         "action_force": {
-            "enabled": True,
+            "enabled": False,
             "window": "reward_window",
             "steps": 1,
-            "amplitude": 0.75,
+            "amplitude": 0.35,
             "compartment": "soma",
+            "mode": "explore_or_silent",
         },
         "gate_context": {
             "enabled": True,
@@ -699,6 +701,11 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         allowed={"soma", "dendrite", "ais", "axon"},
         default=str(default_action_force.get("compartment", "soma")),
     )
+    action_force_mode = _coerce_choice(
+        _first_non_none(action_force_map.get("mode"), default_action_force.get("mode")),
+        allowed=ALLOWED_ACTION_FORCE_MODE,
+        default=str(default_action_force.get("mode", "explore_or_silent")),
+    )
     gate_context_compartment = _coerce_choice(
         _first_non_none(gate_context_map.get("compartment"), default_gate_context.get("compartment")),
         allowed={"soma", "dendrite", "ais", "axon"},
@@ -1027,9 +1034,10 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
                 ),
                 "amplitude": _coerce_float(
                     _first_non_none(action_force_map.get("amplitude"), default_action_force.get("amplitude")),
-                    float(default_action_force.get("amplitude", 0.75)),
+                    float(default_action_force.get("amplitude", 0.35)),
                 ),
                 "compartment": action_force_compartment,
+                "mode": action_force_mode,
             },
             "gate_context": {
                 "enabled": bool(
@@ -1359,14 +1367,15 @@ def run_spec_from_cli_args(
             "learn_every": getattr(args, "logic_learn_every", 1),
             "reward_delivery_steps": getattr(args, "logic_reward_delivery_steps", 2),
             "reward_delivery_clamp_input": bool(
-                getattr(args, "logic_reward_delivery_clamp_input", True)
+                getattr(args, "logic_reward_delivery_clamp_input", False)
             ),
             "action_force": {
-                "enabled": bool(getattr(args, "logic_action_force_enabled", True)),
+                "enabled": bool(getattr(args, "logic_action_force_enabled", False)),
                 "window": getattr(args, "logic_action_force_window", "reward_window"),
                 "steps": getattr(args, "logic_action_force_steps", 1),
-                "amplitude": getattr(args, "logic_action_drive_amplitude", 0.75),
+                "amplitude": getattr(args, "logic_action_drive_amplitude", 0.35),
                 "compartment": getattr(args, "logic_action_drive_compartment", "soma"),
+                "mode": getattr(args, "logic_action_force_mode", "explore_or_silent"),
             },
             "gate_context": {
                 "enabled": bool(getattr(args, "logic_gate_context_enabled", True)),
@@ -1592,10 +1601,12 @@ def run_spec_to_cli_args(
         str(int(logic_cfg.get("reward_delivery_steps", 2))),
         "--logic-action-force-window",
         str(action_force_cfg.get("window", "reward_window")),
+        "--logic-action-force-mode",
+        str(action_force_cfg.get("mode", "explore_or_silent")),
         "--logic-action-force-steps",
         str(int(action_force_cfg.get("steps", 1))),
         "--logic-action-drive-amplitude",
-        str(float(action_force_cfg.get("amplitude", 0.75))),
+        str(float(action_force_cfg.get("amplitude", 0.35))),
         "--logic-action-drive-compartment",
         str(action_force_cfg.get("compartment", "soma")),
         "--logic-gate-context-amplitude",
@@ -1680,7 +1691,7 @@ def run_spec_to_cli_args(
     )
     args.append(
         "--logic-reward-delivery-clamp-input"
-        if bool(logic_cfg.get("reward_delivery_clamp_input", True))
+        if bool(logic_cfg.get("reward_delivery_clamp_input", False))
         else "--no-logic-reward-delivery-clamp-input"
     )
     args.append(
@@ -1690,7 +1701,7 @@ def run_spec_to_cli_args(
     )
     args.append(
         "--logic-action-force-enabled"
-        if bool(action_force_cfg.get("enabled", True))
+        if bool(action_force_cfg.get("enabled", False))
         else "--no-logic-action-force-enabled"
     )
     args.append(
@@ -1982,13 +1993,16 @@ def feature_flags_for_run_spec(
         },
         "reward_window": {
             "steps": reward_delivery_steps,
-            "clamp_input": bool(logic_cfg.get("reward_delivery_clamp_input", True))
+            "clamp_input": bool(logic_cfg.get("reward_delivery_clamp_input", False))
             if reward_delivery_steps > 0
             else False,
         },
         "action_force": {
             "enabled": action_force_enabled,
             "window": str(action_force_cfg.get("window", "reward_window"))
+            if action_force_enabled
+            else None,
+            "mode": str(action_force_cfg.get("mode", "explore_or_silent"))
             if action_force_enabled
             else None,
             "steps": int(action_force_cfg.get("steps", 0))

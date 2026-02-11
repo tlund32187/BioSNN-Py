@@ -203,7 +203,7 @@ class LogicGateRunConfig:
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
     curriculum_gate_context: CurriculumGateContextConfig = field(default_factory=CurriculumGateContextConfig)
     reward_delivery_steps: int = 2
-    reward_delivery_clamp_input: bool = True
+    reward_delivery_clamp_input: bool = False
     learning_lr_default: float = 1e-3
     dopamine_amount_default: float = 0.10
     dopamine_decay_tau_default: float = 0.05

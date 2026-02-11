@@ -52,7 +52,13 @@ def test_engine_logic_gate_builds_and_steps_with_advanced_synapses() -> None:
     )
     engine.reset(config=SimulationConfig(dt=1e-3, device="cpu", dtype="float32", seed=7))
 
-    input_drive = torch.tensor([1.0, 0.0, 1.0, 0.0], device="cpu", dtype=torch.float32)
+    in_state = engine._pop_states.get(handles.input_population)  # noqa: SLF001 - test inspects engine runtime state.
+    assert in_state is not None
+    n_input = int(in_state.spikes.numel())
+    assert n_input >= 4
+    input_drive = torch.zeros((n_input,), device="cpu", dtype=torch.float32)
+    input_drive[0] = 1.0
+    input_drive[2] = 1.0
 
     def drive_fn(t: float, step: int, pop_name: str, ctx: StepContext):
         _ = (t, step, ctx)

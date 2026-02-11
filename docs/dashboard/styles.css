@@ -260,7 +260,7 @@ h1 {
 .grid {
   display: grid;
   grid-template-columns: 1.1fr 1.6fr 1fr;
-  grid-template-rows: 260px 220px 220px;
+  grid-template-rows: minmax(260px, auto) minmax(220px, auto) minmax(220px, auto);
   gap: 18px;
 }
 
@@ -355,6 +355,8 @@ h1 {
 
 .neuron-controls {
   gap: 12px;
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 
 .neuron-controls span {
@@ -405,6 +407,9 @@ h1 {
 
 .card-network {
   grid-row: span 2;
+  min-height: var(--network-card-height, 520px);
+  resize: vertical;
+  overflow: auto;
 }
 
 .card-raster {

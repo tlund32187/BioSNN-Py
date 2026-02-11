@@ -21,6 +21,9 @@ const uiControls = {
   rasterStride: document.getElementById("rasterStride"),
   rasterWindow: document.getElementById("rasterWindow"),
   rasterMaxPoints: document.getElementById("rasterMaxPoints"),
+  networkCard: document.getElementById("networkCard"),
+  networkHeight: document.getElementById("networkHeight"),
+  networkHeightValue: document.getElementById("networkHeightValue"),
   neuronMaxPerPop: document.getElementById("neuronMaxPerPop"),
   neuronMaxPerPopValue: document.getElementById("neuronMaxPerPopValue"),
   neuronViewMode: document.getElementById("neuronViewMode"),
@@ -56,13 +59,30 @@ const metricNodes = {
   lossLatest: document.getElementById("lossLatest"),
 };
 
+const LOGIC_INPUT_NODE_LABELS = Object.freeze({
+  0: "A = 0",
+  1: "A = 1",
+  2: "B = 0",
+  3: "B = 1",
+  4: "Gate context",
+});
+
+const LOGIC_OUTPUT_NODE_LABELS = Object.freeze({
+  0: "FALSE (class_0)",
+  1: "TRUE (class_1)",
+});
+
+const NETWORK_HEIGHT_KEY = "biosnn.dashboard.network_height_px";
+
 const runNodes = {
   demoSelect: document.getElementById("runDemoSelect"),
   stepsInput: document.getElementById("runStepsInput"),
   deviceSelect: document.getElementById("runDeviceSelect"),
   fusedLayoutSelect: document.getElementById("runFusedLayoutSelect"),
   ringStrategySelect: document.getElementById("runRingStrategySelect"),
+  delayStepsInput: document.getElementById("runDelayStepsInput"),
   learningToggle: document.getElementById("runLearningToggle"),
+  learningLrInput: document.getElementById("runLearningLrInput"),
   monitorsToggle: document.getElementById("runMonitorsToggle"),
   modulatorToggle: document.getElementById("runModulatorToggle"),
   advancedSection: document.getElementById("runAdvancedSection"),
@@ -74,6 +94,9 @@ const runNodes = {
   epsilonDecayTrialsInput: document.getElementById("runEpsilonDecayTrialsInput"),
   tieBreakSelect: document.getElementById("runTieBreakSelect"),
   rewardDeliveryStepsInput: document.getElementById("runRewardDeliveryStepsInput"),
+  actionForceEnabledToggle: document.getElementById("runActionForceEnabledToggle"),
+  actionForceModeSelect: document.getElementById("runActionForceModeSelect"),
+  actionDriveAmplitudeInput: document.getElementById("runActionDriveAmplitudeInput"),
   gateContextEnabledToggle: document.getElementById("runGateContextEnabledToggle"),
   gateContextInputLikeToggle: document.getElementById("runGateContextInputLikeToggle"),
   gateContextAmplitudeInput: document.getElementById("runGateContextAmplitudeInput"),
@@ -87,6 +110,8 @@ const runNodes = {
   advancedSynapseStpToggle: document.getElementById("runAdvancedSynapseStpToggle"),
   receptorModeSelect: document.getElementById("runReceptorModeSelect"),
   modulatorFieldTypeSelect: document.getElementById("runModulatorFieldTypeSelect"),
+  modulatorAmountInput: document.getElementById("runModulatorAmountInput"),
+  modulatorDecayTauInput: document.getElementById("runModulatorDecayTauInput"),
   modulatorKindsSelect: document.getElementById("runModulatorKindsSelect"),
   wrapperEnabledToggle: document.getElementById("runWrapperEnabledToggle"),
   wrapperAchGainInput: document.getElementById("runWrapperAchGainInput"),
@@ -315,37 +340,37 @@ const FALLBACK_DEMO_DEFINITIONS = [
   {
     id: "logic_curriculum",
     name: "Logic Curriculum",
-    defaults: { demo_id: "logic_curriculum", steps: 2500, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.001 }, modulators: { enabled: false, kinds: [], amount: 0.1, decay_tau: 0.05 }, logic_curriculum_gates: "or,and,nor,nand,xor,xnor", logic_curriculum_replay_ratio: 0.0, logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
+    defaults: { demo_id: "logic_curriculum", steps: 2500, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.001 }, modulators: { enabled: false, kinds: [], amount: 0.1, decay_tau: 0.05 }, logic_curriculum_gates: "or,and,nor,nand,xor,xnor", logic_curriculum_replay_ratio: 0.0, logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: false, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
   {
     id: "logic_and",
     name: "Logic AND",
-    defaults: { demo_id: "logic_and", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "and", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
+    defaults: { demo_id: "logic_and", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "and", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: false, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
   {
     id: "logic_or",
     name: "Logic OR",
-    defaults: { demo_id: "logic_or", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "or", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
+    defaults: { demo_id: "logic_or", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "or", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: false, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
   {
     id: "logic_xor",
     name: "Logic XOR",
-    defaults: { demo_id: "logic_xor", steps: 20000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "xor", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
+    defaults: { demo_id: "logic_xor", steps: 20000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "xor", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: false, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
   {
     id: "logic_nand",
     name: "Logic NAND",
-    defaults: { demo_id: "logic_nand", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "nand", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
+    defaults: { demo_id: "logic_nand", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "nand", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: false, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
   {
     id: "logic_nor",
     name: "Logic NOR",
-    defaults: { demo_id: "logic_nor", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "nor", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
+    defaults: { demo_id: "logic_nor", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "nor", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: false, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
   {
     id: "logic_xnor",
     name: "Logic XNOR",
-    defaults: { demo_id: "logic_xnor", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "xnor", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
+    defaults: { demo_id: "logic_xnor", steps: 5000, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_gate: "xnor", logic_learning_mode: "rstdp", logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: false, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
 ];
 
@@ -487,6 +512,24 @@ function resolveDemoId() {
   if (fromConfig) return fromConfig;
   const fromSelect = String(runNodes.demoSelect?.value || "").trim();
   if (fromSelect) return fromSelect;
+  return null;
+}
+
+function isLogicNeuronSemanticActive() {
+  return isLogicDemoId(resolveDemoId());
+}
+
+function logicNodeSemanticLabel(node) {
+  if (!isLogicNeuronSemanticActive() || !node) return null;
+  const role = String(node.role || "").trim().toLowerCase();
+  const localIdx = Number(node.localIdx ?? node.index ?? -1);
+  if (!Number.isFinite(localIdx)) return null;
+  if (role === "input" && Object.prototype.hasOwnProperty.call(LOGIC_INPUT_NODE_LABELS, localIdx)) {
+    return LOGIC_INPUT_NODE_LABELS[localIdx];
+  }
+  if (role === "output" && Object.prototype.hasOwnProperty.call(LOGIC_OUTPUT_NODE_LABELS, localIdx)) {
+    return LOGIC_OUTPUT_NODE_LABELS[localIdx];
+  }
   return null;
 }
 
@@ -764,18 +807,70 @@ let raster = buildRaster(60, 140);
 let lastFrame = performance.now();
 let fpsSmooth = 48;
 
+function clampNetworkHeightPx(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 520;
+  return Math.max(420, Math.min(980, Math.round(parsed)));
+}
+
+function applyNetworkHeight(value, { persist = true } = {}) {
+  const px = clampNetworkHeightPx(value);
+  document.documentElement.style.setProperty("--network-card-height", `${px}px`);
+  if (uiControls.networkCard) {
+    uiControls.networkCard.style.minHeight = `${px}px`;
+  }
+  if (uiControls.networkHeight) {
+    uiControls.networkHeight.value = String(px);
+  }
+  if (uiControls.networkHeightValue) {
+    uiControls.networkHeightValue.textContent = String(px);
+  }
+  if (persist) {
+    try {
+      window.localStorage.setItem(NETWORK_HEIGHT_KEY, String(px));
+    } catch {
+      // Ignore storage failures.
+    }
+  }
+  resizeAll();
+}
+
+function initializeNetworkHeightControl() {
+  let stored = null;
+  try {
+    stored = window.localStorage.getItem(NETWORK_HEIGHT_KEY);
+  } catch {
+    stored = null;
+  }
+  const base = stored ?? uiControls.networkHeight?.value ?? "520";
+  applyNetworkHeight(base, { persist: false });
+}
+
 function resizeAll() {
   Object.values(canvases).forEach((canvas) => setupCanvas(canvas));
 }
 
 function setupCanvas(canvas) {
-  if (!canvas) return;
+  if (!canvas || typeof canvas.getContext !== "function") return null;
   const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = rect.width * dpr;
-  canvas.height = rect.height * dpr;
+  const dpr = Math.max(1, Number(window.devicePixelRatio) || 1);
+  const nextWidth = Math.max(1, Math.round(rect.width * dpr));
+  const nextHeight = Math.max(1, Math.round(rect.height * dpr));
+  if (canvas.width !== nextWidth) {
+    canvas.width = nextWidth;
+  }
+  if (canvas.height !== nextHeight) {
+    canvas.height = nextHeight;
+  }
   const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (!ctx || typeof ctx.setTransform !== "function") {
+    return null;
+  }
+  try {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  } catch {
+    return null;
+  }
   return ctx;
 }
 
@@ -1840,7 +1935,49 @@ function drawNeuronNetwork() {
   if (networkNeuron) {
     networkNeuron._screen = { nodes: screenNodes, edges: screenEdges };
   }
+  drawLogicNeuronAnnotations(ctx, width, height, screenNodes);
   drawNeuronLegend(ctx, width, height);
+}
+
+function drawLogicNeuronAnnotations(ctx, width, height, screenNodes) {
+  if (!isLogicNeuronSemanticActive() || !Array.isArray(screenNodes) || screenNodes.length === 0) {
+    return;
+  }
+  ctx.save();
+  ctx.font = "10px 'JetBrains Mono'";
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = 3;
+  let anyOutput = false;
+
+  screenNodes.forEach((item) => {
+    const node = item.node;
+    const role = String(node?.role || "").trim().toLowerCase();
+    const label = logicNodeSemanticLabel(node);
+    if (!label) return;
+    if (role === "input") {
+      ctx.textAlign = "right";
+      ctx.strokeStyle = "rgba(7, 12, 25, 0.95)";
+      ctx.strokeText(label, item.x - 9, item.y);
+      ctx.fillStyle = theme.input;
+      ctx.fillText(label, item.x - 9, item.y);
+    } else if (role === "output") {
+      anyOutput = true;
+      ctx.textAlign = "left";
+      ctx.strokeStyle = "rgba(7, 12, 25, 0.95)";
+      ctx.strokeText(label, item.x + 9, item.y);
+      ctx.fillStyle = theme.output;
+      ctx.fillText(label, item.x + 9, item.y);
+    }
+  });
+
+  if (anyOutput) {
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    ctx.font = "11px 'Space Grotesk'";
+    ctx.fillStyle = theme.muted;
+    ctx.fillText("Decision decode: WTA(Out[0], Out[1]) -> FALSE/TRUE", 12, height - 10);
+  }
+  ctx.restore();
 }
 
 
@@ -2579,8 +2716,10 @@ function onNetworkHover(event) {
           ratesByPop?.get(popName)?.get(localIdx) ??
           ratesByPop?.get(popName)?.get(Number(localIdx));
         const rateText = rate !== undefined ? `<br/>Rate: ${rate.toFixed(2)} Hz` : "";
+        const semanticLabel = logicNodeSemanticLabel(node);
+        const semanticText = semanticLabel ? `<br/>${semanticLabel}` : "";
         showNetworkTooltip(
-          `<strong>${popName}[${localIdx}]</strong>${rateText}`,
+          `<strong>${popName}[${localIdx}]</strong>${semanticText}${rateText}`,
           mx,
           my
         );
@@ -3499,7 +3638,9 @@ function setRunControlsEnabled(enabled) {
     runNodes.deviceSelect,
     runNodes.fusedLayoutSelect,
     runNodes.ringStrategySelect,
+    runNodes.delayStepsInput,
     runNodes.learningToggle,
+    runNodes.learningLrInput,
     runNodes.monitorsToggle,
     runNodes.modulatorToggle,
     runNodes.logicBackendSelect,
@@ -3509,6 +3650,9 @@ function setRunControlsEnabled(enabled) {
     runNodes.epsilonDecayTrialsInput,
     runNodes.tieBreakSelect,
     runNodes.rewardDeliveryStepsInput,
+    runNodes.actionForceEnabledToggle,
+    runNodes.actionForceModeSelect,
+    runNodes.actionDriveAmplitudeInput,
     runNodes.gateContextEnabledToggle,
     runNodes.gateContextInputLikeToggle,
     runNodes.gateContextAmplitudeInput,
@@ -3520,6 +3664,8 @@ function setRunControlsEnabled(enabled) {
     runNodes.advancedSynapseStpToggle,
     runNodes.receptorModeSelect,
     runNodes.modulatorFieldTypeSelect,
+    runNodes.modulatorAmountInput,
+    runNodes.modulatorDecayTauInput,
     runNodes.modulatorKindsSelect,
     runNodes.wrapperEnabledToggle,
     runNodes.wrapperAchGainInput,
@@ -3594,7 +3740,7 @@ function renderFeatureChecklist(features) {
       ` (${rewardWindow.steps ?? 0} step${Number(rewardWindow.steps || 0) === 1 ? "" : "s"})`,
     `Action force: <strong>${actionForce.enabled ? "ON" : "OFF"}</strong>` +
       (actionForce.enabled
-        ? ` (${actionForce.window || "reward_window"}, amp=${actionForce.amplitude ?? "?"})`
+        ? ` (${actionForce.mode || "explore_or_silent"}, ${actionForce.window || "reward_window"}, amp=${actionForce.amplitude ?? "?"})`
         : ""),
     (() => {
       const gateContextTargets = Array.isArray(gateContext.targets)
@@ -3631,6 +3777,7 @@ function applyRunSpecToControls(spec) {
       : {};
   const logic = spec.logic && typeof spec.logic === "object" ? spec.logic : {};
   const exploration = logic.exploration && typeof logic.exploration === "object" ? logic.exploration : {};
+  const actionForce = logic.action_force && typeof logic.action_force === "object" ? logic.action_force : {};
   const gateContext = logic.gate_context && typeof logic.gate_context === "object" ? logic.gate_context : {};
   const homeostasis = spec.homeostasis && typeof spec.homeostasis === "object" ? spec.homeostasis : {};
   const pruning = spec.pruning && typeof spec.pruning === "object" ? spec.pruning : {};
@@ -3646,8 +3793,14 @@ function applyRunSpecToControls(spec) {
   if (runNodes.ringStrategySelect) {
     runNodes.ringStrategySelect.value = String(synapse.ring_strategy || spec.ring_strategy || "dense");
   }
+  if (runNodes.delayStepsInput) {
+    runNodes.delayStepsInput.value = String(Math.max(0, parseInteger(spec.delay_steps) || 3));
+  }
   if (runNodes.learningToggle) {
     runNodes.learningToggle.checked = Boolean(spec.learning?.enabled);
+  }
+  if (runNodes.learningLrInput) {
+    runNodes.learningLrInput.value = String(parseNumberOr(spec.learning?.lr, 0.001));
   }
   if (runNodes.monitorsToggle) {
     runNodes.monitorsToggle.checked = spec.monitors_enabled !== false;
@@ -3678,6 +3831,17 @@ function applyRunSpecToControls(spec) {
   if (runNodes.rewardDeliveryStepsInput) {
     runNodes.rewardDeliveryStepsInput.value = String(
       Math.max(0, parseInteger(logic.reward_delivery_steps) || 2)
+    );
+  }
+  if (runNodes.actionForceEnabledToggle) {
+    runNodes.actionForceEnabledToggle.checked = Boolean(actionForce.enabled);
+  }
+  if (runNodes.actionForceModeSelect) {
+    runNodes.actionForceModeSelect.value = String(actionForce.mode || "explore_or_silent");
+  }
+  if (runNodes.actionDriveAmplitudeInput) {
+    runNodes.actionDriveAmplitudeInput.value = String(
+      Math.max(0, parseNumberOr(actionForce.amplitude, 0.25))
     );
   }
   if (runNodes.gateContextEnabledToggle) {
@@ -3716,6 +3880,16 @@ function applyRunSpecToControls(spec) {
   }
   if (runNodes.modulatorFieldTypeSelect) {
     runNodes.modulatorFieldTypeSelect.value = String(modulators.field_type || "global_scalar");
+  }
+  if (runNodes.modulatorAmountInput) {
+    runNodes.modulatorAmountInput.value = String(
+      Math.max(0.0, parseNumberOr(modulators.amount, 1.0))
+    );
+  }
+  if (runNodes.modulatorDecayTauInput) {
+    runNodes.modulatorDecayTauInput.value = String(
+      Math.max(0.0001, parseNumberOr(modulators.decay_tau, 0.05))
+    );
   }
   if (runNodes.modulatorKindsSelect) {
     const kinds = Array.isArray(modulators.kinds) ? modulators.kinds : [];
@@ -3807,6 +3981,10 @@ function buildRunSpecFromControls() {
     baseLogic.exploration && typeof baseLogic.exploration === "object"
       ? baseLogic.exploration
       : {};
+  const baseActionForce =
+    baseLogic.action_force && typeof baseLogic.action_force === "object"
+      ? baseLogic.action_force
+      : {};
   const baseGateContext =
     baseLogic.gate_context && typeof baseLogic.gate_context === "object"
       ? baseLogic.gate_context
@@ -3818,6 +3996,7 @@ function buildRunSpecFromControls() {
   const synapseBackend = String(baseSynapse.backend || base.synapse_backend || "spmm_fused");
   const fusedLayout = String(runNodes.fusedLayoutSelect?.value || baseSynapse.fused_layout || base.fused_layout || "auto");
   const ringStrategy = String(runNodes.ringStrategySelect?.value || baseSynapse.ring_strategy || base.ring_strategy || "dense");
+  const delaySteps = Math.max(0, parseInteger(runNodes.delayStepsInput?.value) || parseInteger(base.delay_steps) || 3);
   const receptorMode = String(runNodes.receptorModeSelect?.value || baseSynapse.receptor_mode || base.receptor_mode || "exc_only");
   const ringDtype = String(baseSynapse.ring_dtype || base.ring_dtype || "none");
   const storeSparseByDelay =
@@ -3826,6 +4005,10 @@ function buildRunSpecFromControls() {
       : (base.store_sparse_by_delay ?? null);
 
   const learningEnabled = Boolean(runNodes.learningToggle?.checked);
+  const learningLr = Math.max(
+    1e-9,
+    parseNumberOr(runNodes.learningLrInput?.value, parseNumberOr(base.learning?.lr, 0.001))
+  );
   const monitorsEnabled = runNodes.monitorsToggle ? Boolean(runNodes.monitorsToggle.checked) : base.monitors_enabled !== false;
   const modEnabled = Boolean(runNodes.modulatorToggle?.checked);
   const baseModKinds = Array.isArray(baseModulators.kinds)
@@ -3836,6 +4019,14 @@ function buildRunSpecFromControls() {
     ? (selectedModKinds.length > 0 ? selectedModKinds : (baseModKinds.length > 0 ? baseModKinds : ["dopamine"]))
     : [];
   const modulatorFieldType = String(runNodes.modulatorFieldTypeSelect?.value || baseModulators.field_type || "global_scalar");
+  const modulatorAmount = Math.max(
+    0.0,
+    parseNumberOr(runNodes.modulatorAmountInput?.value, parseNumberOr(baseModulators.amount, 1.0))
+  );
+  const modulatorDecayTau = Math.max(
+    1e-9,
+    parseNumberOr(runNodes.modulatorDecayTauInput?.value, parseNumberOr(baseModulators.decay_tau, 0.05))
+  );
   const homeostasisEnabled = Boolean(runNodes.homeostasisEnabledToggle?.checked);
   const pruningEnabled = Boolean(runNodes.pruningEnabledToggle?.checked);
   const neurogenesisEnabled = Boolean(runNodes.neurogenesisEnabledToggle?.checked);
@@ -3867,6 +4058,20 @@ function buildRunSpecFromControls() {
     parseInteger(runNodes.rewardDeliveryStepsInput?.value) ||
       parseInteger(baseLogic.reward_delivery_steps) ||
       2
+  );
+  const actionForceEnabled = Boolean(
+    runNodes.actionForceEnabledToggle?.checked ??
+      (baseActionForce.enabled === undefined ? false : Boolean(baseActionForce.enabled))
+  );
+  const actionForceMode = String(
+    runNodes.actionForceModeSelect?.value || baseActionForce.mode || "explore_or_silent"
+  );
+  const actionDriveAmplitude = Math.max(
+    0.0,
+    parseNumberOr(
+      runNodes.actionDriveAmplitudeInput?.value,
+      parseNumberOr(baseActionForce.amplitude, 0.25)
+    )
   );
   const gateContextEnabled = Boolean(
     runNodes.gateContextEnabledToggle?.checked ??
@@ -3915,6 +4120,7 @@ function buildRunSpecFromControls() {
     ring_strategy: ringStrategy,
     ring_dtype: ringDtype,
     store_sparse_by_delay: storeSparseByDelay,
+    delay_steps: delaySteps,
     receptor_mode: receptorMode,
     monitors_enabled: monitorsEnabled,
     monitor_mode: "dashboard",
@@ -3923,8 +4129,17 @@ function buildRunSpecFromControls() {
       reward_delivery_steps: rewardDeliverySteps,
       reward_delivery_clamp_input:
         baseLogic.reward_delivery_clamp_input === undefined
-          ? true
+          ? false
           : Boolean(baseLogic.reward_delivery_clamp_input),
+      action_force: {
+        ...baseActionForce,
+        enabled: actionForceEnabled,
+        mode: actionForceMode,
+        amplitude: actionDriveAmplitude,
+        window: String(baseActionForce.window || "reward_window"),
+        steps: Math.max(0, parseInteger(baseActionForce.steps) || 1),
+        compartment: String(baseActionForce.compartment || "soma"),
+      },
       gate_context: {
         ...baseGateContext,
         enabled: gateContextEnabled,
@@ -3961,12 +4176,15 @@ function buildRunSpecFromControls() {
     learning: {
       ...(base.learning || {}),
       enabled: learningEnabled,
+      lr: learningLr,
     },
     modulators: {
       ...baseModulators,
       enabled: modEnabled,
       kinds: modKinds,
       field_type: modulatorFieldType,
+      amount: modulatorAmount,
+      decay_tau: modulatorDecayTau,
     },
     wrapper: {
       ...baseWrapper,
@@ -4356,6 +4574,14 @@ if (uiControls.neuronSampleMode) {
 if (uiControls.neuronLayoutMode) {
   uiControls.neuronLayoutMode.addEventListener("change", onNeuronViewChange);
 }
+if (uiControls.networkHeight) {
+  uiControls.networkHeight.addEventListener("input", () => {
+    applyNetworkHeight(uiControls.networkHeight.value, { persist: false });
+  });
+  uiControls.networkHeight.addEventListener("change", () => {
+    applyNetworkHeight(uiControls.networkHeight.value, { persist: true });
+  });
+}
 if (uiControls.edgeOpacityByDistance) {
   uiControls.edgeOpacityByDistance.addEventListener("change", () => {
     updateLegendNotes();
@@ -4370,7 +4596,7 @@ if (canvases.network) {
   canvases.network.addEventListener("mousemove", onNetworkHover);
   canvases.network.addEventListener("mouseleave", hideNetworkTooltip);
 }
-resizeAll();
+initializeNetworkHeightControl();
 syncNeuronViewControls();
 updateNeuronControlsEnabled();
 updateNeuronViewInfo();
