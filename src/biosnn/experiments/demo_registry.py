@@ -68,6 +68,7 @@ ALLOWED_MODULATOR_FIELD_TYPE = {"global_scalar", "grid_diffusion_2d"}
 ALLOWED_SYNAPSE_RECEPTOR_MODE = {"exc_only", "ei_ampa_nmda_gabaa", "ei_ampa_nmda_gabaa_gabab"}
 ALLOWED_EXPLORATION_MODE = {"epsilon_greedy"}
 ALLOWED_EXPLORATION_TIE_BREAK = {"random_among_max", "alternate", "prefer_last"}
+ALLOWED_ACTION_FORCE_WINDOW = {"reward_window", "post_decision"}
 
 _LOGIC_DEMO_TO_GATE: dict[DemoId, str] = {
     "logic_and": "and",
@@ -179,6 +180,19 @@ _BASE_RUN_SPEC_DEFAULTS: dict[str, Any] = {
         "learn_every": 1,
         "reward_delivery_steps": 2,
         "reward_delivery_clamp_input": True,
+        "action_force": {
+            "enabled": True,
+            "window": "reward_window",
+            "steps": 1,
+            "amplitude": 0.75,
+            "compartment": "soma",
+        },
+        "gate_context": {
+            "enabled": True,
+            "amplitude": 0.30,
+            "compartment": "dendrite",
+            "targets": ["hidden"],
+        },
         "exploration": {
             "enabled": True,
             "mode": "epsilon_greedy",
@@ -284,8 +298,13 @@ _DEMO_DEFAULT_OVERRIDES: dict[DemoId, dict[str, Any]] = {
     },
     "logic_curriculum": {
         "steps": 2500,
-        "learning": {"enabled": True, "rule": "rstdp", "lr": 0.1},
-        "modulators": {"enabled": False, "kinds": []},
+        "learning": {"enabled": True, "rule": "rstdp", "lr": 1e-3},
+        "modulators": {
+            "enabled": False,
+            "kinds": [],
+            "amount": 0.10,
+            "decay_tau": 0.05,
+        },
         "logic_backend": "harness",
         "logic_gate": "xor",
         "logic_learning_mode": "rstdp",
@@ -293,7 +312,7 @@ _DEMO_DEFAULT_OVERRIDES: dict[DemoId, dict[str, Any]] = {
         "logic_sim_steps_per_trial": 10,
         "logic_sampling_method": "sequential",
         "logic_curriculum_gates": _LOGIC_CURRICULUM_DEFAULT,
-        "logic_curriculum_replay_ratio": 0.35,
+        "logic_curriculum_replay_ratio": 0.0,
         "logic_debug": False,
         "logic_debug_every": 25,
     },
@@ -557,6 +576,14 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     )
     logic_raw = merged.get("logic")
     logic_map = cast(Mapping[str, Any], logic_raw) if isinstance(logic_raw, Mapping) else {}
+    action_force_raw = _first_non_none(logic_map.get("action_force"), merged.get("action_force"))
+    action_force_map = (
+        cast(Mapping[str, Any], action_force_raw) if isinstance(action_force_raw, Mapping) else {}
+    )
+    gate_context_raw = _first_non_none(logic_map.get("gate_context"), merged.get("gate_context"))
+    gate_context_map = (
+        cast(Mapping[str, Any], gate_context_raw) if isinstance(gate_context_raw, Mapping) else {}
+    )
     exploration_raw = _first_non_none(logic_map.get("exploration"), merged.get("exploration"))
     exploration_map = (
         cast(Mapping[str, Any], exploration_raw) if isinstance(exploration_raw, Mapping) else {}
@@ -576,6 +603,8 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     default_pruning = cast(Mapping[str, Any], default_spec.get("pruning", {}))
     default_neurogenesis = cast(Mapping[str, Any], default_spec.get("neurogenesis", {}))
     default_logic = cast(Mapping[str, Any], default_spec.get("logic", {}))
+    default_action_force = cast(Mapping[str, Any], default_logic.get("action_force", {}))
+    default_gate_context = cast(Mapping[str, Any], default_logic.get("gate_context", {}))
     default_exploration = cast(Mapping[str, Any], default_logic.get("exploration", {}))
 
     synapse_backend = _coerce_choice(
@@ -660,6 +689,26 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         allowed=ALLOWED_EXPLORATION_TIE_BREAK,
         default=str(default_exploration.get("tie_break", "random_among_max")),
     )
+    action_force_window = _coerce_choice(
+        _first_non_none(action_force_map.get("window"), default_action_force.get("window")),
+        allowed=ALLOWED_ACTION_FORCE_WINDOW,
+        default=str(default_action_force.get("window", "reward_window")),
+    )
+    action_force_compartment = _coerce_choice(
+        _first_non_none(action_force_map.get("compartment"), default_action_force.get("compartment")),
+        allowed={"soma", "dendrite", "ais", "axon"},
+        default=str(default_action_force.get("compartment", "soma")),
+    )
+    gate_context_compartment = _coerce_choice(
+        _first_non_none(gate_context_map.get("compartment"), default_gate_context.get("compartment")),
+        allowed={"soma", "dendrite", "ais", "axon"},
+        default=str(default_gate_context.get("compartment", "dendrite")),
+    )
+    gate_context_targets = _coerce_string_list(
+        _first_non_none(gate_context_map.get("targets"), default_gate_context.get("targets"))
+    )
+    if not gate_context_targets:
+        gate_context_targets = ["hidden"]
     reward_clamp_input = _coerce_optional_bool(
         _first_non_none(
             logic_map.get("reward_delivery_clamp_input"),
@@ -964,6 +1013,41 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
                 _coerce_nonnegative_int(default_logic.get("reward_delivery_steps"), 2),
             ),
             "reward_delivery_clamp_input": bool(reward_clamp_input),
+            "action_force": {
+                "enabled": bool(
+                    _first_non_none(
+                        action_force_map.get("enabled"),
+                        default_action_force.get("enabled", True),
+                    )
+                ),
+                "window": action_force_window,
+                "steps": _coerce_nonnegative_int(
+                    _first_non_none(action_force_map.get("steps"), default_action_force.get("steps")),
+                    int(default_action_force.get("steps", 1)),
+                ),
+                "amplitude": _coerce_float(
+                    _first_non_none(action_force_map.get("amplitude"), default_action_force.get("amplitude")),
+                    float(default_action_force.get("amplitude", 0.75)),
+                ),
+                "compartment": action_force_compartment,
+            },
+            "gate_context": {
+                "enabled": bool(
+                    _first_non_none(
+                        gate_context_map.get("enabled"),
+                        default_gate_context.get("enabled", True),
+                    )
+                ),
+                "amplitude": _coerce_float(
+                    _first_non_none(
+                        gate_context_map.get("amplitude"),
+                        default_gate_context.get("amplitude", 0.30),
+                    ),
+                    float(default_gate_context.get("amplitude", 0.30)),
+                ),
+                "compartment": gate_context_compartment,
+                "targets": gate_context_targets,
+            },
             "exploration": {
                 "enabled": bool(
                     _first_non_none(
@@ -1054,6 +1138,12 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         resolved["logic"]["exploration"]["epsilon_start"] = 0.0
     if float(logic_exploration.get("epsilon_end", 0.0)) < 0.0:
         resolved["logic"]["exploration"]["epsilon_end"] = 0.0
+    logic_gate_context = cast(Mapping[str, Any], resolved.get("logic", {}).get("gate_context", {}))
+    if float(logic_gate_context.get("amplitude", 0.0)) < 0.0:
+        resolved["logic"]["gate_context"]["amplitude"] = 0.0
+    logic_action_force = cast(Mapping[str, Any], resolved.get("logic", {}).get("action_force", {}))
+    if float(logic_action_force.get("amplitude", 0.0)) < 0.0:
+        resolved["logic"]["action_force"]["amplitude"] = 0.0
 
     # Demo-specific behavior defaults.
     if demo_id in {"learning_gate", "dopamine_plasticity"}:
@@ -1271,6 +1361,21 @@ def run_spec_from_cli_args(
             "reward_delivery_clamp_input": bool(
                 getattr(args, "logic_reward_delivery_clamp_input", True)
             ),
+            "action_force": {
+                "enabled": bool(getattr(args, "logic_action_force_enabled", True)),
+                "window": getattr(args, "logic_action_force_window", "reward_window"),
+                "steps": getattr(args, "logic_action_force_steps", 1),
+                "amplitude": getattr(args, "logic_action_drive_amplitude", 0.75),
+                "compartment": getattr(args, "logic_action_drive_compartment", "soma"),
+            },
+            "gate_context": {
+                "enabled": bool(getattr(args, "logic_gate_context_enabled", True)),
+                "amplitude": getattr(args, "logic_gate_context_amplitude", 0.30),
+                "compartment": getattr(args, "logic_gate_context_compartment", "dendrite"),
+                "targets": _coerce_string_list(
+                    getattr(args, "logic_gate_context_targets", "hidden")
+                ),
+            },
             "exploration": {
                 "enabled": bool(getattr(args, "logic_exploration_enabled", True)),
                 "mode": "epsilon_greedy",
@@ -1375,6 +1480,8 @@ def run_spec_to_cli_args(
     pruning_cfg = cast(Mapping[str, Any], spec.get("pruning", {}))
     neurogenesis_cfg = cast(Mapping[str, Any], spec.get("neurogenesis", {}))
     logic_cfg = cast(Mapping[str, Any], spec.get("logic", {}))
+    action_force_cfg = cast(Mapping[str, Any], logic_cfg.get("action_force", {}))
+    gate_context_cfg = cast(Mapping[str, Any], logic_cfg.get("gate_context", {}))
     exploration_cfg = cast(Mapping[str, Any], logic_cfg.get("exploration", {}))
 
     grid_size = _coerce_grid_size(modulators_cfg.get("grid_size"), (16, 16))
@@ -1483,6 +1590,20 @@ def run_spec_to_cli_args(
         str(int(logic_cfg.get("learn_every", 1))),
         "--logic-reward-delivery-steps",
         str(int(logic_cfg.get("reward_delivery_steps", 2))),
+        "--logic-action-force-window",
+        str(action_force_cfg.get("window", "reward_window")),
+        "--logic-action-force-steps",
+        str(int(action_force_cfg.get("steps", 1))),
+        "--logic-action-drive-amplitude",
+        str(float(action_force_cfg.get("amplitude", 0.75))),
+        "--logic-action-drive-compartment",
+        str(action_force_cfg.get("compartment", "soma")),
+        "--logic-gate-context-amplitude",
+        str(float(gate_context_cfg.get("amplitude", 0.30))),
+        "--logic-gate-context-compartment",
+        str(gate_context_cfg.get("compartment", "dendrite")),
+        "--logic-gate-context-targets",
+        ",".join(_coerce_string_list(gate_context_cfg.get("targets", ["hidden"]))),
         "--logic-epsilon-start",
         str(float(exploration_cfg.get("epsilon_start", 0.20))),
         "--logic-epsilon-end",
@@ -1566,6 +1687,16 @@ def run_spec_to_cli_args(
         "--logic-exploration-enabled"
         if bool(exploration_cfg.get("enabled", True))
         else "--no-logic-exploration-enabled"
+    )
+    args.append(
+        "--logic-action-force-enabled"
+        if bool(action_force_cfg.get("enabled", True))
+        else "--no-logic-action-force-enabled"
+    )
+    args.append(
+        "--logic-gate-context-enabled"
+        if bool(gate_context_cfg.get("enabled", True))
+        else "--no-logic-gate-context-enabled"
     )
     demo_id = cast(DemoId, spec["demo_id"])
     if demo_id in _LOGIC_DEMO_TO_GATE:
@@ -1769,9 +1900,17 @@ def feature_flags_for_run_spec(
     if monitors_enabled:
         monitor_policy = "sync_opt_in" if monitor_mode == "dashboard" else "cuda_safe"
     logic_cfg = cast(Mapping[str, Any], spec.get("logic", {}))
+    action_force_cfg = cast(Mapping[str, Any], logic_cfg.get("action_force", {}))
     exploration_cfg = cast(Mapping[str, Any], logic_cfg.get("exploration", {}))
+    gate_context_cfg = cast(Mapping[str, Any], logic_cfg.get("gate_context", {}))
     exploration_enabled = bool(exploration_cfg.get("enabled", False)) if is_logic_demo and logic_backend == "engine" else False
     reward_delivery_steps = int(logic_cfg.get("reward_delivery_steps", 0)) if is_logic_demo and logic_backend == "engine" else 0
+    action_force_enabled = bool(action_force_cfg.get("enabled", False)) if is_logic_demo and logic_backend == "engine" else False
+    gate_context_enabled = (
+        bool(gate_context_cfg.get("enabled", False))
+        if demo_id == "logic_curriculum" and logic_backend == "engine"
+        else False
+    )
     return {
         "demo_id": demo_id,
         "learning": {
@@ -1846,6 +1985,33 @@ def feature_flags_for_run_spec(
             "clamp_input": bool(logic_cfg.get("reward_delivery_clamp_input", True))
             if reward_delivery_steps > 0
             else False,
+        },
+        "action_force": {
+            "enabled": action_force_enabled,
+            "window": str(action_force_cfg.get("window", "reward_window"))
+            if action_force_enabled
+            else None,
+            "steps": int(action_force_cfg.get("steps", 0))
+            if action_force_enabled
+            else 0,
+            "amplitude": float(action_force_cfg.get("amplitude", 0.0))
+            if action_force_enabled
+            else 0.0,
+            "compartment": str(action_force_cfg.get("compartment", "soma"))
+            if action_force_enabled
+            else None,
+        },
+        "gate_context": {
+            "enabled": gate_context_enabled,
+            "amplitude": float(gate_context_cfg.get("amplitude", 0.0))
+            if gate_context_enabled
+            else 0.0,
+            "compartment": str(gate_context_cfg.get("compartment", "dendrite"))
+            if gate_context_enabled
+            else None,
+            "targets": _coerce_string_list(gate_context_cfg.get("targets"))
+            if gate_context_enabled
+            else [],
         },
         "homeostasis": {
             "enabled": bool(spec["homeostasis"]["enabled"]),

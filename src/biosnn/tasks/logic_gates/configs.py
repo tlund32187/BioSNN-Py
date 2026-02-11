@@ -18,6 +18,7 @@ WrapperCombineMode = Literal["exp", "linear"]
 LearningModulatorKind = Literal["dopamine", "acetylcholine", "noradrenaline", "serotonin"]
 ExplorationMode = Literal["epsilon_greedy"]
 ExplorationTieBreak = Literal["random_among_max", "alternate", "prefer_last"]
+CurriculumContextCompartment = Literal["soma", "dendrite", "ais", "axon"]
 
 
 def _default_reversal_potential_v() -> dict[str, float]:
@@ -161,6 +162,20 @@ class ExplorationConfig:
 
 
 @dataclass(slots=True)
+class CurriculumGateContextConfig:
+    enabled: bool = True
+    amplitude: float = 0.30
+    compartment: CurriculumContextCompartment = "dendrite"
+    targets: tuple[str, ...] = ("hidden",)
+
+    def __post_init__(self) -> None:
+        self.amplitude = max(0.0, float(self.amplitude))
+        self.compartment = cast_curriculum_context_compartment(self.compartment)
+        targets = tuple(str(token).strip().lower() for token in self.targets if str(token).strip())
+        self.targets = targets if targets else ("hidden",)
+
+
+@dataclass(slots=True)
 class LogicGateRunConfig:
     gate: LogicGate | str = LogicGate.AND
     seed: int = 7
@@ -186,6 +201,7 @@ class LogicGateRunConfig:
     wrapper: LearningWrapperConfig = field(default_factory=LearningWrapperConfig)
     excitability_modulation: ExcitabilityModulationRunConfig = field(default_factory=ExcitabilityModulationRunConfig)
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
+    curriculum_gate_context: CurriculumGateContextConfig = field(default_factory=CurriculumGateContextConfig)
     reward_delivery_steps: int = 2
     reward_delivery_clamp_input: bool = True
     learning_lr_default: float = 1e-3
@@ -290,6 +306,21 @@ class LogicGateRunConfig:
             )
         elif not isinstance(self.exploration, ExplorationConfig):
             self.exploration = ExplorationConfig()
+        if isinstance(self.curriculum_gate_context, Mapping):
+            context = self.curriculum_gate_context
+            self.curriculum_gate_context = CurriculumGateContextConfig(
+                enabled=bool(context.get("enabled", True)),
+                amplitude=float(context.get("amplitude", 0.30)),
+                compartment=cast(
+                    CurriculumContextCompartment,
+                    str(context.get("compartment", "dendrite")).strip().lower(),
+                ),
+                targets=tuple(
+                    str(token) for token in _coerce_kind_sequence(context.get("targets", ("hidden",)))
+                ),
+            )
+        elif not isinstance(self.curriculum_gate_context, CurriculumGateContextConfig):
+            self.curriculum_gate_context = CurriculumGateContextConfig()
         self.reward_delivery_steps = max(0, int(self.reward_delivery_steps))
         self.reward_delivery_clamp_input = bool(self.reward_delivery_clamp_input)
         self.learning_lr_default = max(1e-9, float(self.learning_lr_default))
@@ -377,6 +408,13 @@ def cast_exploration_tie_break(value: str) -> ExplorationTieBreak:
     return cast(ExplorationTieBreak, token)
 
 
+def cast_curriculum_context_compartment(value: str) -> CurriculumContextCompartment:
+    token = str(value).strip().lower()
+    if token not in {"soma", "dendrite", "ais", "axon"}:
+        token = "dendrite"
+    return cast(CurriculumContextCompartment, token)
+
+
 def _coerce_kind_sequence(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
         items = [part.strip() for part in value.split(",")]
@@ -437,6 +475,8 @@ def _coerce_float_pair(value: object, *, default: tuple[float, float]) -> tuple[
 __all__ = [
     "AdvancedPostVoltageSource",
     "AdvancedSynapseConfig",
+    "CurriculumContextCompartment",
+    "CurriculumGateContextConfig",
     "ExcitabilityModulationRunConfig",
     "ExplorationConfig",
     "ExplorationMode",
@@ -454,6 +494,7 @@ __all__ = [
     "cast_learning_modulator_kind",
     "cast_learning_mode",
     "cast_exploration_tie_break",
+    "cast_curriculum_context_compartment",
     "cast_modulator_field_type",
     "cast_neuron_model",
     "cast_sampling_method",

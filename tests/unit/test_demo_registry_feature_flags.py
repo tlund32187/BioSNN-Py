@@ -100,6 +100,19 @@ def test_logic_engine_feature_flags_include_exploration_and_reward_window() -> N
                     "tie_break": "alternate",
                     "seed": 7,
                 },
+                "gate_context": {
+                    "enabled": True,
+                    "amplitude": 0.3,
+                    "compartment": "dendrite",
+                    "targets": ["hidden"],
+                },
+                "action_force": {
+                    "enabled": True,
+                    "window": "reward_window",
+                    "steps": 2,
+                    "amplitude": 0.8,
+                    "compartment": "soma",
+                },
             },
         }
     )
@@ -109,6 +122,12 @@ def test_logic_engine_feature_flags_include_exploration_and_reward_window() -> N
     assert features["exploration"]["tie_break"] == "alternate"
     assert features["reward_window"]["steps"] == 2
     assert features["reward_window"]["clamp_input"] is True
+    assert features["action_force"]["enabled"] is True
+    assert features["action_force"]["window"] == "reward_window"
+    assert features["action_force"]["steps"] == 2
+    assert features["action_force"]["amplitude"] == pytest.approx(0.8)
+    assert features["gate_context"]["enabled"] is True
+    assert features["gate_context"]["amplitude"] == pytest.approx(0.3)
 
 
 def test_feature_flags_reflect_monitor_toggle() -> None:
@@ -295,6 +314,19 @@ def test_run_spec_cli_round_trip_extended_fields(tmp_path) -> None:
                 "learn_every": 3,
                 "reward_delivery_steps": 2,
                 "reward_delivery_clamp_input": True,
+                "gate_context": {
+                    "enabled": True,
+                    "amplitude": 0.42,
+                    "compartment": "soma",
+                    "targets": ["hidden", "out"],
+                },
+                "action_force": {
+                    "enabled": True,
+                    "window": "post_decision",
+                    "steps": 1,
+                    "amplitude": 0.9,
+                    "compartment": "dendrite",
+                },
                 "exploration": {
                     "enabled": True,
                     "mode": "epsilon_greedy",
@@ -353,6 +385,15 @@ def test_run_spec_cli_round_trip_extended_fields(tmp_path) -> None:
     assert rt["logic"]["learn_every"] == 3
     assert rt["logic"]["reward_delivery_steps"] == 2
     assert rt["logic"]["reward_delivery_clamp_input"] is True
+    assert rt["logic"]["action_force"]["enabled"] is True
+    assert rt["logic"]["action_force"]["window"] == "post_decision"
+    assert rt["logic"]["action_force"]["steps"] == 1
+    assert rt["logic"]["action_force"]["amplitude"] == pytest.approx(0.9)
+    assert rt["logic"]["action_force"]["compartment"] == "dendrite"
+    assert rt["logic"]["gate_context"]["enabled"] is True
+    assert rt["logic"]["gate_context"]["amplitude"] == pytest.approx(0.42)
+    assert rt["logic"]["gate_context"]["compartment"] == "soma"
+    assert rt["logic"]["gate_context"]["targets"] == ["hidden", "out"]
     assert rt["logic"]["exploration"]["enabled"] is True
     assert rt["logic"]["exploration"]["epsilon_start"] == 0.3
     assert rt["logic"]["exploration"]["epsilon_end"] == 0.05

@@ -148,6 +148,102 @@ def test_run_logic_gate_curriculum_engine_writes_phase_summary(tmp_path) -> None
     assert (out_dir / "weights.csv").stat().st_size > 0
 
 
+def test_run_logic_gate_curriculum_engine_emits_gate_context_for_active_gate(tmp_path) -> None:
+    pytest.importorskip("torch")
+    cfg = LogicGateRunConfig(
+        gate=LogicGate.AND,
+        seed=19,
+        steps=4,
+        sim_steps_per_trial=1,
+        device="cpu",
+        learning_mode="none",
+        out_dir=tmp_path / "logic_engine_curriculum_gate_context",
+        export_every=2,
+    )
+    run_spec = _base_run_spec(backend="spmm_fused", learning_rule="none")
+    run_spec["learning"] = {"enabled": False, "rule": "none", "lr": 0.0}
+    run_spec["modulators"] = {"enabled": False, "kinds": []}
+    run_spec["logic_curriculum_gates"] = "or,and"
+    run_spec["logic_curriculum_replay_ratio"] = 0.0
+    run_spec["logic"] = {
+        "reward_delivery_steps": 0,
+        "reward_delivery_clamp_input": True,
+        "exploration": {
+            "enabled": False,
+            "mode": "epsilon_greedy",
+            "epsilon_start": 0.0,
+            "epsilon_end": 0.0,
+            "epsilon_decay_trials": 1,
+            "tie_break": "random_among_max",
+            "seed": 19,
+        },
+        "gate_context": {
+            "enabled": True,
+            "amplitude": 0.25,
+            "compartment": "dendrite",
+            "targets": ["hidden"],
+        },
+    }
+
+    result = run_logic_gate_curriculum_engine(cfg, run_spec)
+    trials_csv = result["out_dir"] / "trials.csv"
+    with trials_csv.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows
+    expected_by_gate = {"or": 0, "and": 1}
+    for row in rows:
+        train_gate = str(row.get("train_gate", "")).strip().lower()
+        assert int((row.get("gate_context_enabled") or "0").strip() or 0) == 1
+        assert int((row.get("gate_context_index") or "-1").strip() or -1) == expected_by_gate[train_gate]
+        assert float((row.get("gate_context_amplitude") or "0").strip() or 0.0) == pytest.approx(0.25)
+
+
+def test_run_logic_gate_curriculum_engine_can_disable_gate_context(tmp_path) -> None:
+    pytest.importorskip("torch")
+    cfg = LogicGateRunConfig(
+        gate=LogicGate.AND,
+        seed=23,
+        steps=4,
+        sim_steps_per_trial=1,
+        device="cpu",
+        learning_mode="none",
+        out_dir=tmp_path / "logic_engine_curriculum_gate_context_off",
+        export_every=2,
+    )
+    run_spec = _base_run_spec(backend="spmm_fused", learning_rule="none")
+    run_spec["learning"] = {"enabled": False, "rule": "none", "lr": 0.0}
+    run_spec["modulators"] = {"enabled": False, "kinds": []}
+    run_spec["logic_curriculum_gates"] = "or,and"
+    run_spec["logic_curriculum_replay_ratio"] = 0.0
+    run_spec["logic"] = {
+        "reward_delivery_steps": 0,
+        "reward_delivery_clamp_input": True,
+        "exploration": {
+            "enabled": False,
+            "mode": "epsilon_greedy",
+            "epsilon_start": 0.0,
+            "epsilon_end": 0.0,
+            "epsilon_decay_trials": 1,
+            "tie_break": "random_among_max",
+            "seed": 23,
+        },
+        "gate_context": {
+            "enabled": False,
+            "amplitude": 0.25,
+            "compartment": "dendrite",
+            "targets": ["hidden"],
+        },
+    }
+
+    result = run_logic_gate_curriculum_engine(cfg, run_spec)
+    trials_csv = result["out_dir"] / "trials.csv"
+    with trials_csv.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows
+    assert all(int((row.get("gate_context_enabled") or "1").strip() or 1) == 0 for row in rows)
+    assert all(int((row.get("gate_context_index") or "0").strip() or 0) == -1 for row in rows)
+
+
 def test_run_logic_gate_curriculum_engine_bio_modulation_toggles_change_behavior(tmp_path) -> None:
     pytest.importorskip("torch")
     baseline_cfg = LogicGateRunConfig(

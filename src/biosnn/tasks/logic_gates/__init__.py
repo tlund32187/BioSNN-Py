@@ -3,6 +3,8 @@
 from .configs import (
     AdvancedPostVoltageSource,
     AdvancedSynapseConfig,
+    CurriculumContextCompartment,
+    CurriculumGateContextConfig,
     LogicGateNeuronModel,
     LogicGateRunConfig,
 )
@@ -24,6 +26,8 @@ __all__ = [
     "INPUT_NEURON_INDICES",
     "AdvancedPostVoltageSource",
     "AdvancedSynapseConfig",
+    "CurriculumContextCompartment",
+    "CurriculumGateContextConfig",
     "LogicGate",
     "LogicGateNeuronModel",
     "LogicGateRunConfig",

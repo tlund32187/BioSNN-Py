@@ -1186,7 +1186,43 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--logic-reward-delivery-clamp-input",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="force zero input during post-trial reward delivery steps",
+        help="keep the same trial input during post-trial reward delivery steps",
+    )
+    parser.add_argument(
+        "--logic-action-force-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="inject drive on chosen output action to commit exploration decisions",
+    )
+    parser.add_argument(
+        "--logic-action-force-window",
+        choices=["reward_window", "post_decision"],
+        default="reward_window",
+    )
+    parser.add_argument("--logic-action-force-steps", type=int, default=1)
+    parser.add_argument("--logic-action-drive-amplitude", type=float, default=0.75)
+    parser.add_argument(
+        "--logic-action-drive-compartment",
+        choices=["soma", "dendrite", "ais", "axon"],
+        default="soma",
+    )
+    parser.add_argument(
+        "--logic-gate-context-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="inject curriculum gate identity context drive in engine backend",
+    )
+    parser.add_argument("--logic-gate-context-amplitude", type=float, default=0.30)
+    parser.add_argument(
+        "--logic-gate-context-compartment",
+        choices=["soma", "dendrite", "ais", "axon"],
+        default="dendrite",
+    )
+    parser.add_argument(
+        "--logic-gate-context-targets",
+        type=str,
+        default="hidden",
+        help="comma-separated population role targets (e.g. hidden,out,in)",
     )
     parser.add_argument("--n", type=int, default=100, help="number of neurons")
     parser.add_argument("--p", type=float, default=0.05, help="connection probability")

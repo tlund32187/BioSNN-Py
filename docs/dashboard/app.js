@@ -74,6 +74,13 @@ const runNodes = {
   epsilonDecayTrialsInput: document.getElementById("runEpsilonDecayTrialsInput"),
   tieBreakSelect: document.getElementById("runTieBreakSelect"),
   rewardDeliveryStepsInput: document.getElementById("runRewardDeliveryStepsInput"),
+  gateContextEnabledToggle: document.getElementById("runGateContextEnabledToggle"),
+  gateContextInputLikeToggle: document.getElementById("runGateContextInputLikeToggle"),
+  gateContextAmplitudeInput: document.getElementById("runGateContextAmplitudeInput"),
+  gateContextCompartmentWrap: document.getElementById("runGateContextCompartmentWrap"),
+  gateContextCompartmentSelect: document.getElementById("runGateContextCompartmentSelect"),
+  gateContextTargetsWrap: document.getElementById("runGateContextTargetsWrap"),
+  gateContextTargetsSelect: document.getElementById("runGateContextTargetsSelect"),
   advancedSynapseEnabledToggle: document.getElementById("runAdvancedSynapseEnabledToggle"),
   advancedSynapseConductanceToggle: document.getElementById("runAdvancedSynapseConductanceToggle"),
   advancedSynapseNmdaBlockToggle: document.getElementById("runAdvancedSynapseNmdaBlockToggle"),
@@ -308,7 +315,7 @@ const FALLBACK_DEMO_DEFINITIONS = [
   {
     id: "logic_curriculum",
     name: "Logic Curriculum",
-    defaults: { demo_id: "logic_curriculum", steps: 2500, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.1 }, modulators: { enabled: false, kinds: [] }, logic_curriculum_gates: "or,and,nor,nand,xor,xnor", logic_curriculum_replay_ratio: 0.35, logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
+    defaults: { demo_id: "logic_curriculum", steps: 2500, device: "cpu", fused_layout: "auto", ring_strategy: "dense", learning: { enabled: true, rule: "rstdp", lr: 0.001 }, modulators: { enabled: false, kinds: [], amount: 0.1, decay_tau: 0.05 }, logic_curriculum_gates: "or,and,nor,nand,xor,xnor", logic_curriculum_replay_ratio: 0.0, logic: { reward_delivery_steps: 2, reward_delivery_clamp_input: true, exploration: { enabled: true, mode: "epsilon_greedy", epsilon_start: 0.2, epsilon_end: 0.01, epsilon_decay_trials: 3000, tie_break: "random_among_max", seed: 123 } } },
   },
   {
     id: "logic_and",
@@ -3461,6 +3468,28 @@ function updateAdvancedBiologyVisibility() {
   if (runNodes.advancedSection && isLogicDemo) {
     runNodes.advancedSection.open = true;
   }
+  updateGateContextControlVisibility();
+}
+
+function isInputLikeGateContext(gateContext) {
+  const cfg = gateContext && typeof gateContext === "object" ? gateContext : {};
+  const compartment = String(cfg.compartment || "dendrite").trim().toLowerCase();
+  const targets = Array.isArray(cfg.targets)
+    ? cfg.targets.map((item) => String(item).trim().toLowerCase()).filter(Boolean)
+    : ["hidden"];
+  return targets.length === 1 && targets[0] === "hidden" && compartment === "dendrite";
+}
+
+function updateGateContextControlVisibility() {
+  const inputLike = runNodes.gateContextInputLikeToggle
+    ? Boolean(runNodes.gateContextInputLikeToggle.checked)
+    : true;
+  if (runNodes.gateContextCompartmentWrap) {
+    runNodes.gateContextCompartmentWrap.classList.toggle("hidden", inputLike);
+  }
+  if (runNodes.gateContextTargetsWrap) {
+    runNodes.gateContextTargetsWrap.classList.toggle("hidden", inputLike);
+  }
 }
 
 function setRunControlsEnabled(enabled) {
@@ -3480,6 +3509,11 @@ function setRunControlsEnabled(enabled) {
     runNodes.epsilonDecayTrialsInput,
     runNodes.tieBreakSelect,
     runNodes.rewardDeliveryStepsInput,
+    runNodes.gateContextEnabledToggle,
+    runNodes.gateContextInputLikeToggle,
+    runNodes.gateContextAmplitudeInput,
+    runNodes.gateContextCompartmentSelect,
+    runNodes.gateContextTargetsSelect,
     runNodes.advancedSynapseEnabledToggle,
     runNodes.advancedSynapseConductanceToggle,
     runNodes.advancedSynapseNmdaBlockToggle,
@@ -3534,6 +3568,8 @@ function renderFeatureChecklist(features) {
   const excitability = features.excitability_modulation || {};
   const exploration = features.exploration || {};
   const rewardWindow = features.reward_window || {};
+  const actionForce = features.action_force || {};
+  const gateContext = features.gate_context || {};
   const monitor = features.monitor || {};
   const monitorsEnabled = monitor.enabled !== false;
   const items = [
@@ -3556,6 +3592,23 @@ function renderFeatureChecklist(features) {
         : ""),
     `Reward window: <strong>${(rewardWindow.steps || 0) > 0 ? "ON" : "OFF"}</strong>` +
       ` (${rewardWindow.steps ?? 0} step${Number(rewardWindow.steps || 0) === 1 ? "" : "s"})`,
+    `Action force: <strong>${actionForce.enabled ? "ON" : "OFF"}</strong>` +
+      (actionForce.enabled
+        ? ` (${actionForce.window || "reward_window"}, amp=${actionForce.amplitude ?? "?"})`
+        : ""),
+    (() => {
+      const gateContextTargets = Array.isArray(gateContext.targets)
+        ? gateContext.targets.map((item) => String(item).trim().toLowerCase()).filter(Boolean)
+        : [];
+      const gateContextInputLike =
+        gateContextTargets.length === 1 &&
+        gateContextTargets[0] === "hidden" &&
+        String(gateContext.compartment || "dendrite").trim().toLowerCase() === "dendrite";
+      return `Gate context: <strong>${gateContext.enabled ? "ON" : "OFF"}</strong>` +
+        (gateContext.enabled
+          ? ` (${gateContextInputLike ? "input_like hidden->dendrite, " : ""}amp=${gateContext.amplitude ?? "?"})`
+          : "");
+    })(),
     `Fused layout: <strong>${synapse.fused_layout || "unknown"}</strong>`,
     `Ring: <strong>${synapse.ring_strategy || "unknown"}</strong>` +
       ` (dtype=${synapse.ring_dtype || "none"})`,
@@ -3578,6 +3631,7 @@ function applyRunSpecToControls(spec) {
       : {};
   const logic = spec.logic && typeof spec.logic === "object" ? spec.logic : {};
   const exploration = logic.exploration && typeof logic.exploration === "object" ? logic.exploration : {};
+  const gateContext = logic.gate_context && typeof logic.gate_context === "object" ? logic.gate_context : {};
   const homeostasis = spec.homeostasis && typeof spec.homeostasis === "object" ? spec.homeostasis : {};
   const pruning = spec.pruning && typeof spec.pruning === "object" ? spec.pruning : {};
   const neurogenesis = spec.neurogenesis && typeof spec.neurogenesis === "object" ? spec.neurogenesis : {};
@@ -3625,6 +3679,25 @@ function applyRunSpecToControls(spec) {
     runNodes.rewardDeliveryStepsInput.value = String(
       Math.max(0, parseInteger(logic.reward_delivery_steps) || 2)
     );
+  }
+  if (runNodes.gateContextEnabledToggle) {
+    runNodes.gateContextEnabledToggle.checked =
+      gateContext.enabled === undefined ? true : Boolean(gateContext.enabled);
+  }
+  if (runNodes.gateContextAmplitudeInput) {
+    runNodes.gateContextAmplitudeInput.value = String(
+      Math.max(0, parseNumberOr(gateContext.amplitude, 0.3))
+    );
+  }
+  if (runNodes.gateContextCompartmentSelect) {
+    runNodes.gateContextCompartmentSelect.value = String(gateContext.compartment || "dendrite");
+  }
+  if (runNodes.gateContextTargetsSelect) {
+    const targets = Array.isArray(gateContext.targets) ? gateContext.targets : ["hidden"];
+    setMultiSelectValues(runNodes.gateContextTargetsSelect, targets);
+  }
+  if (runNodes.gateContextInputLikeToggle) {
+    runNodes.gateContextInputLikeToggle.checked = isInputLikeGateContext(gateContext);
   }
   if (runNodes.advancedSynapseEnabledToggle) {
     runNodes.advancedSynapseEnabledToggle.checked = Boolean(advancedSynapse.enabled);
@@ -3734,6 +3807,10 @@ function buildRunSpecFromControls() {
     baseLogic.exploration && typeof baseLogic.exploration === "object"
       ? baseLogic.exploration
       : {};
+  const baseGateContext =
+    baseLogic.gate_context && typeof baseLogic.gate_context === "object"
+      ? baseLogic.gate_context
+      : {};
   const baseHomeostasis = base.homeostasis && typeof base.homeostasis === "object" ? base.homeostasis : {};
   const basePruning = base.pruning && typeof base.pruning === "object" ? base.pruning : {};
   const baseNeurogenesis = base.neurogenesis && typeof base.neurogenesis === "object" ? base.neurogenesis : {};
@@ -3791,6 +3868,34 @@ function buildRunSpecFromControls() {
       parseInteger(baseLogic.reward_delivery_steps) ||
       2
   );
+  const gateContextEnabled = Boolean(
+    runNodes.gateContextEnabledToggle?.checked ??
+      (baseGateContext.enabled === undefined ? true : Boolean(baseGateContext.enabled))
+  );
+  const gateContextAmplitude = Math.max(
+    0,
+    parseNumberOr(
+      runNodes.gateContextAmplitudeInput?.value,
+      parseNumberOr(baseGateContext.amplitude, 0.3)
+    )
+  );
+  const gateContextCompartment = String(
+    runNodes.gateContextCompartmentSelect?.value || baseGateContext.compartment || "dendrite"
+  );
+  const gateContextInputLike = Boolean(
+    runNodes.gateContextInputLikeToggle?.checked ??
+      isInputLikeGateContext(baseGateContext)
+  );
+  const selectedGateContextTargets = getMultiSelectValues(runNodes.gateContextTargetsSelect);
+  const baseGateContextTargets = Array.isArray(baseGateContext.targets)
+    ? baseGateContext.targets.map((item) => String(item).trim()).filter(Boolean)
+    : [];
+  const gateContextTargets =
+    gateContextInputLike
+      ? ["hidden"]
+      : (selectedGateContextTargets.length > 0
+        ? selectedGateContextTargets
+        : (baseGateContextTargets.length > 0 ? baseGateContextTargets : ["hidden"]));
   const baseLogicLearningMode = String(base.logic_learning_mode || "rstdp").trim().toLowerCase();
   const logicLearningMode = isLogicDemo
     ? (learningEnabled
@@ -3820,6 +3925,13 @@ function buildRunSpecFromControls() {
         baseLogic.reward_delivery_clamp_input === undefined
           ? true
           : Boolean(baseLogic.reward_delivery_clamp_input),
+      gate_context: {
+        ...baseGateContext,
+        enabled: gateContextEnabled,
+        amplitude: gateContextAmplitude,
+        compartment: gateContextInputLike ? "dendrite" : gateContextCompartment,
+        targets: gateContextTargets,
+      },
       exploration: {
         ...baseExploration,
         enabled: explorationEnabled,
@@ -4291,6 +4403,11 @@ if (runNodes.demoSelect) {
     if (defaults) {
       applyRunSpecToControls(defaults);
     }
+  });
+}
+if (runNodes.gateContextInputLikeToggle) {
+  runNodes.gateContextInputLikeToggle.addEventListener("change", () => {
+    updateGateContextControlVisibility();
   });
 }
 if (runNodes.startButton) {

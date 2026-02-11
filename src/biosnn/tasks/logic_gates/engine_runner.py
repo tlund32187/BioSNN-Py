@@ -51,7 +51,7 @@ from biosnn.simulation.engine import TorchNetworkEngine
 from biosnn.simulation.network import ModulatorSpec, PopulationSpec, ProjectionSpec
 from biosnn.synapses.dynamics.delayed_sparse_matmul import DelayedSparseMatmulSynapse
 
-from .configs import ExplorationConfig, LogicGateRunConfig
+from .configs import CurriculumGateContextConfig, ExplorationConfig, LogicGateRunConfig
 from .datasets import LogicGate, coerce_gate, make_truth_table, sample_case_indices
 from .encoding import INPUT_NEURON_INDICES, OUTPUT_NEURON_INDICES, encode_inputs
 from .evaluators import PassTracker, eval_accuracy
@@ -74,6 +74,8 @@ class _EngineBuild:
     output_population: str
     hidden_populations: tuple[str, ...]
     current_input_drive: dict[str, Any]
+    context_drive_by_population: dict[str, Mapping[Compartment, Any]]
+    action_drive_by_population: dict[str, Mapping[Compartment, Any]]
     pending_releases: dict[ModulatorKind, float]
     modulator_kinds: tuple[ModulatorKind, ...]
     modulator_amount: float
@@ -228,6 +230,51 @@ def _resolve_reward_window_cfg(
     return int(reward_steps), bool(clamp_input)
 
 
+def _resolve_action_force_cfg(
+    run_spec: Mapping[str, Any],
+    *,
+    default_enabled: bool,
+    default_window: str = "reward_window",
+    default_steps: int = 1,
+    default_amplitude: float = 0.75,
+    default_compartment: str = "soma",
+) -> dict[str, Any]:
+    logic = _as_mapping(run_spec.get("logic"))
+    raw = _as_mapping(_first_non_none(logic.get("action_force"), run_spec.get("action_force")))
+    return {
+        "enabled": bool(_first_non_none(raw.get("enabled"), default_enabled)),
+        "window": _coerce_choice(
+            _first_non_none(raw.get("window"), default_window),
+            allowed={"reward_window", "post_decision"},
+            default=default_window,
+        ),
+        "steps": _coerce_nonnegative_int(
+            _first_non_none(raw.get("steps"), default_steps),
+            default_steps,
+        ),
+        "amplitude": max(
+            0.0,
+            _coerce_float(_first_non_none(raw.get("amplitude"), default_amplitude), default_amplitude),
+        ),
+        "compartment": _coerce_choice(
+            _first_non_none(raw.get("compartment"), default_compartment),
+            allowed={"soma", "dendrite", "ais", "axon"},
+            default=default_compartment,
+        ),
+    }
+
+
+def _reward_window_input_drive(
+    *,
+    input_drive: Any,
+    clamp_input: bool,
+) -> Any:
+    # Clamp=True keeps the same stimulus input during reward steps.
+    if bool(clamp_input):
+        return input_drive
+    return input_drive.new_zeros(input_drive.shape)
+
+
 def _effective_curriculum_engine_run_spec(
     *,
     run_spec: Mapping[str, Any],
@@ -255,8 +302,44 @@ def _effective_curriculum_engine_run_spec(
         logic["reward_delivery_clamp_input"] = bool(config.reward_delivery_clamp_input)
     if logic.get("exploration") is None:
         logic["exploration"] = asdict(config.exploration)
+    if logic.get("gate_context") is None:
+        logic["gate_context"] = asdict(config.curriculum_gate_context)
+    if logic.get("action_force") is None:
+        logic["action_force"] = {
+            "enabled": True,
+            "window": "reward_window",
+            "steps": 1,
+            "amplitude": 0.75,
+            "compartment": "soma",
+        }
     effective["logic"] = logic
     return effective
+
+
+def _resolve_curriculum_gate_context_cfg(
+    run_spec: Mapping[str, Any],
+    *,
+    default_cfg: CurriculumGateContextConfig,
+) -> dict[str, Any]:
+    logic = _as_mapping(run_spec.get("logic"))
+    raw = _as_mapping(_first_non_none(logic.get("gate_context"), run_spec.get("gate_context")))
+    targets = _coerce_string_list(_first_non_none(raw.get("targets"), default_cfg.targets))
+    if not targets:
+        targets = [str(token) for token in default_cfg.targets]
+    compartment = _coerce_choice(
+        _first_non_none(raw.get("compartment"), default_cfg.compartment),
+        allowed={"soma", "dendrite", "ais", "axon"},
+        default=str(default_cfg.compartment),
+    )
+    return {
+        "enabled": bool(_first_non_none(raw.get("enabled"), default_cfg.enabled)),
+        "amplitude": max(
+            0.0,
+            _coerce_float(_first_non_none(raw.get("amplitude"), default_cfg.amplitude), default_cfg.amplitude),
+        ),
+        "compartment": compartment,
+        "targets": targets,
+    }
 
 
 def run_logic_gate_engine(
@@ -312,6 +395,14 @@ def run_logic_gate_engine(
         run_spec,
         default_steps=0,
         default_clamp_input=config.reward_delivery_clamp_input,
+    )
+    action_force_cfg = _resolve_action_force_cfg(
+        run_spec,
+        default_enabled=False,
+        default_window="reward_window",
+        default_steps=1,
+        default_amplitude=0.75,
+        default_compartment="soma",
     )
 
     monitors_enabled = _resolve_monitors_enabled(run_spec)
@@ -395,13 +486,19 @@ def run_logic_gate_engine(
                 is_eval=False,
                 rng=decision_rng,
             )
+            chosen_action = int(pred_bit)
             target_bit = int((target_value >= 0.5).item())
-            correct = int(pred_bit == target_bit)
+            correct = int(chosen_action == target_bit)
             sampled_correct += correct
             rolling_correct.append(correct)
             trial_acc_rolling = sum(rolling_correct) / float(len(rolling_correct))
-            predictions[case_idx] = float(pred_bit)
+            predictions[case_idx] = float(chosen_action)
             case_scores.copy_(predictions)
+
+            action_forced = 0
+            action_drive_amplitude = 0.0
+            action_window = str(action_force_cfg["window"])
+            action_steps = int(action_force_cfg["steps"])
 
             dopamine_pulse = _queue_trial_feedback_releases(
                 pending_releases=engine_build.pending_releases,
@@ -410,18 +507,43 @@ def run_logic_gate_engine(
                 correct=bool(correct),
             )
             if reward_delivery_steps > 0:
-                reward_input = (
-                    input_drive.new_zeros(input_drive.shape)
-                    if reward_delivery_clamp_input
-                    else input_drive
+                reward_input = _reward_window_input_drive(
+                    input_drive=input_drive,
+                    clamp_input=reward_delivery_clamp_input,
                 )
-                _, _, sim_step = _run_trial_steps(
+                if (
+                    bool(action_force_cfg["enabled"])
+                    and action_forced == 0
+                    and action_window in {"reward_window", "post_decision"}
+                    and int(action_steps) > 0
+                ):
+                    forced = _set_action_force_drive(
+                        engine_build=engine_build,
+                        chosen_action=chosen_action,
+                        amplitude=float(action_force_cfg["amplitude"]),
+                        compartment=str(action_force_cfg["compartment"]),
+                    )
+                    if forced:
+                        action_forced = 1
+                        action_drive_amplitude = float(action_force_cfg["amplitude"])
+                force_steps = (
+                    min(max(0, int(action_steps)), max(0, int(reward_delivery_steps)))
+                    if action_forced
+                    else 0
+                )
+                reward_out_counts, _, sim_step = _run_trial_steps(
                     engine_build=engine_build,
                     input_drive=reward_input,
                     sim_steps_per_trial=reward_delivery_steps,
+                    action_force_steps=force_steps,
                     step_offset=sim_step,
                     monitor_writers=monitor_writers,
                 )
+                if action_forced and action_window == "reward_window":
+                    out_spike_counts.add_(reward_out_counts)
+            else:
+                # Prevent delayed modulators from spilling into the next trial stimulus window.
+                _discard_pending_releases(pending_releases=engine_build.pending_releases)
             (
                 mean_eligibility_abs,
                 mean_abs_dw,
@@ -459,10 +581,13 @@ def run_logic_gate_engine(
                 "tie_wta": tie_behavior,
                 "epsilon": float(action_info.get("epsilon", 0.0)),
                 "explored": int(bool(action_info.get("explored", False))),
-                "greedy_action": int(action_info.get("greedy", pred_bit)),
+                "greedy_action": int(action_info.get("greedy", chosen_action)),
+                "chosen_action": chosen_action,
+                "action_forced": int(action_forced),
+                "action_drive_amplitude": float(action_drive_amplitude),
                 "no_output_spikes": no_spikes,
                 "target": target_bit,
-                "pred": pred_bit,
+                "pred": chosen_action,
                 "correct": correct,
             }
             trial_sink.write_row(trial_row)
@@ -504,7 +629,7 @@ def run_logic_gate_engine(
                     step=sim_step,
                 )
 
-            last_pred = pred_bit
+            last_pred = chosen_action
             last_trial_acc_rolling = trial_acc_rolling
             last_mean_abs_dw = mean_abs_dw
     finally:
@@ -562,6 +687,7 @@ def _run_trial_steps(
     engine_build: _EngineBuild,
     input_drive: Any,
     sim_steps_per_trial: int,
+    action_force_steps: int = 0,
     step_offset: int = 0,
     monitor_writers: _MonitorWriters | None = None,
 ) -> tuple[Any, Any, int]:
@@ -584,11 +710,14 @@ def _run_trial_steps(
         torch.zeros_like(hidden_spikes, dtype=input_drive.dtype) for hidden_spikes in hidden_spikes_by_pop
     ]
     global_step = int(step_offset)
+    force_steps = max(0, int(action_force_steps))
 
     try:
         for trial_step_idx in range(max(1, int(sim_steps_per_trial))):
             if mod_state:
                 mod_state["trial_step_idx"] = int(trial_step_idx)
+            if force_steps > 0 and int(trial_step_idx) >= force_steps:
+                _clear_action_force_drive(engine_build=engine_build)
             engine_build.engine.step()
             global_step += 1
             _write_spike_events_for_step(
@@ -606,6 +735,8 @@ def _run_trial_steps(
                     engine_build.engine._pop_states[pop_name].spikes.to(dtype=input_drive.dtype)
                 )
     finally:
+        if force_steps > 0:
+            _clear_action_force_drive(engine_build=engine_build)
         if mod_state:
             mod_state["input_active"] = False
             mod_state["trial_step_idx"] = -1
@@ -614,6 +745,182 @@ def _run_trial_steps(
     else:
         hidden_counts = torch.cat(hidden_counts_by_pop, dim=0)
     return output_counts, hidden_counts, global_step
+
+
+def _build_curriculum_gate_context_cache(
+    *,
+    engine_build: _EngineBuild,
+    gate_count: int,
+    cfg: Mapping[str, Any],
+) -> dict[int, dict[str, Mapping[Compartment, Any]]]:
+    torch = require_torch()
+    if gate_count <= 0 or not bool(cfg.get("enabled", False)):
+        return {}
+    amplitude = max(0.0, float(cfg.get("amplitude", 0.0)))
+    if amplitude <= 0.0:
+        return {}
+    target_pops = _resolve_context_target_populations(
+        engine_build=engine_build,
+        targets=cast(Sequence[Any], cfg.get("targets", ("hidden",))),
+    )
+    if not target_pops:
+        return {}
+    compartment = _compartment_from_name(str(cfg.get("compartment", "dendrite")))
+    cache: dict[int, dict[str, Mapping[Compartment, Any]]] = {}
+    for gate_index in range(gate_count):
+        pop_drive: dict[str, Mapping[Compartment, Any]] = {}
+        for pop_name in target_pops:
+            pop_state = engine_build.engine._pop_states.get(pop_name)
+            if pop_state is None:
+                continue
+            n = int(pop_state.spikes.numel())
+            if n <= 0:
+                continue
+            drive = _build_gate_context_vector(
+                n=n,
+                gate_index=gate_index,
+                gate_count=gate_count,
+                amplitude=amplitude,
+                device=pop_state.spikes.device,
+                dtype=torch.float32 if pop_state.spikes.dtype == torch.bool else pop_state.spikes.dtype,
+            )
+            pop_drive[pop_name] = {compartment: drive}
+        cache[int(gate_index)] = pop_drive
+    return cache
+
+
+def _activate_curriculum_gate_context(
+    *,
+    engine_build: _EngineBuild,
+    gate_context_cache: Mapping[int, Mapping[str, Mapping[Compartment, Any]]],
+    gate_index: int,
+) -> None:
+    engine_build.context_drive_by_population.clear()
+    if not gate_context_cache:
+        return
+    pop_drive = gate_context_cache.get(int(gate_index))
+    if not pop_drive:
+        return
+    engine_build.context_drive_by_population.update(pop_drive)
+
+
+def _set_action_force_drive(
+    *,
+    engine_build: _EngineBuild,
+    chosen_action: int,
+    amplitude: float,
+    compartment: str,
+) -> bool:
+    torch = require_torch()
+    if float(amplitude) <= 0.0:
+        return False
+    pop_state = engine_build.engine._pop_states.get(engine_build.output_population)
+    if pop_state is None:
+        return False
+    spikes = pop_state.spikes
+    n_out = int(spikes.numel())
+    if n_out <= 0:
+        return False
+    action_idx = int(chosen_action)
+    if action_idx < 0 or action_idx >= n_out:
+        return False
+    drive = torch.zeros(
+        (n_out,),
+        device=spikes.device,
+        dtype=torch.float32 if spikes.dtype == torch.bool else spikes.dtype,
+    )
+    drive[action_idx] = float(amplitude)
+    engine_build.action_drive_by_population.clear()
+    engine_build.action_drive_by_population[engine_build.output_population] = {
+        _compartment_from_name(compartment): drive
+    }
+    return True
+
+
+def _clear_action_force_drive(*, engine_build: _EngineBuild) -> None:
+    engine_build.action_drive_by_population.clear()
+
+
+def _discard_pending_releases(*, pending_releases: dict[ModulatorKind, float]) -> None:
+    if not pending_releases:
+        return
+    for kind in tuple(pending_releases.keys()):
+        pending_releases[kind] = 0.0
+
+
+def _resolve_context_target_populations(
+    *,
+    engine_build: _EngineBuild,
+    targets: Sequence[Any],
+) -> tuple[str, ...]:
+    available = (
+        engine_build.input_population,
+        *engine_build.hidden_populations,
+        engine_build.output_population,
+    )
+    lookup = {name.strip().lower(): name for name in available}
+    resolved: list[str] = []
+
+    def _append(name: str) -> None:
+        if name not in resolved:
+            resolved.append(name)
+
+    for raw in targets:
+        token = str(raw).strip().lower()
+        if not token:
+            continue
+        if token == "hidden":
+            for pop_name in engine_build.hidden_populations:
+                _append(pop_name)
+            continue
+        if token in {"out", "output"}:
+            _append(engine_build.output_population)
+            continue
+        if token in {"in", "input"}:
+            _append(engine_build.input_population)
+            continue
+        match = lookup.get(token)
+        if match is not None:
+            _append(match)
+    if resolved:
+        return tuple(resolved)
+    return tuple(engine_build.hidden_populations)
+
+
+def _build_gate_context_vector(
+    *,
+    n: int,
+    gate_index: int,
+    gate_count: int,
+    amplitude: float,
+    device: Any,
+    dtype: Any,
+) -> Any:
+    torch = require_torch()
+    out = torch.zeros((int(n),), device=device, dtype=dtype)
+    if int(n) <= 0 or gate_count <= 0 or amplitude <= 0.0:
+        return out
+    idx = int(gate_index) % max(1, int(gate_count))
+    if int(gate_count) <= int(n):
+        out[idx] = float(amplitude)
+        return out
+    primary = idx % int(n)
+    secondary = (idx // int(n)) % int(n)
+    out[primary] = float(amplitude)
+    if secondary != primary:
+        out[secondary] = float(amplitude) * 0.5
+    return out
+
+
+def _compartment_from_name(value: str) -> Compartment:
+    token = str(value).strip().lower()
+    if token == "dendrite":
+        return Compartment.DENDRITE
+    if token == "ais":
+        return Compartment.AIS
+    if token == "axon":
+        return Compartment.AXON
+    return Compartment.SOMA
 
 
 def _learning_stats(
@@ -944,6 +1251,24 @@ def run_logic_gate_curriculum_engine(
         default_steps=config.reward_delivery_steps,
         default_clamp_input=config.reward_delivery_clamp_input,
     )
+    action_force_cfg = _resolve_action_force_cfg(
+        engine_run_spec,
+        default_enabled=True,
+        default_window="reward_window",
+        default_steps=1,
+        default_amplitude=0.75,
+        default_compartment="soma",
+    )
+    gate_context_cfg = _resolve_curriculum_gate_context_cfg(
+        engine_run_spec,
+        default_cfg=config.curriculum_gate_context,
+    )
+    gate_to_index = {gate_value: idx for idx, gate_value in enumerate(gate_sequence)}
+    gate_context_cache = _build_curriculum_gate_context_cache(
+        engine_build=engine_build,
+        gate_count=len(gate_sequence),
+        cfg=gate_context_cfg,
+    )
 
     monitors_enabled = _resolve_monitors_enabled(engine_run_spec)
     trial_flush_every = 1 if monitors_enabled else max(1, config.export_every)
@@ -1000,6 +1325,11 @@ def run_logic_gate_curriculum_engine(
                 active_gate = gate_sequence[int(train_gate_idx[local_trial - 1].item())]
                 train_targets = targets_by_gate[active_gate]
                 target_value = train_targets[case_idx]
+                _activate_curriculum_gate_context(
+                    engine_build=engine_build,
+                    gate_context_cache=gate_context_cache,
+                    gate_index=int(gate_to_index.get(active_gate, 0)),
+                )
 
                 input_drive = encoded_inputs[case_idx]
                 out_spike_counts, hidden_spike_counts, sim_step = _run_trial_steps(
@@ -1017,9 +1347,10 @@ def run_logic_gate_curriculum_engine(
                     is_eval=False,
                     rng=decision_rng,
                 )
+                chosen_action = int(pred_bit)
 
                 target_bit = int((target_value >= 0.5).item())
-                correct = int(pred_bit == target_bit)
+                correct = int(chosen_action == target_bit)
                 phase_correct += correct
                 if active_gate == gate:
                     phase_gate_correct += correct
@@ -1028,7 +1359,11 @@ def run_logic_gate_curriculum_engine(
                 rolling_correct.append(correct)
                 trial_acc_rolling = sum(rolling_correct) / float(len(rolling_correct))
 
-                predictions_by_gate[active_gate][case_idx] = float(pred_bit)
+                predictions_by_gate[active_gate][case_idx] = float(chosen_action)
+                action_forced = 0
+                action_drive_amplitude = 0.0
+                action_window = str(action_force_cfg["window"])
+                action_steps = int(action_force_cfg["steps"])
                 dopamine_pulse = _queue_trial_feedback_releases(
                     pending_releases=engine_build.pending_releases,
                     modulator_kinds=engine_build.modulator_kinds,
@@ -1036,18 +1371,42 @@ def run_logic_gate_curriculum_engine(
                     correct=bool(correct),
                 )
                 if reward_delivery_steps > 0:
-                    reward_input = (
-                        input_drive.new_zeros(input_drive.shape)
-                        if reward_delivery_clamp_input
-                        else input_drive
+                    reward_input = _reward_window_input_drive(
+                        input_drive=input_drive,
+                        clamp_input=reward_delivery_clamp_input,
                     )
-                    _, _, sim_step = _run_trial_steps(
+                    if (
+                        bool(action_force_cfg["enabled"])
+                        and action_forced == 0
+                        and action_window in {"reward_window", "post_decision"}
+                        and int(action_steps) > 0
+                    ):
+                        forced = _set_action_force_drive(
+                            engine_build=engine_build,
+                            chosen_action=chosen_action,
+                            amplitude=float(action_force_cfg["amplitude"]),
+                            compartment=str(action_force_cfg["compartment"]),
+                        )
+                        if forced:
+                            action_forced = 1
+                            action_drive_amplitude = float(action_force_cfg["amplitude"])
+                    force_steps = (
+                        min(max(0, int(action_steps)), max(0, int(reward_delivery_steps)))
+                        if action_forced
+                        else 0
+                    )
+                    reward_out_counts, _, sim_step = _run_trial_steps(
                         engine_build=engine_build,
                         input_drive=reward_input,
                         sim_steps_per_trial=reward_delivery_steps,
+                        action_force_steps=force_steps,
                         step_offset=sim_step,
                         monitor_writers=monitor_writers,
                     )
+                    if action_forced and action_window == "reward_window":
+                        out_spike_counts.add_(reward_out_counts)
+                else:
+                    _discard_pending_releases(pending_releases=engine_build.pending_releases)
                 (
                     mean_eligibility_abs,
                     mean_abs_dw,
@@ -1091,10 +1450,18 @@ def run_logic_gate_curriculum_engine(
                     "tie_wta": tie_behavior,
                     "epsilon": float(action_info.get("epsilon", 0.0)),
                     "explored": int(bool(action_info.get("explored", False))),
-                    "greedy_action": int(action_info.get("greedy", pred_bit)),
+                    "greedy_action": int(action_info.get("greedy", chosen_action)),
+                    "chosen_action": chosen_action,
+                    "action_forced": int(action_forced),
+                    "action_drive_amplitude": float(action_drive_amplitude),
+                    "gate_context_enabled": int(bool(gate_context_cfg["enabled"])),
+                    "gate_context_index": int(gate_to_index.get(active_gate, -1))
+                    if bool(gate_context_cfg["enabled"])
+                    else -1,
+                    "gate_context_amplitude": float(gate_context_cfg["amplitude"]),
                     "no_output_spikes": no_spikes,
                     "target": target_bit,
-                    "pred": pred_bit,
+                    "pred": chosen_action,
                     "correct": correct,
                 }
                 trial_sink.write_row(trial_row)
@@ -1174,10 +1541,10 @@ def run_logic_gate_curriculum_engine(
                     print(
                         f"[logic-curriculum-engine] phase={phase_idx} gate={gate.value} "
                         f"trial={local_trial}/{phase_trials} train_gate={active_gate.value} "
-                        f"target={target_bit} pred={pred_bit} correct={correct}"
+                        f"target={target_bit} pred={chosen_action} correct={correct}"
                     )
 
-                last_pred = pred_bit
+                last_pred = chosen_action
 
             phase_duration = perf_counter() - t0
             phase_sample_acc = phase_correct / float(phase_trials)
@@ -1334,6 +1701,8 @@ def _build_engine(
     _validate_advanced_synapse_prerequisites(projections=projections)
 
     current_input_drive: dict[str, Any] = {"tensor": None}
+    context_drive_by_population: dict[str, Mapping[Compartment, Any]] = {}
+    action_drive_by_population: dict[str, Mapping[Compartment, Any]] = {}
     pending_releases: dict[ModulatorKind, float] = {}
     mod_specs: list[ModulatorSpec] = []
     modulator_kinds: tuple[ModulatorKind, ...] = ()
@@ -1403,12 +1772,28 @@ def _build_engine(
 
     def external_drive_fn(t: float, step: int, pop_name: str, ctx: StepContext):
         _ = (t, step, ctx)
-        if pop_name != handles.input_population:
-            return {}
-        drive = current_input_drive.get("tensor")
-        if drive is None:
-            return {}
-        return {Compartment.SOMA: drive}
+        merged_drive: dict[Compartment, Any] = {}
+        if pop_name == handles.input_population:
+            drive = current_input_drive.get("tensor")
+            if drive is not None:
+                merged_drive[Compartment.SOMA] = drive
+        context_drive = context_drive_by_population.get(pop_name)
+        if context_drive:
+            for compartment, values in context_drive.items():
+                existing = merged_drive.get(compartment)
+                if existing is None:
+                    merged_drive[compartment] = values
+                else:
+                    merged_drive[compartment] = existing + values
+        action_drive = action_drive_by_population.get(pop_name)
+        if action_drive:
+            for compartment, values in action_drive.items():
+                existing = merged_drive.get(compartment)
+                if existing is None:
+                    merged_drive[compartment] = values
+                else:
+                    merged_drive[compartment] = existing + values
+        return merged_drive
 
     homeostasis_rule = None
     if homeostasis_cfg["enabled"]:
@@ -1477,6 +1862,8 @@ def _build_engine(
         output_population=handles.output_population,
         hidden_populations=handles.hidden_populations,
         current_input_drive=current_input_drive,
+        context_drive_by_population=context_drive_by_population,
+        action_drive_by_population=action_drive_by_population,
         pending_releases=pending_releases,
         modulator_kinds=modulator_kinds,
         modulator_amount=modulator_amount,
