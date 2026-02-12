@@ -397,19 +397,42 @@ h1 {
 
 .card canvas {
   width: 100%;
-  height: calc(100% - 32px);
+  /* IMPORTANT: avoid percentage heights -> can create an intrinsic-size feedback loop. */
+  height: clamp(180px, 26vh, 340px);
   display: block;
 }
 
+/* Accuracy has a footer; slightly smaller canvas keeps it tidy */
 .card-accuracy canvas {
-  height: calc(100% - 56px);
+  height: clamp(160px, 22vh, 300px)
 }
 
 .card-network {
   grid-row: span 2;
+   /* Definite height breaks % height ambiguity inside the card */
+  height: var(--network-card-height, 520px);
+  min-height: var(--network-card-height, 520px);
+
+  /*
+    IMPORTANT:
+    Do not allow arbitrary browser-driven resizing here.
+    If this card is dragged very tall, the canvases get huge, can exceed
+    browser max canvas dimensions, and the dashboard can devolve into a
+    massive scrollable page with blank/white canvases.
+
+    Height is controlled by the built-in slider (Network -> Height), which
+    is clamped in JS.
+  */
+  resize: none;
+  max-height: 980px;
+  overflow: hidden;
+  /*
+  OLD CODE WITH RESIZE:
+  grid-row: span 2;
   min-height: var(--network-card-height, 520px);
   resize: vertical;
   overflow: auto;
+  */
 }
 
 .card-raster {

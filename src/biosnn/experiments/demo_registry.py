@@ -90,7 +90,7 @@ _BASE_RUN_SPEC_DEFAULTS: dict[str, Any] = {
     "steps": 200,
     "dt": 1e-3,
     "seed": 123,
-    "device": "cpu",
+    "device": "cuda",
     "dtype": "float32",
     "fused_layout": "auto",
     "synapse_backend": "spmm_fused",
@@ -125,7 +125,7 @@ _BASE_RUN_SPEC_DEFAULTS: dict[str, Any] = {
         "kinds": [],
         "pulse_step": 50,
         "amount": 1.0,
-        "field_type": "global_scalar",
+        "field_type": "grid_diffusion_2d",
         "grid_size": [16, 16],
         "world_extent": [1.0, 1.0],
         "diffusion": 0.0,
@@ -547,7 +547,9 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     default_spec = default_run_spec(demo_id=demo_id)
 
     learning_raw = merged.get("learning")
-    learning_map = cast(Mapping[str, Any], learning_raw) if isinstance(learning_raw, Mapping) else {}
+    learning_map = (
+        cast(Mapping[str, Any], learning_raw) if isinstance(learning_raw, Mapping) else {}
+    )
     modulators_raw = merged.get("modulators")
     modulators_map = (
         cast(Mapping[str, Any], modulators_raw) if isinstance(modulators_raw, Mapping) else {}
@@ -594,13 +596,9 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     default_learning = cast(Mapping[str, Any], default_spec.get("learning", {}))
     default_modulators = cast(Mapping[str, Any], default_spec.get("modulators", {}))
     default_synapse = cast(Mapping[str, Any], default_spec.get("synapse", {}))
-    default_advanced_synapse = cast(
-        Mapping[str, Any], default_spec.get("advanced_synapse", {})
-    )
+    default_advanced_synapse = cast(Mapping[str, Any], default_spec.get("advanced_synapse", {}))
     default_wrapper = cast(Mapping[str, Any], default_spec.get("wrapper", {}))
-    default_excitability = cast(
-        Mapping[str, Any], default_spec.get("excitability_modulation", {})
-    )
+    default_excitability = cast(Mapping[str, Any], default_spec.get("excitability_modulation", {}))
     default_homeostasis = cast(Mapping[str, Any], default_spec.get("homeostasis", {}))
     default_pruning = cast(Mapping[str, Any], default_spec.get("pruning", {}))
     default_neurogenesis = cast(Mapping[str, Any], default_spec.get("neurogenesis", {}))
@@ -630,7 +628,9 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         default=str(default_synapse.get("ring_dtype", "none")),
     )
     store_sparse_by_delay = _coerce_optional_bool(
-        _first_non_none(synapse_map.get("store_sparse_by_delay"), merged.get("store_sparse_by_delay"))
+        _first_non_none(
+            synapse_map.get("store_sparse_by_delay"), merged.get("store_sparse_by_delay")
+        )
     )
     receptor_mode = _coerce_choice(
         _first_non_none(synapse_map.get("receptor_mode"), merged.get("receptor_mode")),
@@ -645,7 +645,7 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     mod_field_type = _coerce_choice(
         modulators_map.get("field_type"),
         allowed=ALLOWED_MODULATOR_FIELD_TYPE,
-        default=str(default_modulators.get("field_type", "global_scalar")),
+        default=str(default_modulators.get("field_type", "grid_diffusion_2d")),
     )
     wrapper_combine_mode = _coerce_choice(
         wrapper_map.get("combine_mode"),
@@ -663,7 +663,9 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     if not excitability_targets:
         excitability_targets = ["hidden", "out"]
     excitability_compartment = _coerce_choice(
-        _first_non_none(excitability_map.get("compartment"), default_excitability.get("compartment")),
+        _first_non_none(
+            excitability_map.get("compartment"), default_excitability.get("compartment")
+        ),
         allowed={"soma", "dendrite", "ais", "axon"},
         default="soma",
     )
@@ -697,7 +699,9 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         default=str(default_action_force.get("window", "reward_window")),
     )
     action_force_compartment = _coerce_choice(
-        _first_non_none(action_force_map.get("compartment"), default_action_force.get("compartment")),
+        _first_non_none(
+            action_force_map.get("compartment"), default_action_force.get("compartment")
+        ),
         allowed={"soma", "dendrite", "ais", "axon"},
         default=str(default_action_force.get("compartment", "soma")),
     )
@@ -707,7 +711,9 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         default=str(default_action_force.get("mode", "explore_or_silent")),
     )
     gate_context_compartment = _coerce_choice(
-        _first_non_none(gate_context_map.get("compartment"), default_gate_context.get("compartment")),
+        _first_non_none(
+            gate_context_map.get("compartment"), default_gate_context.get("compartment")
+        ),
         allowed={"soma", "dendrite", "ais", "axon"},
         default=str(default_gate_context.get("compartment", "dendrite")),
     )
@@ -734,7 +740,7 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         "steps": _coerce_positive_int(merged.get("steps"), int(default_spec["steps"])),
         "dt": _coerce_float(merged.get("dt"), float(default_spec["dt"])),
         "seed": _coerce_optional_int(merged.get("seed"), 123),
-        "device": _coerce_choice(merged.get("device"), allowed=ALLOWED_DEVICE, default="cpu"),
+        "device": _coerce_choice(merged.get("device"), allowed=ALLOWED_DEVICE, default="cuda"),
         "dtype": _coerce_choice(merged.get("dtype"), allowed=ALLOWED_DTYPE, default="float32"),
         "fused_layout": fused_layout,
         "synapse_backend": synapse_backend,
@@ -759,13 +765,17 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
             "lr": _coerce_float(learning_map.get("lr"), float(default_learning.get("lr", 0.1))),
         },
         "modulators": {
-            "enabled": bool(modulators_map.get("enabled", default_modulators.get("enabled", False))),
+            "enabled": bool(
+                modulators_map.get("enabled", default_modulators.get("enabled", False))
+            ),
             "kinds": _coerce_string_list(modulators_map.get("kinds")),
             "pulse_step": _coerce_nonnegative_int(
                 modulators_map.get("pulse_step"),
                 int(default_modulators.get("pulse_step", 50)),
             ),
-            "amount": _coerce_float(modulators_map.get("amount"), float(default_modulators.get("amount", 1.0))),
+            "amount": _coerce_float(
+                modulators_map.get("amount"), float(default_modulators.get("amount", 1.0))
+            ),
             "field_type": mod_field_type,
             "grid_size": [int(grid_size[0]), int(grid_size[1])],
             "world_extent": [float(world_extent[0]), float(world_extent[1])],
@@ -792,9 +802,7 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         },
         "advanced_synapse": {
             "enabled": bool(
-                advanced_synapse_map.get(
-                    "enabled", default_advanced_synapse.get("enabled", False)
-                )
+                advanced_synapse_map.get("enabled", default_advanced_synapse.get("enabled", False))
             ),
             "conductance_mode": bool(
                 advanced_synapse_map.get(
@@ -813,9 +821,7 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
                 )
             ),
             "bio_stp": bool(
-                advanced_synapse_map.get(
-                    "bio_stp", default_advanced_synapse.get("bio_stp", False)
-                )
+                advanced_synapse_map.get("bio_stp", default_advanced_synapse.get("bio_stp", False))
             ),
             "nmda_voltage_block": bool(
                 advanced_synapse_map.get(
@@ -928,14 +934,20 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
             ),
         },
         "homeostasis": {
-            "enabled": bool(homeostasis_map.get("enabled", default_homeostasis.get("enabled", False))),
+            "enabled": bool(
+                homeostasis_map.get("enabled", default_homeostasis.get("enabled", False))
+            ),
             "rule": _coerce_choice(
                 homeostasis_map.get("rule"),
                 allowed=ALLOWED_HOMEOSTASIS_RULE,
                 default=str(default_homeostasis.get("rule", "rate_ema_threshold")),
             ),
-            "alpha": _coerce_float(homeostasis_map.get("alpha"), float(default_homeostasis.get("alpha", 0.01))),
-            "eta": _coerce_float(homeostasis_map.get("eta"), float(default_homeostasis.get("eta", 1e-3))),
+            "alpha": _coerce_float(
+                homeostasis_map.get("alpha"), float(default_homeostasis.get("alpha", 0.01))
+            ),
+            "eta": _coerce_float(
+                homeostasis_map.get("eta"), float(default_homeostasis.get("eta", 1e-3))
+            ),
             "r_target": _coerce_float(
                 homeostasis_map.get("r_target"),
                 float(default_homeostasis.get("r_target", 0.05)),
@@ -964,7 +976,9 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
                 pruning_map.get("usage_alpha"),
                 float(default_pruning.get("usage_alpha", 0.01)),
             ),
-            "w_min": _coerce_float(pruning_map.get("w_min"), float(default_pruning.get("w_min", 0.05))),
+            "w_min": _coerce_float(
+                pruning_map.get("w_min"), float(default_pruning.get("w_min", 0.05))
+            ),
             "usage_min": _coerce_float(
                 pruning_map.get("usage_min"),
                 float(default_pruning.get("usage_min", 0.01)),
@@ -984,7 +998,9 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
             "verbose": bool(pruning_map.get("verbose", default_pruning.get("verbose", False))),
         },
         "neurogenesis": {
-            "enabled": bool(neurogenesis_map.get("enabled", default_neurogenesis.get("enabled", False))),
+            "enabled": bool(
+                neurogenesis_map.get("enabled", default_neurogenesis.get("enabled", False))
+            ),
             "growth_interval_steps": _coerce_positive_int(
                 neurogenesis_map.get("growth_interval_steps"),
                 int(default_neurogenesis.get("growth_interval_steps", 500)),
@@ -1005,7 +1021,9 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
                 neurogenesis_map.get("max_total_neurons"),
                 int(default_neurogenesis.get("max_total_neurons", 20000)),
             ),
-            "verbose": bool(neurogenesis_map.get("verbose", default_neurogenesis.get("verbose", False))),
+            "verbose": bool(
+                neurogenesis_map.get("verbose", default_neurogenesis.get("verbose", False))
+            ),
         },
         "logic": {
             "learn_every": _coerce_positive_int(
@@ -1029,11 +1047,15 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
                 ),
                 "window": action_force_window,
                 "steps": _coerce_nonnegative_int(
-                    _first_non_none(action_force_map.get("steps"), default_action_force.get("steps")),
-                    int(default_action_force.get("steps", 1)),
+                    _first_non_none(
+                        action_force_map.get("steps"), default_action_force.get("steps")
+                    ),
+                    int(default_action_force.get("steps", 3)),
                 ),
                 "amplitude": _coerce_float(
-                    _first_non_none(action_force_map.get("amplitude"), default_action_force.get("amplitude")),
+                    _first_non_none(
+                        action_force_map.get("amplitude"), default_action_force.get("amplitude")
+                    ),
                     float(default_action_force.get("amplitude", 0.35)),
                 ),
                 "compartment": action_force_compartment,
@@ -1253,12 +1275,16 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
             default="adex_3c",
         )
         if resolved.get("logic_backend") == "engine":
-            payload_learning = cast(
-                Mapping[str, Any], payload.get("learning", {})
-            ) if isinstance(payload.get("learning"), Mapping) else {}
-            payload_modulators = cast(
-                Mapping[str, Any], payload.get("modulators", {})
-            ) if isinstance(payload.get("modulators"), Mapping) else {}
+            payload_learning = (
+                cast(Mapping[str, Any], payload.get("learning", {}))
+                if isinstance(payload.get("learning"), Mapping)
+                else {}
+            )
+            payload_modulators = (
+                cast(Mapping[str, Any], payload.get("modulators", {}))
+                if isinstance(payload.get("modulators"), Mapping)
+                else {}
+            )
             if "lr" not in payload_learning:
                 resolved["learning"]["lr"] = 1e-3
             if "amount" not in payload_modulators:
@@ -1314,7 +1340,7 @@ def run_spec_from_cli_args(
             "kinds": _coerce_string_list(getattr(args, "modulator_kinds", "")),
             "pulse_step": getattr(args, "da_step", 50),
             "amount": getattr(args, "da_amount", 1.0),
-            "field_type": getattr(args, "modulator_field_type", "global_scalar"),
+            "field_type": getattr(args, "modulator_field_type", "grid_diffusion_2d"),
             "grid_size": getattr(args, "modulator_grid_size", "16x16"),
             "world_extent": getattr(args, "modulator_world_extent", "1.0,1.0"),
             "diffusion": getattr(args, "modulator_diffusion", 0.0),
@@ -1372,7 +1398,7 @@ def run_spec_from_cli_args(
             "action_force": {
                 "enabled": bool(getattr(args, "logic_action_force_enabled", False)),
                 "window": getattr(args, "logic_action_force_window", "reward_window"),
-                "steps": getattr(args, "logic_action_force_steps", 1),
+                "steps": getattr(args, "logic_action_force_steps", 3),
                 "amplitude": getattr(args, "logic_action_drive_amplitude", 0.35),
                 "compartment": getattr(args, "logic_action_drive_compartment", "soma"),
                 "mode": getattr(args, "logic_action_force_mode", "explore_or_silent"),
@@ -1676,9 +1702,17 @@ def run_spec_to_cli_args(
         if bool(excitability_cfg.get("enabled", False))
         else "--no-logic-excitability-enabled"
     )
-    args.append("--enable-homeostasis" if bool(homeostasis_cfg.get("enabled", False)) else "--no-enable-homeostasis")
-    args.append("--enable-pruning" if bool(pruning_cfg.get("enabled", False)) else "--no-enable-pruning")
-    args.append("--prune-verbose" if bool(pruning_cfg.get("verbose", False)) else "--no-prune-verbose")
+    args.append(
+        "--enable-homeostasis"
+        if bool(homeostasis_cfg.get("enabled", False))
+        else "--no-enable-homeostasis"
+    )
+    args.append(
+        "--enable-pruning" if bool(pruning_cfg.get("enabled", False)) else "--no-enable-pruning"
+    )
+    args.append(
+        "--prune-verbose" if bool(pruning_cfg.get("verbose", False)) else "--no-prune-verbose"
+    )
     args.append(
         "--enable-neurogenesis"
         if bool(neurogenesis_cfg.get("enabled", False))
@@ -1914,9 +1948,21 @@ def feature_flags_for_run_spec(
     action_force_cfg = cast(Mapping[str, Any], logic_cfg.get("action_force", {}))
     exploration_cfg = cast(Mapping[str, Any], logic_cfg.get("exploration", {}))
     gate_context_cfg = cast(Mapping[str, Any], logic_cfg.get("gate_context", {}))
-    exploration_enabled = bool(exploration_cfg.get("enabled", False)) if is_logic_demo and logic_backend == "engine" else False
-    reward_delivery_steps = int(logic_cfg.get("reward_delivery_steps", 0)) if is_logic_demo and logic_backend == "engine" else 0
-    action_force_enabled = bool(action_force_cfg.get("enabled", False)) if is_logic_demo and logic_backend == "engine" else False
+    exploration_enabled = (
+        bool(exploration_cfg.get("enabled", False))
+        if is_logic_demo and logic_backend == "engine"
+        else False
+    )
+    reward_delivery_steps = (
+        int(logic_cfg.get("reward_delivery_steps", 0))
+        if is_logic_demo and logic_backend == "engine"
+        else 0
+    )
+    action_force_enabled = (
+        bool(action_force_cfg.get("enabled", False))
+        if is_logic_demo and logic_backend == "engine"
+        else False
+    )
     gate_context_enabled = (
         bool(gate_context_cfg.get("enabled", False))
         if demo_id == "logic_curriculum" and logic_backend == "engine"
@@ -2005,9 +2051,7 @@ def feature_flags_for_run_spec(
             "mode": str(action_force_cfg.get("mode", "explore_or_silent"))
             if action_force_enabled
             else None,
-            "steps": int(action_force_cfg.get("steps", 0))
-            if action_force_enabled
-            else 0,
+            "steps": int(action_force_cfg.get("steps", 0)) if action_force_enabled else 0,
             "amplitude": float(action_force_cfg.get("amplitude", 0.0))
             if action_force_enabled
             else 0.0,
@@ -2063,9 +2107,7 @@ def feature_flags_for_run_spec(
         },
         "logic_backend": logic_backend if is_logic_demo else None,
         "logic_gate": spec.get("logic_gate") if demo_id in _LOGIC_DEMO_TO_GATE else None,
-        "logic_neuron_model": spec.get("logic_neuron_model")
-        if is_logic_demo
-        else None,
+        "logic_neuron_model": spec.get("logic_neuron_model") if is_logic_demo else None,
         "logic_curriculum_gates": spec.get("logic_curriculum_gates")
         if demo_id == "logic_curriculum"
         else None,

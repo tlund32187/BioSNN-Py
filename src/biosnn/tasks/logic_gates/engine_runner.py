@@ -7,6 +7,7 @@ settings from a run spec mapping.
 
 from __future__ import annotations
 
+import fnmatch
 import random
 import time
 from collections import deque
@@ -85,6 +86,7 @@ class _EngineBuild:
     modulator_kinds: tuple[ModulatorKind, ...]
     modulator_amount: float
     modulator_state: dict[str, Any]
+    learning_proj_names: tuple[str, ...]
     learning_proj_name: str | None
 
 
@@ -218,8 +220,14 @@ def _resolve_exploration_cfg(
     return ExplorationConfig(
         enabled=bool(_first_non_none(raw.get("enabled"), default_cfg.enabled)),
         mode="epsilon_greedy",
-        epsilon_start=_coerce_float(_first_non_none(raw.get("epsilon_start"), default_cfg.epsilon_start), default_cfg.epsilon_start),
-        epsilon_end=_coerce_float(_first_non_none(raw.get("epsilon_end"), default_cfg.epsilon_end), default_cfg.epsilon_end),
+        epsilon_start=_coerce_float(
+            _first_non_none(raw.get("epsilon_start"), default_cfg.epsilon_start),
+            default_cfg.epsilon_start,
+        ),
+        epsilon_end=_coerce_float(
+            _first_non_none(raw.get("epsilon_end"), default_cfg.epsilon_end),
+            default_cfg.epsilon_end,
+        ),
         epsilon_decay_trials=_coerce_positive_int(
             _first_non_none(raw.get("epsilon_decay_trials"), default_cfg.epsilon_decay_trials),
             default_cfg.epsilon_decay_trials,
@@ -232,7 +240,9 @@ def _resolve_exploration_cfg(
                 default=default_cfg.tie_break,
             ),
         ),
-        seed=_coerce_nonnegative_int(_first_non_none(raw.get("seed"), default_cfg.seed), default_cfg.seed),
+        seed=_coerce_nonnegative_int(
+            _first_non_none(raw.get("seed"), default_cfg.seed), default_cfg.seed
+        ),
     )
 
 
@@ -287,7 +297,9 @@ def _resolve_action_force_cfg(
         ),
         "amplitude": max(
             0.0,
-            _coerce_float(_first_non_none(raw.get("amplitude"), default_amplitude), default_amplitude),
+            _coerce_float(
+                _first_non_none(raw.get("amplitude"), default_amplitude), default_amplitude
+            ),
         ),
         "compartment": _coerce_choice(
             _first_non_none(raw.get("compartment"), default_compartment),
@@ -374,7 +386,9 @@ def _resolve_curriculum_gate_context_cfg(
         "enabled": bool(_first_non_none(raw.get("enabled"), default_cfg.enabled)),
         "amplitude": max(
             0.0,
-            _coerce_float(_first_non_none(raw.get("amplitude"), default_cfg.amplitude), default_cfg.amplitude),
+            _coerce_float(
+                _first_non_none(raw.get("amplitude"), default_cfg.amplitude), default_cfg.amplitude
+            ),
         ),
         "compartment": compartment,
         "targets": targets,
@@ -475,7 +489,7 @@ def run_logic_gate_engine(
 
     init_elig, init_dw, init_w_min, init_w_max, init_w_mean = _learning_stats(
         engine=engine,
-        learning_proj_name=engine_build.learning_proj_name,
+        learning_proj_names=engine_build.learning_proj_names,
     )
     init_eval_acc, init_confusion = eval_accuracy(
         predictions,
@@ -527,6 +541,7 @@ def run_logic_gate_engine(
                 rng=decision_rng,
             )
             chosen_action = int(pred_bit)
+            engine_build.modulator_state["dopamine_focus_action"] = chosen_action
             target_bit = int((target_value >= 0.5).item())
             correct = int(chosen_action == target_bit)
             sampled_correct += correct
@@ -599,9 +614,11 @@ def run_logic_gate_engine(
                 weights_mean,
             ) = _learning_stats(
                 engine=engine,
-                learning_proj_name=engine_build.learning_proj_name,
+                learning_proj_names=engine_build.learning_proj_names,
             )
-            hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(config.sim_steps_per_trial)
+            hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(
+                config.sim_steps_per_trial
+            )
             tie_behavior = int(bool(action_info.get("tie", False)))
             no_spikes = int(float(out_spike_counts.sum().item()) <= 0.0)
 
@@ -649,7 +666,9 @@ def run_logic_gate_engine(
 
             if (trial_idx % config.export_every) == 0 or trial_idx == config.steps:
                 sample_acc = sampled_correct / float(trial_idx)
-                eval_acc_full, confusion = eval_accuracy(predictions, targets_flat, report_confusion=True)
+                eval_acc_full, confusion = eval_accuracy(
+                    predictions, targets_flat, report_confusion=True
+                )
                 eval_sink.write_row(
                     {
                         "trial": trial_idx,
@@ -755,7 +774,8 @@ def _run_trial_steps(
         raise RuntimeError("Engine topology does not define any hidden population.")
     output_counts = torch.zeros_like(out_spikes, dtype=input_drive.dtype)
     hidden_counts_by_pop = [
-        torch.zeros_like(hidden_spikes, dtype=input_drive.dtype) for hidden_spikes in hidden_spikes_by_pop
+        torch.zeros_like(hidden_spikes, dtype=input_drive.dtype)
+        for hidden_spikes in hidden_spikes_by_pop
     ]
     global_step = int(step_offset)
     force_steps = max(0, int(action_force_steps))
@@ -830,7 +850,9 @@ def _build_curriculum_gate_context_cache(
                 gate_count=gate_count,
                 amplitude=amplitude,
                 device=pop_state.spikes.device,
-                dtype=torch.float32 if pop_state.spikes.dtype == torch.bool else pop_state.spikes.dtype,
+                dtype=torch.float32
+                if pop_state.spikes.dtype == torch.bool
+                else pop_state.spikes.dtype,
             )
             pop_drive[pop_name] = {compartment: drive}
         cache[int(gate_index)] = pop_drive
@@ -877,7 +899,14 @@ def _set_action_force_drive(
         device=spikes.device,
         dtype=torch.float32 if spikes.dtype == torch.bool else spikes.dtype,
     )
+    # Amplify chosen output
     drive[action_idx] = float(amplitude)
+    # Suppress other outputs to create output separation
+    suppression_strength = -0.25 * float(amplitude)  # Slightly negative to suppress alternatives
+    for i in range(n_out):
+        if i != action_idx:
+            drive[i] = suppression_strength
+
     engine_build.action_drive_by_population.clear()
     engine_build.action_drive_by_population[engine_build.output_population] = {
         _compartment_from_name(compartment): drive
@@ -974,40 +1003,62 @@ def _compartment_from_name(value: str) -> Compartment:
 def _learning_stats(
     *,
     engine: TorchNetworkEngine,
-    learning_proj_name: str | None,
+    learning_proj_names: tuple[str, ...],
 ) -> tuple[float, float, float, float, float]:
-    if learning_proj_name is None:
+    if not learning_proj_names:
         return 0.0, 0.0, float("nan"), float("nan"), float("nan")
 
+    # Aggregate across all learning projections
+    all_eligibilities = []
+    all_d_weights = []
+    all_weights = []
+
+    for proj_name in learning_proj_names:
+        proj_state = engine._proj_states.get(proj_name)
+        proj_spec = next((spec for spec in engine._proj_specs if spec.name == proj_name), None)
+        if proj_spec is not None and proj_spec.learning is not None and proj_state is not None:
+            learning_state = proj_state.learning_state
+            if learning_state is not None:
+                tensors = proj_spec.learning.state_tensors(learning_state)
+                eligibility = tensors.get("eligibility")
+                if eligibility is not None and int(eligibility.numel()) > 0:
+                    all_eligibilities.append(eligibility.abs())
+
+        d_weights = engine.last_d_weights.get(proj_name)
+        if d_weights is not None and int(d_weights.numel()) > 0:
+            all_d_weights.append(d_weights.abs())
+
+        weights = None
+        if proj_state is not None:
+            weights = getattr(proj_state.state, "weights", None)
+        if weights is None and proj_spec is not None:
+            weights = proj_spec.topology.weights
+        if weights is not None and int(weights.numel()) > 0:
+            all_weights.append(weights)
+
     mean_eligibility_abs = 0.0
-    proj_state = engine._proj_states.get(learning_proj_name)
-    proj_spec = next((spec for spec in engine._proj_specs if spec.name == learning_proj_name), None)
-    if proj_spec is not None and proj_spec.learning is not None and proj_state is not None:
-        learning_state = proj_state.learning_state
-        if learning_state is not None:
-            tensors = proj_spec.learning.state_tensors(learning_state)
-            eligibility = tensors.get("eligibility")
-            if eligibility is not None and int(eligibility.numel()) > 0:
-                mean_eligibility_abs = float(eligibility.abs().mean().item())
+    if all_eligibilities:
+        torch_local = require_torch()
+        stacked = torch_local.cat(all_eligibilities, dim=0)
+        mean_eligibility_abs = float(stacked.mean().item())
 
     mean_abs_dw = 0.0
-    d_weights = engine.last_d_weights.get(learning_proj_name)
-    if d_weights is not None and int(d_weights.numel()) > 0:
-        mean_abs_dw = float(d_weights.abs().mean().item())
+    if all_d_weights:
+        torch_local = require_torch()
+        stacked = torch_local.cat(all_d_weights, dim=0)
+        mean_abs_dw = float(stacked.mean().item())
 
-    weights = None
-    if proj_state is not None:
-        weights = getattr(proj_state.state, "weights", None)
-    if weights is None and proj_spec is not None:
-        weights = proj_spec.topology.weights
-    if weights is None or int(weights.numel()) == 0:
+    if not all_weights:
         return mean_eligibility_abs, mean_abs_dw, float("nan"), float("nan"), float("nan")
+
+    torch_local = require_torch()
+    all_weights_flat = torch_local.cat([w.flatten() for w in all_weights], dim=0)
     return (
         mean_eligibility_abs,
         mean_abs_dw,
-        float(weights.min().item()),
-        float(weights.max().item()),
-        float(weights.mean().item()),
+        float(all_weights_flat.min().item()),
+        float(all_weights_flat.max().item()),
+        float(all_weights_flat.mean().item()),
     )
 
 
@@ -1041,7 +1092,9 @@ def _create_monitor_writers(
     )
 
 
-def _prepare_weight_export_projections(*, engine: TorchNetworkEngine) -> tuple[_WeightExportProjection, ...]:
+def _prepare_weight_export_projections(
+    *, engine: TorchNetworkEngine
+) -> tuple[_WeightExportProjection, ...]:
     torch = require_torch()
     projections: list[_WeightExportProjection] = []
     for projection in engine._proj_specs:
@@ -1101,7 +1154,9 @@ def _write_weights_snapshot(
         proj_state = engine._proj_states.get(export.name)
         weights = getattr(proj_state.state, "weights", None) if proj_state is not None else None
         if weights is None:
-            projection = next((proj for proj in engine._proj_specs if proj.name == export.name), None)
+            projection = next(
+                (proj for proj in engine._proj_specs if proj.name == export.name), None
+            )
             weights = projection.topology.weights if projection is not None else None
         if weights is None or int(weights.numel()) == 0:
             continue
@@ -1155,10 +1210,14 @@ def _queue_trial_feedback_releases(
 
     if ModulatorKind.DOPAMINE in modulator_kinds:
         dopamine_pulse = base if bool(correct) else -base
-        pending[ModulatorKind.DOPAMINE] = float(pending.get(ModulatorKind.DOPAMINE, 0.0)) + dopamine_pulse
+        pending[ModulatorKind.DOPAMINE] = (
+            float(pending.get(ModulatorKind.DOPAMINE, 0.0)) + dopamine_pulse
+        )
     if ModulatorKind.NORADRENALINE in modulator_kinds and not bool(correct):
         na_pulse = base * _NA_SURPRISE_PULSE_SCALE
-        pending[ModulatorKind.NORADRENALINE] = float(pending.get(ModulatorKind.NORADRENALINE, 0.0)) + na_pulse
+        pending[ModulatorKind.NORADRENALINE] = (
+            float(pending.get(ModulatorKind.NORADRENALINE, 0.0)) + na_pulse
+        )
     if ModulatorKind.SEROTONIN in modulator_kinds and bool(correct):
         serotonin_pulse = base * _SEROTONIN_CORRECT_PULSE_SCALE
         pending[ModulatorKind.SEROTONIN] = (
@@ -1177,6 +1236,7 @@ def _build_modulator_releases_for_step(
     field_type: str,
     world_extent: tuple[float, float],
     output_positions: Any,
+    dopamine_focus_action: int | None,
     device: Any,
     dtype: Any,
 ) -> tuple[list[ModulatorRelease], bool]:
@@ -1187,13 +1247,6 @@ def _build_modulator_releases_for_step(
     releases: list[ModulatorRelease] = []
     base = abs(float(modulator_amount))
 
-    positions = _release_positions_for_field(
-        field_type=field_type,
-        world_extent=world_extent,
-        output_positions=output_positions,
-        device=device,
-        dtype=dtype,
-    )
     for kind in modulator_kinds:
         amount = float(pending.get(kind, 0.0))
         if input_active and kind == ModulatorKind.ACETYLCHOLINE and not ach_pulse_emitted:
@@ -1204,6 +1257,27 @@ def _build_modulator_releases_for_step(
         pending[kind] = 0.0
         if amount == 0.0:
             continue
+
+        # Use action-specific dopamine positions if this is dopamine and focus_action is set
+        if kind == ModulatorKind.DOPAMINE and dopamine_focus_action is not None:
+            positions = _release_positions_for_field(
+                field_type=field_type,
+                world_extent=world_extent,
+                output_positions=output_positions,
+                dopamine_focus_action=int(dopamine_focus_action),
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            positions = _release_positions_for_field(
+                field_type=field_type,
+                world_extent=world_extent,
+                output_positions=output_positions,
+                dopamine_focus_action=None,
+                device=device,
+                dtype=dtype,
+            )
+
         releases.append(
             ModulatorRelease(
                 kind=kind,
@@ -1219,12 +1293,35 @@ def _release_positions_for_field(
     field_type: str,
     world_extent: tuple[float, float],
     output_positions: Any,
+    dopamine_focus_action: int | None,
     device: Any,
     dtype: Any,
 ) -> Any:
     torch = require_torch()
     if str(field_type).strip().lower() == "grid_diffusion_2d":
+        # For grid_diffusion_2d with action-specific dopamine, return only the chosen output position
+        if dopamine_focus_action is not None and output_positions is not None:
+            n_outputs = int(output_positions.shape[0]) if hasattr(output_positions, "shape") else 0
+            action_idx = int(dopamine_focus_action)
+            if 0 <= action_idx < n_outputs:
+                return cast(
+                    Any,
+                    output_positions[action_idx : action_idx + 1].to(device=device, dtype=dtype),
+                )
+        # Fallback: return all positions
         return cast(Any, output_positions.to(device=device, dtype=dtype))
+
+    # For global_scalar, use center location by default
+    # For action-specific targeting, use the chosen output's position if available
+    if dopamine_focus_action is not None and output_positions is not None:
+        n_outputs = int(output_positions.shape[0]) if hasattr(output_positions, "shape") else 0
+        action_idx = int(dopamine_focus_action)
+        if 0 <= action_idx < n_outputs:
+            return cast(
+                Any, output_positions[action_idx : action_idx + 1].to(device=device, dtype=dtype)
+            )
+
+    # Default center position
     center = torch.tensor(
         [[0.5 * float(world_extent[0]), 0.5 * float(world_extent[1]), 0.0]],
         device=device,
@@ -1260,7 +1357,9 @@ def _apply_gate_context_drive(input_drive: Any, *, gate: LogicGate | str) -> Non
     idx = int(gate_idx)
     if idx < 0 or idx >= int(input_drive.numel()):
         return
-    input_drive[idx] = float(gate_context_level_for_gate(gate.value if isinstance(gate, LogicGate) else gate))
+    input_drive[idx] = float(
+        gate_context_level_for_gate(gate.value if isinstance(gate, LogicGate) else gate)
+    )
 
 
 def _gate_context_drive_value(input_drive: Any) -> float:
@@ -1283,7 +1382,9 @@ def run_logic_gate_curriculum_engine(
     gate_sequence = _resolve_curriculum_gates(engine_run_spec)
     if not gate_sequence:
         raise ValueError("At least one gate is required for curriculum mode.")
-    replay_ratio = _clamp(float(engine_run_spec.get("logic_curriculum_replay_ratio", 0.35)), 0.0, 1.0)
+    replay_ratio = _clamp(
+        float(engine_run_spec.get("logic_curriculum_replay_ratio", 0.35)), 0.0, 1.0
+    )
 
     device = _resolve_device(torch, str(config.device))
     run_dir = _resolve_curriculum_run_dir(config, gates=gate_sequence)
@@ -1421,6 +1522,7 @@ def run_logic_gate_curriculum_engine(
                     rng=decision_rng,
                 )
                 chosen_action = int(pred_bit)
+                engine_build.modulator_state["dopamine_focus_action"] = chosen_action
 
                 target_bit = int((target_value >= 0.5).item())
                 correct = int(chosen_action == target_bit)
@@ -1495,9 +1597,11 @@ def run_logic_gate_curriculum_engine(
                     weights_mean,
                 ) = _learning_stats(
                     engine=engine,
-                    learning_proj_name=engine_build.learning_proj_name,
+                    learning_proj_names=engine_build.learning_proj_names,
                 )
-                hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(config.sim_steps_per_trial)
+                hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(
+                    config.sim_steps_per_trial
+                )
                 out0 = float(out_spike_counts[OUTPUT_NEURON_INDICES["class_0"]].item())
                 out1 = float(out_spike_counts[OUTPUT_NEURON_INDICES["class_1"]].item())
                 tie_behavior = int(bool(action_info.get("tie", False)))
@@ -1566,9 +1670,13 @@ def run_logic_gate_curriculum_engine(
                     global_eval_by_gate: dict[str, float] = {}
                     for eval_gate in gate_sequence:
                         global_eval_by_gate[eval_gate.value] = float(
-                            eval_accuracy(predictions_by_gate[eval_gate], targets_by_gate[eval_gate])
+                            eval_accuracy(
+                                predictions_by_gate[eval_gate], targets_by_gate[eval_gate]
+                            )
                         )
-                    global_eval_accuracy = sum(global_eval_by_gate.values()) / float(len(global_eval_by_gate))
+                    global_eval_accuracy = sum(global_eval_by_gate.values()) / float(
+                        len(global_eval_by_gate)
+                    )
                     eval_acc_full, confusion = eval_accuracy(
                         current_preds,
                         targets_flat,
@@ -1598,7 +1706,9 @@ def run_logic_gate_curriculum_engine(
                             "perfect_streak": tracker.perfect_streak,
                             "high_streak": tracker.high_streak,
                             "passed": int(tracker.passed),
-                            **{f"eval_{name}": value for name, value in global_eval_by_gate.items()},
+                            **{
+                                f"eval_{name}": value for name, value in global_eval_by_gate.items()
+                            },
                         }
                     )
                     confusion_sink.write_row(
@@ -1617,7 +1727,9 @@ def run_logic_gate_curriculum_engine(
                     )
 
                 if config.debug and (
-                    local_trial == 1 or local_trial == phase_trials or local_trial % debug_every == 0
+                    local_trial == 1
+                    or local_trial == phase_trials
+                    or local_trial % debug_every == 0
                 ):
                     print(
                         f"[logic-curriculum-engine] phase={phase_idx} gate={gate.value} "
@@ -1773,9 +1885,18 @@ def _build_engine(
     learning_rule = _make_learning_rule(learning_cfg)
     learning_rule = _maybe_wrap_learning_rule(learning_rule, wrapper_cfg)
     learning_enabled = learning_rule is not None
-    projections, learning_proj_name = _apply_learning_projection(
+    
+    # Resolve learning targets (exact names or globs like "*Excit->Out")
+    learning_targets = _resolve_learning_targets(
+        projections=base_projections,
+        targets=learning_cfg.get("targets"),
+        output_population=handles.output_population,
+    )
+    
+    projections, learning_proj_names, learning_proj_name = _apply_learning_projection(
         base_projections=base_projections,
         learning_rule=learning_rule,
+        learning_targets=learning_targets,
         output_population=handles.output_population,
         learn_every=learning_learn_every,
     )
@@ -1829,13 +1950,16 @@ def _build_engine(
             "trial_step_idx": -1,
             "trial_steps": 0,
             "ach_pulse_emitted": False,
+            "dopamine_focus_action": None,
         }
 
         def releases_fn(t: float, step: int, ctx: StepContext):  # type: ignore[no-redef]
             _ = (t, step)
             torch_local = require_torch()
             dtype_local = _resolve_torch_dtype(torch_local, ctx.dtype, fallback=torch_local.float32)
-            device_local = torch_local.device(ctx.device) if ctx.device else torch_local.device("cpu")
+            device_local = (
+                torch_local.device(ctx.device) if ctx.device else torch_local.device("cpu")
+            )
             releases, ach_emitted = _build_modulator_releases_for_step(
                 pending_releases=pending_releases,
                 modulator_kinds=modulator_kinds,
@@ -1843,8 +1967,11 @@ def _build_engine(
                 input_active=bool(modulator_state.get("input_active", False)),
                 ach_pulse_emitted=bool(modulator_state.get("ach_pulse_emitted", False)),
                 field_type=str(modulator_state.get("field_type", "global_scalar")),
-                world_extent=cast(tuple[float, float], modulator_state.get("world_extent", (1.0, 1.0))),
+                world_extent=cast(
+                    tuple[float, float], modulator_state.get("world_extent", (1.0, 1.0))
+                ),
                 output_positions=modulator_state.get("output_positions"),
+                dopamine_focus_action=modulator_state.get("dopamine_focus_action"),
                 device=device_local,
                 dtype=dtype_local,
             )
@@ -1949,6 +2076,7 @@ def _build_engine(
         modulator_kinds=modulator_kinds,
         modulator_amount=modulator_amount,
         modulator_state=modulator_state,
+        learning_proj_names=learning_proj_names,
         learning_proj_name=learning_proj_name,
     )
 
@@ -2028,7 +2156,9 @@ def _make_learning_rule(learning_cfg: Mapping[str, Any]) -> ILearningRule | None
     if rule_name == "three_factor_hebbian":
         return ThreeFactorHebbianRule(ThreeFactorHebbianParams(lr=lr))
     if rule_name == "eligibility_trace_hebbian":
-        return EligibilityTraceHebbianRule(EligibilityTraceHebbianParams(lr=lr, enable_eligibility=True))
+        return EligibilityTraceHebbianRule(
+            EligibilityTraceHebbianParams(lr=lr, enable_eligibility=True)
+        )
     if rule_name == "metaplastic_projection":
         base = ThreeFactorHebbianRule(ThreeFactorHebbianParams(lr=lr))
         return MetaplasticProjectionRule(base, MetaplasticProjectionParams(enabled=True))
@@ -2070,24 +2200,77 @@ def _maybe_wrap_learning_rule(
     return ModulatedRuleWrapper(inner=learning_rule, params=params)
 
 
+def _resolve_learning_targets(
+    *,
+    projections: Sequence[ProjectionSpec],
+    targets: Sequence[str] | None,
+    output_population: str,
+) -> tuple[str, ...]:
+    """Resolve learning targets using exact names or glob patterns.
+    
+    If targets is None, falls back to default behavior: select single primary projection.
+    If targets is a list, each entry can be:
+      - Exact projection name: "Hidden1Excit->Out"
+      - Glob pattern: "*Excit->Out", "Hidden*->*"
+    """
+    by_name = {proj.name: proj for proj in projections}
+    
+    if not targets:
+        # Fallback to single default projection (backward compatible)
+        primary = _select_learning_projection_name(
+            projections=projections,
+            output_population=output_population,
+        )
+        return (primary,)
+    
+    matched = set()
+    for target_pattern in targets:
+        target_pattern = str(target_pattern).strip()
+        # Try exact match first
+        if target_pattern in by_name:
+            matched.add(target_pattern)
+        else:
+            # Try glob pattern
+            for proj_name in by_name:
+                if fnmatch.fnmatch(proj_name, target_pattern):
+                    matched.add(proj_name)
+    
+    if not matched:
+        raise ValueError(
+            f"No projections matched learning targets {targets}. "
+            f"Available: {list(by_name.keys())}"
+        )
+    
+    return tuple(sorted(matched))
+
+
 def _apply_learning_projection(
     *,
     base_projections: Sequence[ProjectionSpec],
     learning_rule: ILearningRule | None,
+    learning_targets: tuple[str, ...],
     output_population: str,
     learn_every: int,
-) -> tuple[tuple[ProjectionSpec, ...], str | None]:
+) -> tuple[tuple[ProjectionSpec, ...], tuple[str, ...], str | None]:
+    """Apply learning rule to one or more projections.
+    
+    Returns:
+        (updated_projections, learning_proj_names, primary_learning_proj_name)
+    
+    The primary_learning_proj_name is chosen for reporting:
+      - Prefer projection whose post == output_population
+      - Otherwise first in learning_proj_names
+      - None if no learning rule or no targets
+    """
     if learning_rule is None:
-        return tuple(base_projections), None
+        return tuple(base_projections), (), None
 
-    learning_proj_name = _select_learning_projection_name(
-        projections=base_projections,
-        output_population=output_population,
-    )
     supports_sparse = bool(getattr(learning_rule, "supports_sparse", False))
     updated: list[ProjectionSpec] = []
+    matched_names: list[str] = []
+    
     for projection in base_projections:
-        if projection.name == learning_proj_name:
+        if projection.name in learning_targets:
             updated.append(
                 ProjectionSpec(
                     name=projection.name,
@@ -2101,9 +2284,24 @@ def _apply_learning_projection(
                     meta=projection.meta,
                 )
             )
+            matched_names.append(projection.name)
             continue
         updated.append(projection)
-    return tuple(updated), learning_proj_name
+    
+    # Select primary projection for reporting
+    primary_name: str | None = None
+    if matched_names:
+        # Prefer output-targeting projection
+        for name in matched_names:
+            proj = next((p for p in base_projections if p.name == name), None)
+            if proj is not None and proj.post == output_population:
+                primary_name = name
+                break
+        # Otherwise use first
+        if primary_name is None:
+            primary_name = matched_names[0]
+    
+    return tuple(updated), tuple(matched_names), primary_name
 
 
 def _select_learning_projection_name(
@@ -2168,7 +2366,16 @@ def _resolve_learning_cfg(
             run_spec.get("learning_modulator_kind"),
             default_modulator_kind,
         ),
-        allowed={"dopamine", "da", "acetylcholine", "ach", "noradrenaline", "na", "serotonin", "5ht"},
+        allowed={
+            "dopamine",
+            "da",
+            "acetylcholine",
+            "ach",
+            "noradrenaline",
+            "na",
+            "serotonin",
+            "5ht",
+        },
         default=default_modulator_kind,
     )
     if modulator_kind == "da":
@@ -2186,6 +2393,7 @@ def _resolve_learning_cfg(
         "modulator_kind": modulator_kind,
         "w_min": _coerce_optional_float(learning.get("w_min")),
         "w_max": _coerce_optional_float(learning.get("w_max")),
+        "targets": _coerce_string_list(learning.get("targets", ())),
     }
 
 
@@ -2227,17 +2435,23 @@ def _resolve_modulators_cfg(
             _first_non_none(mods.get("pulse_step"), defaults.get("pulse_step"), 50),
             50,
         ),
-        "amount": _coerce_float(_first_non_none(mods.get("amount"), defaults.get("amount"), 1.0), 1.0),
+        "amount": _coerce_float(
+            _first_non_none(mods.get("amount"), defaults.get("amount"), 1.0), 1.0
+        ),
         "field_type": field_type,
         "grid_size": grid_size,
         "world_extent": world_extent,
         "diffusion": max(
             0.0,
-            _coerce_float(_first_non_none(mods.get("diffusion"), defaults.get("diffusion"), 0.0), 0.0),
+            _coerce_float(
+                _first_non_none(mods.get("diffusion"), defaults.get("diffusion"), 0.0), 0.0
+            ),
         ),
         "decay_tau": max(
             1e-9,
-            _coerce_float(_first_non_none(mods.get("decay_tau"), defaults.get("decay_tau"), 1.0), 1.0),
+            _coerce_float(
+                _first_non_none(mods.get("decay_tau"), defaults.get("decay_tau"), 1.0), 1.0
+            ),
         ),
         "deposit_sigma": max(
             0.0,
@@ -2274,9 +2488,15 @@ def _resolve_wrapper_cfg(
         lr_clip_max = lr_clip_min
     return {
         "enabled": bool(_first_non_none(wrapper.get("enabled"), defaults.get("enabled", False))),
-        "ach_lr_gain": _coerce_float(_first_non_none(wrapper.get("ach_lr_gain"), defaults.get("ach_lr_gain"), 0.0), 0.0),
-        "ne_lr_gain": _coerce_float(_first_non_none(wrapper.get("ne_lr_gain"), defaults.get("ne_lr_gain"), 0.0), 0.0),
-        "ht_lr_gain": _coerce_float(_first_non_none(wrapper.get("ht_lr_gain"), defaults.get("ht_lr_gain"), 0.0), 0.0),
+        "ach_lr_gain": _coerce_float(
+            _first_non_none(wrapper.get("ach_lr_gain"), defaults.get("ach_lr_gain"), 0.0), 0.0
+        ),
+        "ne_lr_gain": _coerce_float(
+            _first_non_none(wrapper.get("ne_lr_gain"), defaults.get("ne_lr_gain"), 0.0), 0.0
+        ),
+        "ht_lr_gain": _coerce_float(
+            _first_non_none(wrapper.get("ht_lr_gain"), defaults.get("ht_lr_gain"), 0.0), 0.0
+        ),
         "ht_extra_weight_decay": _coerce_float(
             _first_non_none(
                 wrapper.get("ht_extra_weight_decay"),
@@ -2288,12 +2508,20 @@ def _resolve_wrapper_cfg(
         "lr_clip_min": lr_clip_min,
         "lr_clip_max": lr_clip_max,
         "dopamine_baseline": _coerce_float(
-            _first_non_none(wrapper.get("dopamine_baseline"), defaults.get("dopamine_baseline"), 0.0),
+            _first_non_none(
+                wrapper.get("dopamine_baseline"), defaults.get("dopamine_baseline"), 0.0
+            ),
             0.0,
         ),
-        "ach_baseline": _coerce_float(_first_non_none(wrapper.get("ach_baseline"), defaults.get("ach_baseline"), 0.0), 0.0),
-        "ne_baseline": _coerce_float(_first_non_none(wrapper.get("ne_baseline"), defaults.get("ne_baseline"), 0.0), 0.0),
-        "ht_baseline": _coerce_float(_first_non_none(wrapper.get("ht_baseline"), defaults.get("ht_baseline"), 0.0), 0.0),
+        "ach_baseline": _coerce_float(
+            _first_non_none(wrapper.get("ach_baseline"), defaults.get("ach_baseline"), 0.0), 0.0
+        ),
+        "ne_baseline": _coerce_float(
+            _first_non_none(wrapper.get("ne_baseline"), defaults.get("ne_baseline"), 0.0), 0.0
+        ),
+        "ht_baseline": _coerce_float(
+            _first_non_none(wrapper.get("ht_baseline"), defaults.get("ht_baseline"), 0.0), 0.0
+        ),
         "combine_mode": combine_mode,
         "missing_modulators_policy": _coerce_choice(
             _first_non_none(
@@ -2315,7 +2543,9 @@ def _resolve_excitability_cfg(
     defaults = default_cfg or {}
     exc = _as_mapping(run_spec.get("excitability_modulation"))
     targets_default = _coerce_string_list(defaults.get("targets", ("hidden", "out")))
-    targets = _coerce_string_list(_first_non_none(exc.get("targets"), defaults.get("targets", targets_default)))
+    targets = _coerce_string_list(
+        _first_non_none(exc.get("targets"), defaults.get("targets", targets_default))
+    )
     if not targets:
         targets = targets_default or ["hidden", "out"]
     compartment = _coerce_choice(
@@ -2327,10 +2557,20 @@ def _resolve_excitability_cfg(
         "enabled": bool(_first_non_none(exc.get("enabled"), defaults.get("enabled", False))),
         "targets": targets,
         "compartment": compartment,
-        "ach_gain": _coerce_float(_first_non_none(exc.get("ach_gain"), defaults.get("ach_gain"), 0.0), 0.0),
-        "ne_gain": _coerce_float(_first_non_none(exc.get("ne_gain"), defaults.get("ne_gain"), 0.0), 0.0),
-        "ht_gain": _coerce_float(_first_non_none(exc.get("ht_gain"), defaults.get("ht_gain"), 0.0), 0.0),
-        "clamp_abs": abs(_coerce_float(_first_non_none(exc.get("clamp_abs"), defaults.get("clamp_abs"), 1.0), 1.0)),
+        "ach_gain": _coerce_float(
+            _first_non_none(exc.get("ach_gain"), defaults.get("ach_gain"), 0.0), 0.0
+        ),
+        "ne_gain": _coerce_float(
+            _first_non_none(exc.get("ne_gain"), defaults.get("ne_gain"), 0.0), 0.0
+        ),
+        "ht_gain": _coerce_float(
+            _first_non_none(exc.get("ht_gain"), defaults.get("ht_gain"), 0.0), 0.0
+        ),
+        "clamp_abs": abs(
+            _coerce_float(
+                _first_non_none(exc.get("clamp_abs"), defaults.get("clamp_abs"), 1.0), 1.0
+            )
+        ),
     }
 
 
@@ -2464,8 +2704,12 @@ def _build_curriculum_gate_indices(
     if replay_count <= 0:
         return gate_idx
     stride = max(1, phase_trials // replay_count)
-    replay_positions = torch.arange(0, phase_trials, stride, device=device, dtype=torch.long)[:replay_count]
-    replay_gates = torch.arange(replay_count, device=device, dtype=torch.long).remainder(phase_index)
+    replay_positions = torch.arange(0, phase_trials, stride, device=device, dtype=torch.long)[
+        :replay_count
+    ]
+    replay_gates = torch.arange(replay_count, device=device, dtype=torch.long).remainder(
+        phase_index
+    )
     gate_idx.scatter_(0, replay_positions, replay_gates)
     return gate_idx
 
@@ -2481,7 +2725,11 @@ def _resolve_run_dir(config: LogicGateRunConfig, *, gate: LogicGate) -> Path:
         out_dir = Path(config.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         return out_dir
-    base = Path(config.artifacts_root) if config.artifacts_root is not None else _default_artifacts_root()
+    base = (
+        Path(config.artifacts_root)
+        if config.artifacts_root is not None
+        else _default_artifacts_root()
+    )
     base.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = base / f"run_{stamp}_{gate.value}_engine"
@@ -2496,7 +2744,11 @@ def _resolve_curriculum_run_dir(config: LogicGateRunConfig, *, gates: Sequence[L
         out_dir = Path(config.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         return out_dir
-    base = Path(config.artifacts_root) if config.artifacts_root is not None else _default_artifacts_root()
+    base = (
+        Path(config.artifacts_root)
+        if config.artifacts_root is not None
+        else _default_artifacts_root()
+    )
     base.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     gate_suffix = "_".join(gate.value for gate in gates[:3])

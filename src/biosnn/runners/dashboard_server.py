@@ -302,7 +302,13 @@ class DashboardServerHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/run/status":
             self._send_json(self._controller.status_payload(), status=HTTPStatus.OK)
             return
-        super().do_GET()
+        # Browser fetches (especially for large CSVs) can be aborted if the user reloads,
+        # the tab is closed, or the client times out. On Windows this frequently raises
+        # WinError 10053 (ConnectionAbortedError) and produces noisy stack traces.
+        try:
+            super().do_GET()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)

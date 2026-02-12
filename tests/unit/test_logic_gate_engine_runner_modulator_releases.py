@@ -68,6 +68,7 @@ def test_build_modulator_releases_grid_uses_output_positions_and_kind_filter() -
         field_type="grid_diffusion_2d",
         world_extent=(1.0, 1.0),
         output_positions=output_positions,
+        dopamine_focus_action=None,
         device=torch.device("cpu"),
         dtype=torch.float32,
     )
@@ -94,6 +95,7 @@ def test_build_modulator_releases_global_uses_dummy_center_position() -> None:
         field_type="global_scalar",
         world_extent=(2.0, 4.0),
         output_positions=torch.zeros((2, 3), dtype=torch.float32),
+        dopamine_focus_action=None,
         device=torch.device("cpu"),
         dtype=torch.float32,
     )
