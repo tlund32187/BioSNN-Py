@@ -1885,14 +1885,14 @@ def _build_engine(
     learning_rule = _make_learning_rule(learning_cfg)
     learning_rule = _maybe_wrap_learning_rule(learning_rule, wrapper_cfg)
     learning_enabled = learning_rule is not None
-    
+
     # Resolve learning targets (exact names or globs like "*Excit->Out")
     learning_targets = _resolve_learning_targets(
         projections=base_projections,
         targets=learning_cfg.get("targets"),
         output_population=handles.output_population,
     )
-    
+
     projections, learning_proj_names, learning_proj_name = _apply_learning_projection(
         base_projections=base_projections,
         learning_rule=learning_rule,
@@ -2207,14 +2207,14 @@ def _resolve_learning_targets(
     output_population: str,
 ) -> tuple[str, ...]:
     """Resolve learning targets using exact names or glob patterns.
-    
+
     If targets is None, falls back to default behavior: select single primary projection.
     If targets is a list, each entry can be:
       - Exact projection name: "Hidden1Excit->Out"
       - Glob pattern: "*Excit->Out", "Hidden*->*"
     """
     by_name = {proj.name: proj for proj in projections}
-    
+
     if not targets:
         # Fallback to single default projection (backward compatible)
         primary = _select_learning_projection_name(
@@ -2222,7 +2222,7 @@ def _resolve_learning_targets(
             output_population=output_population,
         )
         return (primary,)
-    
+
     matched = set()
     for target_pattern in targets:
         target_pattern = str(target_pattern).strip()
@@ -2234,13 +2234,12 @@ def _resolve_learning_targets(
             for proj_name in by_name:
                 if fnmatch.fnmatch(proj_name, target_pattern):
                     matched.add(proj_name)
-    
+
     if not matched:
         raise ValueError(
-            f"No projections matched learning targets {targets}. "
-            f"Available: {list(by_name.keys())}"
+            f"No projections matched learning targets {targets}. Available: {list(by_name.keys())}"
         )
-    
+
     return tuple(sorted(matched))
 
 
@@ -2253,10 +2252,10 @@ def _apply_learning_projection(
     learn_every: int,
 ) -> tuple[tuple[ProjectionSpec, ...], tuple[str, ...], str | None]:
     """Apply learning rule to one or more projections.
-    
+
     Returns:
         (updated_projections, learning_proj_names, primary_learning_proj_name)
-    
+
     The primary_learning_proj_name is chosen for reporting:
       - Prefer projection whose post == output_population
       - Otherwise first in learning_proj_names
@@ -2268,7 +2267,7 @@ def _apply_learning_projection(
     supports_sparse = bool(getattr(learning_rule, "supports_sparse", False))
     updated: list[ProjectionSpec] = []
     matched_names: list[str] = []
-    
+
     for projection in base_projections:
         if projection.name in learning_targets:
             updated.append(
@@ -2287,7 +2286,7 @@ def _apply_learning_projection(
             matched_names.append(projection.name)
             continue
         updated.append(projection)
-    
+
     # Select primary projection for reporting
     primary_name: str | None = None
     if matched_names:
@@ -2300,7 +2299,7 @@ def _apply_learning_projection(
         # Otherwise use first
         if primary_name is None:
             primary_name = matched_names[0]
-    
+
     return tuple(updated), tuple(matched_names), primary_name
 
 
