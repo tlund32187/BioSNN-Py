@@ -60,6 +60,7 @@ class FeatureDemoConfig:
     ring_dtype: str | None = None
     ring_strategy: Literal["dense", "event_bucketed"] = "dense"
     store_sparse_by_delay: bool | None = None
+    force_compiled_mode: bool = False
 
     def __post_init__(self) -> None:
         self.device = str(self.device).lower().strip()
@@ -111,7 +112,9 @@ def build_propagation_impulse_demo(cfg: FeatureDemoConfig) -> FeatureDemoBuildRe
     projections = [
         ProjectionSpec(
             name="Input_to_Relay",
-            synapse=DelayedCurrentSynapse(_delayed_current_params(cfg=runtime_cfg, init_weight=1e-7)),
+            synapse=DelayedCurrentSynapse(
+                _delayed_current_params(cfg=runtime_cfg, init_weight=1e-7)
+            ),
             topology=_identity_topology(
                 n=n,
                 delay_steps=0,
@@ -126,7 +129,9 @@ def build_propagation_impulse_demo(cfg: FeatureDemoConfig) -> FeatureDemoBuildRe
         ),
         ProjectionSpec(
             name="Relay_to_Hidden",
-            synapse=DelayedCurrentSynapse(_delayed_current_params(cfg=runtime_cfg, init_weight=1e-7)),
+            synapse=DelayedCurrentSynapse(
+                _delayed_current_params(cfg=runtime_cfg, init_weight=1e-7)
+            ),
             topology=_identity_topology(
                 n=n,
                 delay_steps=0,
@@ -141,7 +146,9 @@ def build_propagation_impulse_demo(cfg: FeatureDemoConfig) -> FeatureDemoBuildRe
         ),
         ProjectionSpec(
             name="Hidden_to_Out",
-            synapse=DelayedCurrentSynapse(_delayed_current_params(cfg=runtime_cfg, init_weight=1e-7)),
+            synapse=DelayedCurrentSynapse(
+                _delayed_current_params(cfg=runtime_cfg, init_weight=1e-7)
+            ),
             topology=_identity_topology(
                 n=n,
                 delay_steps=0,
@@ -156,7 +163,9 @@ def build_propagation_impulse_demo(cfg: FeatureDemoConfig) -> FeatureDemoBuildRe
         ),
     ]
 
-    def external_drive_fn(t: float, step: int, pop_name: str, ctx: StepContext) -> Mapping[Compartment, Any]:
+    def external_drive_fn(
+        t: float, step: int, pop_name: str, ctx: StepContext
+    ) -> Mapping[Compartment, Any]:
         _ = t
         if pop_name != "Input":
             return {}
@@ -212,7 +221,9 @@ def build_delay_impulse_demo(cfg: FeatureDemoConfig) -> FeatureDemoBuildResult:
     )
     projections = [projection]
 
-    def external_drive_fn(t: float, step: int, pop_name: str, ctx: StepContext) -> Mapping[Compartment, Any]:
+    def external_drive_fn(
+        t: float, step: int, pop_name: str, ctx: StepContext
+    ) -> Mapping[Compartment, Any]:
         _ = t
         if pop_name != "Input":
             return {}
@@ -252,7 +263,11 @@ def build_learning_gate_demo(cfg: FeatureDemoConfig) -> FeatureDemoBuildResult:
         cfg=runtime_cfg,
         populations=populations,
         projections=projections,
-        tap_tensor_keys=("v_soma", f"proj/{projections[0].name}/weights", f"learn/{projections[0].name}/last_mean_dw"),
+        tap_tensor_keys=(
+            "v_soma",
+            f"proj/{projections[0].name}/weights",
+            f"learn/{projections[0].name}/last_mean_dw",
+        ),
         expected_arrival_steps={"Pre_to_Post": 6},
     )
     return model_spec, runtime_cfg, monitors
@@ -275,7 +290,9 @@ def build_dopamine_plasticity_demo(cfg: FeatureDemoConfig) -> FeatureDemoBuildRe
             return []
         if not _is_learning_pulse(step):
             return []
-        device_obj = torch.device(ctx.device) if ctx.device is not None else torch.device(runtime_cfg.device)
+        device_obj = (
+            torch.device(ctx.device) if ctx.device is not None else torch.device(runtime_cfg.device)
+        )
         dtype_obj = _resolve_dtype(torch, ctx.dtype)
         positions = torch.zeros((1, 3), device=device_obj, dtype=dtype_obj)
         amount = torch.tensor([float(runtime_cfg.da_amount)], device=device_obj, dtype=dtype_obj)
@@ -335,7 +352,9 @@ class _ProjectionDriveCSVMonitor(IMonitor):
     ) -> None:
         self._engine: TorchNetworkEngine | None = None
         self._projection_names = tuple(projection_names)
-        self._expected_arrival_steps = dict(expected_arrival_steps) if expected_arrival_steps else {}
+        self._expected_arrival_steps = (
+            dict(expected_arrival_steps) if expected_arrival_steps else {}
+        )
         self._every_n_steps = max(1, int(every_n_steps))
         self._event_count = 0
         self._sink = CsvSink(path, flush_every=max(1, int(flush_every)), append=append)
@@ -439,7 +458,9 @@ def _build_learning_base(
     )
     projections = [projection]
 
-    def external_drive_fn(t: float, step: int, pop_name: str, ctx: StepContext) -> Mapping[Compartment, Any]:
+    def external_drive_fn(
+        t: float, step: int, pop_name: str, ctx: StepContext
+    ) -> Mapping[Compartment, Any]:
         _ = t
         if pop_name not in {"Pre", "Post"}:
             return {}
@@ -471,6 +492,7 @@ def _build_demo_monitors(
         allow_cuda_sync = run_mode == "dashboard"
     allow_cuda_sync = bool(allow_cuda_sync)
     monitor_async_gpu = cuda_device and not allow_cuda_sync
+    monitor_async_io = bool(cuda_device and not allow_cuda_sync)
 
     out_dir = Path(cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -485,6 +507,7 @@ def _build_demo_monitors(
             append=False,
             flush_every=25,
             async_gpu=monitor_async_gpu,
+            async_io=monitor_async_io,
         ),
         ProjectionWeightsCSVMonitor(
             str(out_dir / "weights.csv"),
@@ -493,6 +516,7 @@ def _build_demo_monitors(
             max_edges_sample=10_000,
             append=False,
             flush_every=25,
+            async_io=monitor_async_io,
         ),
         _ProjectionDriveCSVMonitor(
             out_dir / "synapse.csv",
@@ -514,6 +538,7 @@ def _build_demo_monitors(
                 sample_indices=sample_indices,
                 flush_every=25,
                 async_gpu=monitor_async_gpu,
+                async_io=monitor_async_io,
             ),
         )
         monitors.insert(
@@ -526,6 +551,7 @@ def _build_demo_monitors(
                 sample_indices=sample_indices,
                 flush_every=25,
                 async_gpu=monitor_async_gpu,
+                async_io=monitor_async_io,
             ),
         )
         if not cuda_device or allow_cuda_sync:
@@ -539,6 +565,7 @@ def _build_demo_monitors(
                     allow_cuda_sync=allow_cuda_sync,
                     append=False,
                     flush_every=25,
+                    async_io=monitor_async_io,
                 ),
             )
 

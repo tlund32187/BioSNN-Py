@@ -57,10 +57,14 @@ class MetricsCSVMonitor(IMonitor):
             return
 
         spike_count = _value_from_scalars(event, "spike_count_total", as_tensor=self._async_gpu)
-        spike_fraction = _value_from_scalars(event, "spike_fraction_total", as_tensor=self._async_gpu)
+        spike_fraction = _value_from_scalars(
+            event, "spike_fraction_total", as_tensor=self._async_gpu
+        )
 
-        if (spike_count is None or spike_fraction is None) and event.spikes is not None and hasattr(
-            event.spikes, "numel"
+        if (
+            (spike_count is None or spike_fraction is None)
+            and event.spikes is not None
+            and hasattr(event.spikes, "numel")
         ):
             if spike_count is None:
                 spike_count = reduce_stat(event.spikes, "sum", as_tensor=self._async_gpu)
@@ -119,8 +123,9 @@ def _value_from_scalars(event: StepEvent, key: str, *, as_tensor: bool) -> Any |
     if event.scalars and key in event.scalars:
         value = event.scalars[key]
         if as_tensor:
-            if hasattr(value, "detach"):
-                return value.detach()
+            _detach = getattr(value, "detach", None)
+            if callable(_detach):
+                return _detach()
             return value
         return scalar_to_float(value)
     return None

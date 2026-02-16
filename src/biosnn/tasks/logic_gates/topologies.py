@@ -67,7 +67,11 @@ def build_logic_gate_ff(
     syn_cfg = _resolve_synapse_cfg(run_spec)
     adv_cfg = _resolve_advanced_synapse_cfg(run_spec, advanced_synapse=advanced_synapse)
     excit_profile = profile_exc_ampa_nmda()
-    inhib_profile = _inhibitory_profile_for_mode(syn_cfg["receptor_mode"])
+    inhib_profile = _inhibitory_profile_for_mode(
+        syn_cfg["receptor_mode"],
+        gabaa_mix=syn_cfg["gabaa_mix"],
+        gabab_mix=syn_cfg["gabab_mix"],
+    )
     delay_steps = syn_cfg["delay_steps"]
     n_input = len(INPUT_NEURON_INDICES)
 
@@ -75,70 +79,76 @@ def build_logic_gate_ff(
     hidden_pos = _line_positions(n=16, x=1.0, device=resolved_device, dtype=dtype)
     out_pos = _line_positions(n=2, x=2.0, device=resolved_device, dtype=dtype)
 
+    nm_kwargs = {
+        "v_clamp_min": syn_cfg["v_clamp_min"],
+        "v_clamp_max": syn_cfg["v_clamp_max"],
+    }
     populations = (
         PopulationSpec(
             name="In",
-            model=_make_neuron_model(neuron_model),
+            model=_make_neuron_model(neuron_model, **nm_kwargs),
             n=n_input,
             positions=in_pos,
             meta={"role": "input"},
         ),
         PopulationSpec(
             name="Hidden",
-            model=_make_neuron_model(neuron_model),
+            model=_make_neuron_model(neuron_model, **nm_kwargs),
             n=16,
             positions=hidden_pos,
             meta={"role": "hidden"},
         ),
         PopulationSpec(
             name="Out",
-            model=_make_neuron_model(neuron_model),
+            model=_make_neuron_model(neuron_model, **nm_kwargs),
             n=2,
             positions=out_pos,
             meta={"role": "output"},
         ),
     )
 
+    gws = float(syn_cfg["global_weight_scale"])
+
     in_to_hidden_topo = _build_fixed_fanin_topology(
         n_pre=n_input,
         n_post=16,
-        fan_in=2,
+        fan_in=syn_cfg["in_to_hidden_fan_in"],
         pre_positions=in_pos,
         post_positions=hidden_pos,
         generator=generator,
         device=resolved_device,
         dtype=dtype,
-        weight_scale=0.03,
+        weight_scale=syn_cfg["in_to_hidden_weight_scale"] * gws,
         delay_min=_delay_or_default(delay_steps, default=0),
         delay_max=_delay_or_default(delay_steps, default=3),
-        target_compartment=Compartment.DENDRITE,
+        target_compartment=syn_cfg["excit_target_compartment"],
     )
     hidden_excit_to_out_topo = _build_fixed_fanin_topology(
         n_pre=16,
         n_post=2,
-        fan_in=3,
+        fan_in=syn_cfg["hidden_excit_to_out_fan_in"],
         pre_positions=hidden_pos,
         post_positions=out_pos,
         pre_pool=_range_tensor(torch, start=0, end=8, device=resolved_device),
         generator=generator,
         device=resolved_device,
         dtype=dtype,
-        weight_scale=0.04,
+        weight_scale=syn_cfg["hidden_excit_to_out_weight_scale"] * gws,
         delay_min=_delay_or_default(delay_steps, default=0),
         delay_max=_delay_or_default(delay_steps, default=1),
-        target_compartment=Compartment.DENDRITE,
+        target_compartment=syn_cfg["excit_target_compartment"],
     )
     hidden_inhib_to_out_topo = _build_fixed_fanin_topology(
         n_pre=16,
         n_post=2,
-        fan_in=3,
+        fan_in=syn_cfg["hidden_inhib_to_out_fan_in"],
         pre_positions=hidden_pos,
         post_positions=out_pos,
         pre_pool=_range_tensor(torch, start=8, end=16, device=resolved_device),
         generator=generator,
         device=resolved_device,
         dtype=dtype,
-        weight_scale=0.04,
+        weight_scale=syn_cfg["hidden_inhib_to_out_weight_scale"] * gws,
         delay_min=_delay_or_default(delay_steps, default=0),
         delay_max=_delay_or_default(delay_steps, default=1),
         target_compartment=Compartment.SOMA,
@@ -150,7 +160,7 @@ def build_logic_gate_ff(
             synapse=_make_sparse_synapse(
                 excit_profile,
                 adv_cfg,
-                target_compartment=Compartment.DENDRITE,
+                target_compartment=syn_cfg["excit_target_compartment"],
                 backend=syn_cfg["backend"],
                 ring_strategy=syn_cfg["ring_strategy"],
                 fused_layout=syn_cfg["fused_layout"],
@@ -166,7 +176,7 @@ def build_logic_gate_ff(
             synapse=_make_sparse_synapse(
                 excit_profile,
                 adv_cfg,
-                target_compartment=Compartment.DENDRITE,
+                target_compartment=syn_cfg["excit_target_compartment"],
                 backend=syn_cfg["backend"],
                 ring_strategy=syn_cfg["ring_strategy"],
                 fused_layout=syn_cfg["fused_layout"],
@@ -200,16 +210,16 @@ def build_logic_gate_ff(
         in_to_out_skip = _build_fixed_fanin_topology(
             n_pre=n_input,
             n_post=2,
-            fan_in=2,
+            fan_in=syn_cfg["skip_fan_in"],
             pre_positions=in_pos,
             post_positions=out_pos,
             generator=generator,
             device=resolved_device,
             dtype=dtype,
-            weight_scale=0.01,
+            weight_scale=0.01 * gws,
             delay_min=_delay_or_default(delay_steps, default=0),
             delay_max=_delay_or_default(delay_steps, default=0),
-            target_compartment=Compartment.DENDRITE,
+            target_compartment=syn_cfg["excit_target_compartment"],
         )
         projections.append(
             ProjectionSpec(
@@ -217,7 +227,7 @@ def build_logic_gate_ff(
                 synapse=_make_sparse_synapse(
                     excit_profile,
                     adv_cfg,
-                    target_compartment=Compartment.DENDRITE,
+                    target_compartment=syn_cfg["excit_target_compartment"],
                     backend=syn_cfg["backend"],
                     ring_strategy=syn_cfg["ring_strategy"],
                     fused_layout=syn_cfg["fused_layout"],
@@ -242,7 +252,7 @@ def build_logic_gate_ff(
         generator=generator,
         device=resolved_device,
         dtype=dtype,
-        weight_scale=0.02,
+        weight_scale=0.02 * gws,
         delay_min=_delay_or_default(delay_steps, default=1),
         delay_max=_delay_or_default(delay_steps, default=3),
         target_compartment=Compartment.SOMA,
@@ -311,7 +321,11 @@ def build_logic_gate_xor(
     syn_cfg = _resolve_synapse_cfg(run_spec)
     adv_cfg = _resolve_advanced_synapse_cfg(run_spec, advanced_synapse=advanced_synapse)
     excit_profile = profile_exc_ampa_nmda()
-    inhib_profile = _inhibitory_profile_for_mode(syn_cfg["receptor_mode"])
+    inhib_profile = _inhibitory_profile_for_mode(
+        syn_cfg["receptor_mode"],
+        gabaa_mix=syn_cfg["gabaa_mix"],
+        gabab_mix=syn_cfg["gabab_mix"],
+    )
     delay_steps = syn_cfg["delay_steps"]
     n_input = len(INPUT_NEURON_INDICES)
 
@@ -351,6 +365,8 @@ def build_logic_gate_xor(
         ),
     )
 
+    gws = float(syn_cfg["global_weight_scale"])
+
     in_to_h1 = _build_fixed_fanin_topology(
         n_pre=n_input,
         n_post=16,
@@ -360,7 +376,7 @@ def build_logic_gate_xor(
         generator=generator,
         device=resolved_device,
         dtype=dtype,
-        weight_scale=0.03,
+        weight_scale=0.03 * gws,
         delay_min=_delay_or_default(delay_steps, default=0),
         delay_max=_delay_or_default(delay_steps, default=3),
         target_compartment=Compartment.DENDRITE,
@@ -374,7 +390,7 @@ def build_logic_gate_xor(
         generator=generator,
         device=resolved_device,
         dtype=dtype,
-        weight_scale=0.03,
+        weight_scale=0.03 * gws,
         delay_min=_delay_or_default(delay_steps, default=1),
         delay_max=_delay_or_default(delay_steps, default=3),
         target_compartment=Compartment.DENDRITE,
@@ -389,7 +405,7 @@ def build_logic_gate_xor(
         generator=generator,
         device=resolved_device,
         dtype=dtype,
-        weight_scale=0.04,
+        weight_scale=syn_cfg["hidden_excit_to_out_weight_scale"] * gws,
         delay_min=_delay_or_default(delay_steps, default=0),
         delay_max=_delay_or_default(delay_steps, default=2),
         target_compartment=Compartment.DENDRITE,
@@ -404,7 +420,7 @@ def build_logic_gate_xor(
         generator=generator,
         device=resolved_device,
         dtype=dtype,
-        weight_scale=0.04,
+        weight_scale=syn_cfg["hidden_inhib_to_out_weight_scale"] * gws,
         delay_min=_delay_or_default(delay_steps, default=0),
         delay_max=_delay_or_default(delay_steps, default=2),
         target_compartment=Compartment.SOMA,
@@ -489,7 +505,7 @@ def build_logic_gate_xor(
         generator=generator,
         device=resolved_device,
         dtype=dtype,
-        weight_scale=0.02,
+        weight_scale=0.02 * gws,
         delay_min=_delay_or_default(delay_steps, default=1),
         delay_max=_delay_or_default(delay_steps, default=3),
         target_compartment=Compartment.SOMA,
@@ -505,7 +521,7 @@ def build_logic_gate_xor(
         generator=generator,
         device=resolved_device,
         dtype=dtype,
-        weight_scale=0.02,
+        weight_scale=0.02 * gws,
         delay_min=_delay_or_default(delay_steps, default=1),
         delay_max=_delay_or_default(delay_steps, default=3),
         target_compartment=Compartment.SOMA,
@@ -590,11 +606,22 @@ def _bundle_and_engine(
     return engine, topology, handles
 
 
-def _make_neuron_model(neuron_model: LogicGateNeuronModel) -> Any:
+def _make_neuron_model(
+    neuron_model: LogicGateNeuronModel,
+    *,
+    v_clamp_min: float = -0.200,
+    v_clamp_max: float = 0.100,
+) -> Any:
     if neuron_model == "lif_3c":
         return LIF3CompModel()
     if neuron_model == "adex_3c":
-        return AdEx3CompModel()
+        from biosnn.biophysics.models.adex_3c.model import AdEx3CompParams
+
+        # Enable voltage clamping with biophysically generous bounds to
+        # prevent pathological voltage divergence from long-τ receptor
+        # accumulation (e.g. NMDA τ=100 ms).
+        params = AdEx3CompParams(v_clamp_min=v_clamp_min, v_clamp_max=v_clamp_max)
+        return AdEx3CompModel(params)
     raise ValueError(f"Unsupported logic-gate neuron model: {neuron_model}")
 
 
@@ -700,7 +727,9 @@ def _build_fixed_fanin_topology(
         perm = torch.randperm(pre_candidates.numel(), generator=generator, device=device_obj)
         chosen = pre_candidates.index_select(0, perm[:fan_in])
         pre_chunks.append(chosen)
-        post_chunks.append(torch.full((fan_in,), int(post_idx.item()), device=device_obj, dtype=torch.long))
+        post_chunks.append(
+            torch.full((fan_in,), int(post_idx.item()), device=device_obj, dtype=torch.long)
+        )
 
     pre_idx = torch.cat(pre_chunks)
     post_idx = torch.cat(post_chunks)
@@ -709,10 +738,15 @@ def _build_fixed_fanin_topology(
     weights = torch.rand((edge_count,), generator=generator, device=device_obj, dtype=dtype)
     weights.mul_(float(weight_scale))
 
+    # Balance weights per post-neuron so each starts with equal total input.
+    _balance_weights_per_post(weights, post_idx)
+
     if delay_max < delay_min:
         raise ValueError("delay_max must be >= delay_min")
     if delay_max == delay_min:
-        delay_steps = torch.full((edge_count,), int(delay_min), device=device_obj, dtype=torch.int32)
+        delay_steps = torch.full(
+            (edge_count,), int(delay_min), device=device_obj, dtype=torch.int32
+        )
     else:
         delay_steps = torch.randint(
             low=int(delay_min),
@@ -732,6 +766,36 @@ def _build_fixed_fanin_topology(
         post_pos=post_positions,
         target_compartment=target_compartment,
     )
+
+
+def _balance_weights_per_post(
+    weights: Any,
+    post_idx: Any,
+) -> None:
+    """Normalise weights so every post-neuron receives the same total.
+
+    Target total = global mean-per-post-neuron weight sum, so relative
+    magnitudes within each fan-in group are preserved but every post
+    neuron starts from an equal footing.
+    """
+    if weights.numel() == 0 or post_idx.numel() == 0:
+        return
+    unique_posts = post_idx.unique()
+    if unique_posts.numel() <= 1:
+        return
+    sums: list[float] = []
+    for pid in unique_posts:
+        mask = post_idx == pid
+        s = float(weights[mask].sum().item())
+        sums.append(s)
+    target = sum(sums) / float(len(sums))  # mean total
+    if target <= 0.0:
+        return
+    for pid in unique_posts:
+        mask = post_idx == pid
+        cur = float(weights[mask].sum().item())
+        if cur > 1e-12:
+            weights[mask] = weights[mask] * (target / cur)
 
 
 def _resolve_synapse_cfg(run_spec: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -768,6 +832,88 @@ def _resolve_synapse_cfg(run_spec: Mapping[str, Any] | None) -> dict[str, Any]:
     delay_steps = _coerce_optional_nonnegative_int(
         _first_non_none(syn.get("delay_steps"), spec.get("delay_steps"))
     )
+
+    # Global weight scale: multiplies all per-projection weight_scale values.
+    # Use values < 1 to move weights into the biophysically meaningful
+    # (near-threshold) regime where spike counts respond to weight changes.
+    global_weight_scale = _coerce_nonnegative_float(
+        _first_non_none(
+            syn.get("global_weight_scale"),
+            spec.get("global_weight_scale"),
+        ),
+        default=1.0,
+    )
+
+    # Connectivity weight scales
+    in_to_hidden_weight_scale = _coerce_nonnegative_float(
+        _first_non_none(
+            syn.get("in_to_hidden_weight_scale"),
+            spec.get("in_to_hidden_weight_scale"),
+        ),
+        default=0.03,
+    )
+    hidden_excit_to_out_weight_scale = _coerce_nonnegative_float(
+        _first_non_none(
+            syn.get("hidden_excit_to_out_weight_scale"),
+            spec.get("hidden_excit_to_out_weight_scale"),
+        ),
+        default=0.03,
+    )
+    hidden_inhib_to_out_weight_scale = _coerce_nonnegative_float(
+        _first_non_none(
+            syn.get("hidden_inhib_to_out_weight_scale"),
+            spec.get("hidden_inhib_to_out_weight_scale"),
+        ),
+        default=0.04,
+    )
+
+    # Fan-in overrides for connectivity density.
+    in_to_hidden_fan_in = _coerce_nonnegative_int(
+        syn.get("in_to_hidden_fan_in"),
+        default=2,
+    )
+    skip_fan_in = _coerce_nonnegative_int(
+        syn.get("skip_fan_in"),
+        default=2,
+    )
+    hidden_excit_to_out_fan_in = _coerce_nonnegative_int(
+        syn.get("hidden_excit_to_out_fan_in"),
+        default=3,
+    )
+    hidden_inhib_to_out_fan_in = _coerce_nonnegative_int(
+        syn.get("hidden_inhib_to_out_fan_in"),
+        default=3,
+    )
+
+    # Voltage clamp for the neuron model (default matches legacy hardcoded)
+    v_clamp_min_val = syn.get("v_clamp_min")
+    v_clamp_max_val = syn.get("v_clamp_max")
+    v_clamp_min: float = float(v_clamp_min_val) if v_clamp_min_val is not None else -0.200
+    v_clamp_max: float = float(v_clamp_max_val) if v_clamp_max_val is not None else 0.100
+
+    # Target compartment for excitatory projections.  "dendrite" (default)
+    # mirrors cortical biology; "soma" bypasses dendritic coupling and
+    # gives faster, rate-coded responses useful for learning.
+    excit_target_raw = _coerce_choice(
+        syn.get("excit_target_compartment"),
+        allowed={"dendrite", "soma"},
+        default="dendrite",
+    )
+    excit_target_compartment = (
+        Compartment.SOMA if excit_target_raw == "soma" else Compartment.DENDRITE
+    )
+
+    # GABA receptor configuration
+    receptors = _as_mapping(syn.get("receptors"))
+    gabaa_mix = _coerce_nonnegative_float(
+        _first_non_none(receptors.get("gabaa_mix"), syn.get("gabaa_mix"), spec.get("gabaa_mix")),
+        default=1.0,
+    )
+    gabab_mix = _coerce_nonnegative_float(
+        _first_non_none(receptors.get("gabab_mix"), syn.get("gabab_mix"), spec.get("gabab_mix")),
+        default=0.25,
+    )
+
     return {
         "backend": backend,
         "ring_strategy": ring_strategy,
@@ -776,6 +922,19 @@ def _resolve_synapse_cfg(run_spec: Mapping[str, Any] | None) -> dict[str, Any]:
         "receptor_mode": receptor_mode,
         "store_sparse_by_delay": store_sparse_by_delay,
         "delay_steps": delay_steps,
+        "global_weight_scale": global_weight_scale,
+        "in_to_hidden_weight_scale": in_to_hidden_weight_scale,
+        "hidden_excit_to_out_weight_scale": hidden_excit_to_out_weight_scale,
+        "hidden_inhib_to_out_weight_scale": hidden_inhib_to_out_weight_scale,
+        "gabaa_mix": gabaa_mix,
+        "gabab_mix": gabab_mix,
+        "in_to_hidden_fan_in": in_to_hidden_fan_in,
+        "skip_fan_in": skip_fan_in,
+        "hidden_excit_to_out_fan_in": hidden_excit_to_out_fan_in,
+        "hidden_inhib_to_out_fan_in": hidden_inhib_to_out_fan_in,
+        "v_clamp_min": v_clamp_min,
+        "v_clamp_max": v_clamp_max,
+        "excit_target_compartment": excit_target_compartment,
     }
 
 
@@ -820,11 +979,13 @@ def _resolve_advanced_synapse_cfg(
     merged_reversal = dict(base.reversal_potential_v)
     rev_raw = _as_mapping(adv.get("reversal_potential_v"))
     for key, value in rev_raw.items():
-        merged_reversal[str(key).strip().lower()] = _coerce_float(value, merged_reversal.get(str(key), 0.0))
+        merged_reversal[str(key).strip().lower()] = _coerce_float(
+            value, merged_reversal.get(str(key), 0.0)
+        )
 
-    post_voltage_source_raw = str(
-        adv.get("post_voltage_source", base.post_voltage_source)
-    ).strip().lower()
+    post_voltage_source_raw = (
+        str(adv.get("post_voltage_source", base.post_voltage_source)).strip().lower()
+    )
     if post_voltage_source_raw not in {"auto", "soma", "dendrite"}:
         post_voltage_source_raw = base.post_voltage_source
     post_voltage_source = cast(AdvancedPostVoltageSource, post_voltage_source_raw)
@@ -833,9 +994,27 @@ def _resolve_advanced_synapse_cfg(
         enabled=bool(adv.get("enabled", base.enabled)),
         conductance_mode=bool(adv.get("conductance_mode", base.conductance_mode)),
         reversal_potential_v=merged_reversal,
-        bio_synapse=bool(_first_non_none(adv.get("bio_synapse"), syn.get("bio_synapse"), spec.get("bio_synapse"), base.bio_synapse)),
-        bio_nmda_block=bool(_first_non_none(adv.get("bio_nmda_block"), syn.get("bio_nmda_block"), spec.get("bio_nmda_block"), base.bio_nmda_block)),
-        bio_stp=bool(_first_non_none(adv.get("bio_stp"), syn.get("bio_stp"), spec.get("bio_stp"), base.bio_stp)),
+        bio_synapse=bool(
+            _first_non_none(
+                adv.get("bio_synapse"),
+                syn.get("bio_synapse"),
+                spec.get("bio_synapse"),
+                base.bio_synapse,
+            )
+        ),
+        bio_nmda_block=bool(
+            _first_non_none(
+                adv.get("bio_nmda_block"),
+                syn.get("bio_nmda_block"),
+                spec.get("bio_nmda_block"),
+                base.bio_nmda_block,
+            )
+        ),
+        bio_stp=bool(
+            _first_non_none(
+                adv.get("bio_stp"), syn.get("bio_stp"), spec.get("bio_stp"), base.bio_stp
+            )
+        ),
         nmda_voltage_block=bool(adv.get("nmda_voltage_block", base.nmda_voltage_block)),
         nmda_mg_mM=_coerce_float(adv.get("nmda_mg_mM"), base.nmda_mg_mM),
         nmda_v_half_v=_coerce_float(adv.get("nmda_v_half_v"), base.nmda_v_half_v),
@@ -850,12 +1029,7 @@ def _resolve_advanced_synapse_cfg(
 
 
 def _advanced_enabled(adv: AdvancedSynapseConfig) -> bool:
-    return bool(
-        adv.enabled
-        or adv.conductance_mode
-        or adv.nmda_voltage_block
-        or adv.stp_enabled
-    )
+    return bool(adv.enabled or adv.conductance_mode or adv.nmda_voltage_block or adv.stp_enabled)
 
 
 def _resolve_post_voltage_compartment(
@@ -909,10 +1083,12 @@ def _delay_or_default(value: int | None, *, default: int) -> int:
     return int(max(0, value))
 
 
-def _inhibitory_profile_for_mode(receptor_mode: str) -> ReceptorProfile:
+def _inhibitory_profile_for_mode(
+    receptor_mode: str, *, gabaa_mix: float = 1.0, gabab_mix: float = 0.25
+) -> ReceptorProfile:
     mode = str(receptor_mode).strip().lower()
     if mode == "ei_ampa_nmda_gabaa_gabab":
-        return profile_inh_gabaa_gabab()
+        return profile_inh_gabaa_gabab(gabaa_mix=float(gabaa_mix), gabab_mix=float(gabab_mix))
     return _profile_inh_gabaa_only()
 
 
@@ -939,6 +1115,28 @@ def _coerce_choice(value: Any, *, allowed: set[str], default: str) -> str:
     if normalized in allowed:
         return normalized
     return default
+
+
+def _coerce_nonnegative_float(value: Any, *, default: float) -> float:
+    """Coerce value to non-negative float with a default fallback."""
+    if value is None:
+        return float(default)
+    try:
+        result = float(value)
+        return max(0.0, result)  # Clamp to non-negative
+    except (ValueError, TypeError):
+        return float(default)
+
+
+def _coerce_nonnegative_int(value: Any, *, default: int) -> int:
+    """Coerce value to non-negative int with a default fallback."""
+    if value is None:
+        return int(default)
+    try:
+        result = int(value)
+        return max(0, result)
+    except (ValueError, TypeError):
+        return int(default)
 
 
 def _coerce_float(value: Any, default: float) -> float:

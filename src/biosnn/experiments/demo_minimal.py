@@ -73,6 +73,7 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
         allow_cuda_sync = run_mode == "dashboard"
     allow_cuda_sync = bool(allow_cuda_sync)
     monitor_async_gpu = cuda_device and not allow_cuda_sync
+    monitor_async_io = bool(cuda_device and not allow_cuda_sync)
 
     dtype = "float32"
     out_dir = Path(cfg.out_dir)
@@ -130,6 +131,7 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
                 append=False,
                 flush_every=25,
                 async_gpu=monitor_async_gpu,
+                async_io=monitor_async_io,
             ),
         ]
     else:
@@ -141,6 +143,7 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
                 safe_sample=safe_neuron_sample,
                 flush_every=25,
                 async_gpu=monitor_async_gpu,
+                async_io=monitor_async_io,
             ),
             SynapseCSVMonitor(
                 out_dir / "synapse.csv",
@@ -148,6 +151,7 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
                 stats=("mean", "std"),
                 flush_every=25,
                 async_gpu=monitor_async_gpu,
+                async_io=monitor_async_io,
             ),
         ]
         if not cuda_device or allow_cuda_sync:
@@ -160,6 +164,7 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
                     allow_cuda_sync=allow_cuda_sync,
                     append=False,
                     flush_every=25,
+                    async_io=monitor_async_io,
                 )
             )
         monitors.append(
@@ -169,6 +174,7 @@ def run_demo_minimal(cfg: DemoMinimalConfig) -> dict[str, Any]:
                 append=False,
                 flush_every=25,
                 async_gpu=monitor_async_gpu,
+                async_io=monitor_async_io,
             )
         )
 
@@ -225,5 +231,6 @@ def _edge_count(topology: Any) -> int:
         return len(pre_idx)
     except TypeError:
         return 0
+
 
 __all__ = ["DemoMinimalConfig", "run_demo_minimal"]

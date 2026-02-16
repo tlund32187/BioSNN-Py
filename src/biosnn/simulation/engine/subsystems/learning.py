@@ -49,7 +49,7 @@ class LearningSubsystem:
             clamp_min = proj.meta.get("clamp_min")
             clamp_max = proj.meta.get("clamp_max")
         if hasattr(proj.synapse, "params"):
-            params = proj.synapse.params
+            params = cast(Any, proj.synapse).params
             clamp_min = getattr(params, "clamp_min", clamp_min)
             clamp_max = getattr(params, "clamp_max", clamp_max)
         if clamp_min is None and clamp_max is None:
@@ -108,10 +108,18 @@ class LearningSubsystem:
                 ):
                     torch = require_torch()
                     scratch.edge_pre_idx = torch.empty((n_active,), device=device, dtype=torch.long)
-                    scratch.edge_post_idx = torch.empty((n_active,), device=device, dtype=torch.long)
-                    scratch.edge_pre = torch.empty((n_active,), device=device, dtype=pre_spikes.dtype)
-                    scratch.edge_post = torch.empty((n_active,), device=device, dtype=post_spikes.dtype)
-                    scratch.edge_weights = torch.empty((n_active,), device=device, dtype=weights.dtype)
+                    scratch.edge_post_idx = torch.empty(
+                        (n_active,), device=device, dtype=torch.long
+                    )
+                    scratch.edge_pre = torch.empty(
+                        (n_active,), device=device, dtype=pre_spikes.dtype
+                    )
+                    scratch.edge_post = torch.empty(
+                        (n_active,), device=device, dtype=post_spikes.dtype
+                    )
+                    scratch.edge_weights = torch.empty(
+                        (n_active,), device=device, dtype=weights.dtype
+                    )
                     scratch.size = n_active
 
                 edge_pre_idx = scratch.edge_pre_idx
@@ -161,7 +169,9 @@ class LearningSubsystem:
         )
         return batch, None
 
-    def require_pre_adjacency(self, topology: SynapseTopology, device: Any) -> tuple[Tensor, Tensor]:
+    def require_pre_adjacency(
+        self, topology: SynapseTopology, device: Any
+    ) -> tuple[Tensor, Tensor]:
         if not topology.meta:
             raise ValueError(
                 "Topology meta missing pre adjacency; compile_topology(..., build_pre_adjacency=True) "
@@ -174,7 +184,9 @@ class LearningSubsystem:
                 "Topology meta missing pre adjacency; compile_topology(..., build_pre_adjacency=True) "
                 "must be called."
             )
-        if not _devices_match(pre_ptr.device, device) or not _devices_match(edge_idx.device, device):
+        if not _devices_match(pre_ptr.device, device) or not _devices_match(
+            edge_idx.device, device
+        ):
             raise ValueError("Adjacency tensors must be on the projection device")
         return cast(Tensor, pre_ptr), cast(Tensor, edge_idx)
 
@@ -243,7 +255,7 @@ class LearningSubsystem:
     ) -> None:
         if active_edges is None and result.extras is not None:
             maybe_edges = result.extras.get("active_edges")
-            if isinstance(maybe_edges, Tensor):
+            if maybe_edges is not None:
                 active_edges = maybe_edges
 
         def _apply_to_weights(target: Tensor) -> None:

@@ -26,6 +26,8 @@ class RStdpEligibilityParams:
     lazy_decay_enabled: bool = True
     lazy_decay_step_dtype: str = "int32"
     lazy_decay_dense: bool = False
+    tau_pre: float = 0.0
+    tau_post: float = 0.0
 
 
 @dataclass(slots=True)
@@ -35,16 +37,23 @@ class RStdpEligibilityState:
     step: int
     last_mean_abs_dw: Tensor
     last_mean_abs_eligibility: Tensor
+    pre_trace: Tensor | None = None
+    post_trace: Tensor | None = None
 
 
 class RStdpEligibilityRule(ILearningRule):
     """Three-factor eligibility rule with dopamine-gated updates."""
 
     name = "rstdp_eligibility"
-    supports_sparse = True
 
     def __init__(self, params: RStdpEligibilityParams | None = None) -> None:
         self.params = params or RStdpEligibilityParams()
+        # Trace-based STDP requires dense learning: sparse mode only
+        # includes edges where pre spiked THIS step, but traces carry
+        # information from recent (not current) spikes.  Dense mode
+        # must be used so that decayed traces contribute to eligibility.
+        traces_enabled = self.params.tau_pre > 0.0 and self.params.tau_post > 0.0
+        self.supports_sparse: bool = not traces_enabled
 
     def init_state(self, e: int, *, ctx: Any) -> RStdpEligibilityState:
         torch = require_torch()
@@ -53,12 +62,19 @@ class RStdpEligibilityRule(ILearningRule):
         if self.params.lazy_decay_enabled:
             step_dtype = _resolve_step_dtype(torch, self.params.lazy_decay_step_dtype)
             last_update_step = torch.zeros((e,), device=device, dtype=step_dtype)
+        pre_trace = None
+        post_trace = None
+        if self.params.tau_pre > 0.0 and self.params.tau_post > 0.0:
+            pre_trace = torch.zeros((e,), device=device, dtype=dtype)
+            post_trace = torch.zeros((e,), device=device, dtype=dtype)
         return RStdpEligibilityState(
             eligibility=torch.zeros((e,), device=device, dtype=dtype),
             last_update_step=last_update_step,
             step=0,
             last_mean_abs_dw=torch.zeros((), device=device, dtype=dtype),
             last_mean_abs_eligibility=torch.zeros((), device=device, dtype=dtype),
+            pre_trace=pre_trace,
+            post_trace=post_trace,
         )
 
     def step(
@@ -82,8 +98,38 @@ class RStdpEligibilityRule(ILearningRule):
         if tau_e <= 0.0:
             raise ValueError("tau_e must be > 0 for eligibility decay.")
         decay = math.exp(-float(dt) / tau_e)
-        inc = float(self.params.a_plus) * (pre * post)
-        inc.add_(pre * (1.0 - post), alpha=-float(self.params.a_minus))
+
+        use_traces = state.pre_trace is not None and state.post_trace is not None
+        if use_traces:
+            assert state.pre_trace is not None
+            assert state.post_trace is not None
+            decay_pre = math.exp(-float(dt) / float(self.params.tau_pre))
+            decay_post = math.exp(-float(dt) / float(self.params.tau_post))
+            # Decay ALL trace entries (dense) each step
+            state.pre_trace.mul_(decay_pre)
+            state.post_trace.mul_(decay_post)
+            if sparse_mode:
+                assert active_edges is not None
+                # Read traces for active edges BEFORE adding current spikes
+                pre_t = state.pre_trace.index_select(0, active_edges)
+                post_t = state.post_trace.index_select(0, active_edges)
+                # Compute inc using traces (temporal STDP window)
+                inc = float(self.params.a_plus) * (pre_t * post)
+                inc.add_(pre * post_t, alpha=-float(self.params.a_minus))
+                # Update traces with current spikes for active edges
+                state.pre_trace.index_add_(0, active_edges, pre)
+                state.post_trace.index_add_(0, active_edges, post)
+            else:
+                # Compute inc using traces BEFORE adding current spikes
+                inc = float(self.params.a_plus) * (state.pre_trace * post)
+                inc.add_(pre * state.post_trace, alpha=-float(self.params.a_minus))
+                # Update traces with current spikes
+                state.pre_trace.add_(pre)
+                state.post_trace.add_(post)
+        else:
+            # Original instantaneous coincidence mode
+            inc = float(self.params.a_plus) * (pre * post)
+            inc.add_(pre * (1.0 - post), alpha=-float(self.params.a_minus))
 
         if sparse_mode:
             assert active_edges is not None
@@ -130,7 +176,9 @@ class RStdpEligibilityRule(ILearningRule):
                 state.last_update_step.fill_(int(state.step))
 
         dopamine = _resolve_dopamine(batch=batch, like=weights_local)
-        effective_dopamine = dopamine * float(self.params.dopamine_scale) + float(self.params.baseline)
+        effective_dopamine = dopamine * float(self.params.dopamine_scale) + float(
+            self.params.baseline
+        )
 
         dw = e_local * effective_dopamine
         dw.mul_(float(self.params.lr))
@@ -144,7 +192,9 @@ class RStdpEligibilityRule(ILearningRule):
             w_max=self.params.w_max,
         )
 
-        state.last_mean_abs_dw = dw.abs().mean() if dw.numel() else torch.zeros_like(state.last_mean_abs_dw)
+        state.last_mean_abs_dw = (
+            dw.abs().mean() if dw.numel() else torch.zeros_like(state.last_mean_abs_dw)
+        )
         state.last_mean_abs_eligibility = (
             e_local.abs().mean()
             if e_local.numel()
@@ -160,11 +210,16 @@ class RStdpEligibilityRule(ILearningRule):
         return state, LearningStepResult(d_weights=dw, extras=extras)
 
     def state_tensors(self, state: RStdpEligibilityState) -> dict[str, Tensor]:
-        return {
+        d: dict[str, Tensor] = {
             "eligibility": state.eligibility,
             "mean_abs_dw": state.last_mean_abs_dw,
             "mean_abs_eligibility": state.last_mean_abs_eligibility,
         }
+        if state.pre_trace is not None:
+            d["pre_trace"] = state.pre_trace
+        if state.post_trace is not None:
+            d["post_trace"] = state.post_trace
+        return d
 
 
 def _as_dtype(value: Tensor, *, like: Tensor) -> Tensor:

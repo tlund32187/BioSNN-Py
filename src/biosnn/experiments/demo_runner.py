@@ -23,6 +23,8 @@ def run_demo_from_spec(
     """Run a demo network from a spec and write dashboard artifacts."""
 
     fast_mode = runtime_config.mode.lower().strip() == "fast"
+    force_compiled = bool(getattr(runtime_config, "force_compiled_mode", False))
+    use_compiled = fast_mode or force_compiled
     out_dir = Path(runtime_config.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -34,8 +36,8 @@ def run_demo_from_spec(
         external_drive_fn=model_spec.external_drive_fn,
         releases_fn=model_spec.releases_fn,
         fast_mode=fast_mode,
-        compiled_mode=fast_mode,
-        learning_use_scratch=fast_mode,
+        compiled_mode=use_compiled,
+        learning_use_scratch=use_compiled,
         parallel_compile=runtime_config.parallel_compile,
         parallel_compile_workers=runtime_config.parallel_compile_workers,
         parallel_compile_torch_threads=runtime_config.parallel_compile_torch_threads,
@@ -118,5 +120,6 @@ def run_demo_from_spec(
         "steps": runtime_config.steps,
         "device": runtime_config.device,
     }
+
 
 __all__ = ["run_demo_from_spec"]

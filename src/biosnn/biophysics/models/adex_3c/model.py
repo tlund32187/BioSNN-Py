@@ -70,6 +70,13 @@ class AdEx3CompParams:
     reset_axon_on_spike: bool = True
     reset_dend_on_spike: bool = False
 
+    # Voltage clamp bounds (V).  Prevents unphysical divergence from
+    # long-τ receptor accumulation or extreme synaptic currents.
+    # Disabled by default (±inf).  For biophysical-scale parameters,
+    # set to e.g. v_clamp_min=-0.200, v_clamp_max=0.100.
+    v_clamp_min: float = float("-inf")
+    v_clamp_max: float = float("inf")
+
 
 @dataclass(slots=True)
 class AdEx3CompState:
@@ -279,18 +286,6 @@ class AdEx3CompModel(INeuronModel):
             dv_a = i_total_a / pt.c_a
             v_axon_next = v_axon + consts.dt * dv_a
 
-            if p.tau_w_s > 0.0:
-                dw_s = (pt.a_s * (v_soma_next - pt.e_l_s) - w_soma) / pt.tau_w_s
-                w_soma_next = w_soma + consts.dt * dw_s
-            else:
-                w_soma_next = w_soma
-
-            if p.tau_w_a > 0.0:
-                dw_a = (pt.a_a * (v_axon_next - pt.e_l_a) - w_axon) / pt.tau_w_a
-                w_axon_next = w_axon + consts.dt * dw_a
-            else:
-                w_axon_next = w_axon
-
             spike_signal = _select_spike_signal(
                 spike_source=p.spike_source,
                 v_soma=v_soma_next,
@@ -304,8 +299,29 @@ class AdEx3CompModel(INeuronModel):
             if p.reset_dend_on_spike:
                 v_dend_next = torch.where(spike_fired, consts.v_reset, v_dend_next)
 
+            # Adaptation update uses post-spike-reset voltages so the
+            # exponential blow-up does not contaminate w.
+            if p.tau_w_s > 0.0:
+                dw_s = (pt.a_s * (v_soma_next - pt.e_l_s) - w_soma) / pt.tau_w_s
+                w_soma_next = w_soma + consts.dt * dw_s
+            else:
+                w_soma_next = w_soma
+
+            if p.tau_w_a > 0.0:
+                dw_a = (pt.a_a * (v_axon_next - pt.e_l_a) - w_axon) / pt.tau_w_a
+                w_axon_next = w_axon + consts.dt * dw_a
+            else:
+                w_axon_next = w_axon
+
             w_soma_next = torch.where(spike_fired, w_soma_next + pt.b_s, w_soma_next)
             w_axon_next = torch.where(spike_fired, w_axon_next + pt.b_a, w_axon_next)
+
+            # Voltage clamping: prevent unphysical divergence from
+            # long-τ receptor accumulation (e.g. NMDA τ=100ms).
+            if p.v_clamp_min > float("-inf") or p.v_clamp_max < float("inf"):
+                v_soma_next = v_soma_next.clamp(min=p.v_clamp_min, max=p.v_clamp_max)
+                v_dend_next = v_dend_next.clamp(min=p.v_clamp_min, max=p.v_clamp_max)
+                v_axon_next = v_axon_next.clamp(min=p.v_clamp_min, max=p.v_clamp_max)
 
             refrac_left = (state.refrac_left - consts.dt).clamp(min=0.0)
             refrac_left = torch.where(spike_fired, consts.refrac_period, refrac_left)

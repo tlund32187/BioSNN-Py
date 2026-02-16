@@ -24,7 +24,7 @@ from biosnn.contracts.neurons import Compartment, StepContext
 from biosnn.contracts.simulation import ExcitabilityModulationConfig, SimulationConfig
 from biosnn.core.torch_utils import require_torch
 from biosnn.io.dashboard_export import export_population_topology_json
-from biosnn.io.sinks import CsvSink
+from biosnn.io.sinks import AsyncCsvSink, CsvSink
 from biosnn.learning import (
     EligibilityTraceHebbianParams,
     EligibilityTraceHebbianRule,
@@ -88,6 +88,8 @@ class _EngineBuild:
     modulator_state: dict[str, Any]
     learning_proj_names: tuple[str, ...]
     learning_proj_name: str | None
+    synaptic_scaling_enabled: bool
+    synaptic_scaling_target_sums: dict[str, dict[int, float]]
 
 
 @dataclass(slots=True)
@@ -99,10 +101,22 @@ class _WeightExportProjection:
 
 @dataclass(slots=True)
 class _MonitorWriters:
-    spikes_sink: CsvSink | None
-    weights_sink: CsvSink | None
+    spikes_sink: CsvSink | AsyncCsvSink | None
+    weights_sink: CsvSink | AsyncCsvSink | None
     spike_populations: tuple[str, ...]
     weight_projections: tuple[_WeightExportProjection, ...]
+
+
+def _make_sink(
+    path: str | Path,
+    *,
+    flush_every: int = 1,
+    async_io: bool = False,
+) -> CsvSink | AsyncCsvSink:
+    """Create a CSV sink, optionally async for CUDA runs with monitors."""
+    if async_io:
+        return AsyncCsvSink(path, flush_every=flush_every)
+    return CsvSink(path, flush_every=flush_every)
 
 
 def select_action_wta(
@@ -115,13 +129,16 @@ def select_action_wta(
     rng: random.Random,
 ) -> tuple[int, dict[str, Any]]:
     torch = require_torch()
-    counts = spike_counts.reshape(-1).to(dtype=torch.float32)
-    if int(counts.numel()) <= 0:
+    # Single GPU→CPU transfer for the (tiny) counts vector,
+    # then all decision logic runs on CPU without further syncs.
+    counts_cpu = spike_counts.detach().reshape(-1).to(device="cpu", dtype=torch.float32)
+    n = int(counts_cpu.numel())
+    if n <= 0:
         raise ValueError("WTA action selection requires at least one output value.")
 
-    max_value = float(counts.max().item())
-    max_indices_tensor = torch.nonzero(counts == max_value, as_tuple=False).reshape(-1)
-    max_indices = [int(value.item()) for value in max_indices_tensor]
+    max_value = float(counts_cpu.max())
+    max_indices_tensor = torch.nonzero(counts_cpu == max_value, as_tuple=False).reshape(-1)
+    max_indices = max_indices_tensor.tolist()
     if not max_indices:
         max_indices = [0]
     tie = len(max_indices) > 1
@@ -145,8 +162,8 @@ def select_action_wta(
 
     explored = False
     action = int(greedy)
-    if epsilon > 0.0 and int(counts.numel()) > 1 and rng.random() < epsilon:
-        action = int(rng.randrange(int(counts.numel())))
+    if epsilon > 0.0 and n > 1 and rng.random() < epsilon:
+        action = int(rng.randrange(n))
         explored = True
 
     return action, {
@@ -166,14 +183,15 @@ def _should_commit_action_force(
 ) -> bool:
     mode_norm = str(mode).strip().lower()
     explored = bool(action_info.get("explored", False)) if action_info else False
-    if mode_norm == "always":
+    if mode_norm in {"always", "supervised"}:
         return True
     try:
         chosen_idx = int(chosen_action)
         if chosen_idx < 0:
             return False
-        selected_spikes = float(out_spike_counts[chosen_idx].item())
-        silent = selected_spikes <= 0.0
+        # Use bool(tensor) instead of .item() — avoids an explicit CUDA sync
+        # for this single-element comparison.
+        silent = bool(out_spike_counts[chosen_idx] <= 0)
         if mode_norm == "explore_only":
             return explored
         if mode_norm == "silent_only":
@@ -308,8 +326,11 @@ def _resolve_action_force_cfg(
         ),
         "mode": _coerce_choice(
             _first_non_none(raw.get("mode"), default_mode),
-            allowed={"explore_only", "silent_only", "explore_or_silent", "always"},
+            allowed={"explore_only", "silent_only", "explore_or_silent", "always", "supervised"},
             default=default_mode,
+        ),
+        "suppression_factor": _coerce_float(
+            _first_non_none(raw.get("suppression_factor"), -0.25), -0.25
         ),
     }
 
@@ -424,6 +445,11 @@ def run_logic_gate_engine(
     targets_flat = targets.reshape(4)
     encoded_inputs = _build_encoded_input_table(inputs=inputs, dt=config.dt)
 
+    # Precompute target bits on CPU once — avoids a CUDA sync per trial.
+    target_bits_cpu: list[int] = [int(v >= 0.5) for v in targets_flat.tolist()]
+    # Also precompute static per-case input values for CSV logging.
+    inputs_cpu: list[list[float]] = inputs.tolist()
+
     case_indices = sample_case_indices(
         config.steps,
         method=config.sampling_method,
@@ -459,10 +485,13 @@ def run_logic_gate_engine(
     )
 
     monitors_enabled = _resolve_monitors_enabled(run_spec)
+    sink_async_io = device == "cuda" and monitors_enabled
     trial_flush_every = 1 if monitors_enabled else max(1, config.export_every)
-    trial_sink = CsvSink(run_dir / "trials.csv", flush_every=trial_flush_every)
-    eval_sink = CsvSink(run_dir / "eval.csv", flush_every=1)
-    confusion_sink = CsvSink(run_dir / "confusion.csv", flush_every=1)
+    trial_sink = _make_sink(
+        run_dir / "trials.csv", flush_every=trial_flush_every, async_io=sink_async_io
+    )
+    eval_sink = _make_sink(run_dir / "eval.csv", flush_every=1, async_io=sink_async_io)
+    confusion_sink = _make_sink(run_dir / "confusion.csv", flush_every=1, async_io=sink_async_io)
     last_trials: deque[dict[str, Any]] | None = (
         deque(maxlen=config.dump_last_trials_n) if config.dump_last_trials_csv else None
     )
@@ -472,6 +501,7 @@ def run_logic_gate_engine(
         run_spec=run_spec,
         run_dir=run_dir,
         flush_every=max(1, config.export_every),
+        async_io=sink_async_io,
     )
 
     tracker = PassTracker(gate)
@@ -484,8 +514,9 @@ def run_logic_gate_engine(
     t0 = perf_counter()
     sim_step = 0
 
-    predictions = torch.zeros((4,), device=inputs.device, dtype=inputs.dtype)
+    predictions = torch.zeros((4,), device="cpu", dtype=inputs.dtype)
     case_scores = predictions.clone()
+    targets_flat_cpu = targets_flat.detach().to(device="cpu")
 
     init_elig, init_dw, init_w_min, init_w_max, init_w_mean = _learning_stats(
         engine=engine,
@@ -493,7 +524,7 @@ def run_logic_gate_engine(
     )
     init_eval_acc, init_confusion = eval_accuracy(
         predictions,
-        targets_flat,
+        targets_flat_cpu,
         report_confusion=True,
     )
     eval_sink.write_row(
@@ -519,9 +550,14 @@ def run_logic_gate_engine(
     confusion_sink.write_row({"trial": 0, **init_confusion})
 
     last_trials_csv: Path | None = None
+    inter_trial_reset = bool(getattr(config, "inter_trial_reset", False))
+    reset_traces_between_trials = bool(getattr(config, "reset_traces_between_trials", False))
     try:
         for trial_idx, case_idx in enumerate(case_sequence, start=1):
-            target_value = targets_flat[case_idx]
+            if inter_trial_reset:
+                engine.reset_inter_trial_state()
+            if reset_traces_between_trials:
+                engine.reset_learning_traces()
             input_drive = encoded_inputs[case_idx].clone()
             _apply_gate_context_drive(input_drive, gate=gate)
             out_spike_counts, hidden_spike_counts, sim_step = _run_trial_steps(
@@ -541,9 +577,16 @@ def run_logic_gate_engine(
                 rng=decision_rng,
             )
             chosen_action = int(pred_bit)
-            engine_build.modulator_state["dopamine_focus_action"] = chosen_action
-            target_bit = int((target_value >= 0.5).item())
+            af_mode = str(action_force_cfg.get("mode", "explore_or_silent")).strip().lower()
+            target_bit = target_bits_cpu[case_idx]
             correct = int(chosen_action == target_bit)
+            # In supervised mode, focus DA on the correct action and always
+            # deliver positive dopamine so the correct output is always
+            # reinforced — even when the chosen action was wrong.
+            if af_mode == "supervised":
+                engine_build.modulator_state["dopamine_focus_action"] = int(target_bit)
+            else:
+                engine_build.modulator_state["dopamine_focus_action"] = chosen_action
             sampled_correct += correct
             rolling_correct.append(correct)
             trial_acc_rolling = sum(rolling_correct) / float(len(rolling_correct))
@@ -555,13 +598,37 @@ def run_logic_gate_engine(
             action_window = str(action_force_cfg["window"])
             action_steps = int(action_force_cfg["steps"])
 
-            dopamine_pulse = _queue_trial_feedback_releases(
-                pending_releases=engine_build.pending_releases,
-                modulator_kinds=engine_build.modulator_kinds,
-                modulator_amount=engine_build.modulator_amount,
-                correct=bool(correct),
+            dopamine_pulse: float = 0.0
+            # In supervised mode, use error-only DA delivery:
+            #  - correct prediction → DA=0 (no weight change)
+            #  - wrong prediction → DA=+1 (positive DA with action force
+            #    driving the TARGET output → teaches correct response)
+            # This matches the runner's error-gated learning and prevents
+            # class-imbalance collapse (3:1 OR-gate bias).
+            if af_mode == "supervised" and bool(correct):
+                # Skip DA on correct trials — no learning needed
+                pass
+            else:
+                dopamine_pulse = _queue_trial_feedback_releases(
+                    pending_releases=engine_build.pending_releases,
+                    modulator_kinds=engine_build.modulator_kinds,
+                    modulator_amount=engine_build.modulator_amount,
+                    correct=True if af_mode == "supervised" else bool(correct),
+                )
+            # CRITICAL FIX: Ensure at least 1 step happens when dopamine is queued
+            # so the modulator system has a chance to process it
+            has_pending_dopamine = bool(
+                float(engine_build.pending_releases.get(ModulatorKind.DOPAMINE, 0.0)) != 0.0
             )
-            if reward_delivery_steps > 0:
+            effective_reward_steps = (
+                max(1, int(reward_delivery_steps))
+                if has_pending_dopamine
+                else int(reward_delivery_steps)
+            )
+            if effective_reward_steps > 0:
+                # Reset the d_weights accumulator so we aggregate over the
+                # reward delivery window only (not the stimulus phase).
+                engine.reset_d_weights_accum()
                 should_force_action = (
                     bool(action_force_cfg["enabled"])
                     and _should_commit_action_force(
@@ -576,27 +643,29 @@ def run_logic_gate_engine(
                 )
                 reward_input = _reward_window_input_drive(
                     input_drive=input_drive,
-                    clamp_input=reward_delivery_clamp_input and not should_force_action,
+                    clamp_input=bool(reward_delivery_clamp_input),
                 )
                 if should_force_action:
+                    af_target = int(target_bit) if af_mode == "supervised" else chosen_action
                     forced = _set_action_force_drive(
                         engine_build=engine_build,
-                        chosen_action=chosen_action,
+                        chosen_action=af_target,
                         amplitude=float(action_force_cfg["amplitude"]),
                         compartment=str(action_force_cfg["compartment"]),
+                        suppression_factor=float(action_force_cfg.get("suppression_factor", -0.25)),
                     )
                     if forced:
                         action_forced = 1
                         action_drive_amplitude = float(action_force_cfg["amplitude"])
                 force_steps = (
-                    min(max(0, int(action_steps)), max(0, int(reward_delivery_steps)))
+                    min(max(0, int(action_steps)), max(0, int(effective_reward_steps)))
                     if action_forced
                     else 0
                 )
                 reward_out_counts, _, sim_step = _run_trial_steps(
                     engine_build=engine_build,
                     input_drive=reward_input,
-                    sim_steps_per_trial=reward_delivery_steps,
+                    sim_steps_per_trial=effective_reward_steps,
                     action_force_steps=force_steps,
                     step_offset=sim_step,
                     monitor_writers=monitor_writers,
@@ -606,6 +675,12 @@ def run_logic_gate_engine(
             else:
                 # Prevent delayed modulators from spilling into the next trial stimulus window.
                 _discard_pending_releases(pending_releases=engine_build.pending_releases)
+            # --- synaptic scaling after reward delivery -----------------------
+            if engine_build.synaptic_scaling_enabled:
+                _apply_synaptic_scaling(
+                    engine=engine,
+                    scaling_targets=engine_build.synaptic_scaling_target_sums,
+                )
             (
                 mean_eligibility_abs,
                 mean_abs_dw,
@@ -616,25 +691,42 @@ def run_logic_gate_engine(
                 engine=engine,
                 learning_proj_names=engine_build.learning_proj_names,
             )
-            hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(
-                config.sim_steps_per_trial
+            debug_stats = _per_output_learning_debug(
+                engine=engine,
+                learning_proj_names=engine_build.learning_proj_names,
+                n_outputs=2,
             )
+            hidden_mean_spikes_gpu = hidden_spike_counts.mean()
             tie_behavior = int(bool(action_info.get("tie", False)))
-            no_spikes = int(float(out_spike_counts.sum().item()) <= 0.0)
+
+            # Batch all small GPU→CPU transfers into a single copy.
+            trial_gpu = torch.cat(
+                [
+                    hidden_mean_spikes_gpu.unsqueeze(0),
+                    out_spike_counts.detach().to(dtype=input_drive.dtype),
+                    input_drive.detach(),
+                ]
+            )
+            trial_cpu = trial_gpu.cpu()
+            hidden_mean_spikes = float(trial_cpu[0]) / float(config.sim_steps_per_trial)
+            n_out = out_spike_counts.numel()
+            out_counts_cpu = trial_cpu[1 : 1 + n_out]
+            no_spikes = int(float(out_counts_cpu.sum()) <= 0.0)
+            input_drive_cpu = trial_cpu[1 + n_out :]
 
             trial_row = {
                 "trial": trial_idx,
                 "sim_step_end": sim_step,
                 "case_idx": case_idx,
-                "x0": float(inputs[case_idx, 0].item()),
-                "x1": float(inputs[case_idx, 1].item()),
-                "in_bit0_0_drive": float(input_drive[INPUT_NEURON_INDICES["bit0_0"]].item()),
-                "in_bit0_1_drive": float(input_drive[INPUT_NEURON_INDICES["bit0_1"]].item()),
-                "in_bit1_0_drive": float(input_drive[INPUT_NEURON_INDICES["bit1_0"]].item()),
-                "in_bit1_1_drive": float(input_drive[INPUT_NEURON_INDICES["bit1_1"]].item()),
-                "in_gate_context_drive": _gate_context_drive_value(input_drive),
-                "out_spikes_0": float(out_spike_counts[OUTPUT_NEURON_INDICES["class_0"]].item()),
-                "out_spikes_1": float(out_spike_counts[OUTPUT_NEURON_INDICES["class_1"]].item()),
+                "x0": inputs_cpu[case_idx][0],
+                "x1": inputs_cpu[case_idx][1],
+                "in_bit0_0_drive": float(input_drive_cpu[INPUT_NEURON_INDICES["bit0_0"]]),
+                "in_bit0_1_drive": float(input_drive_cpu[INPUT_NEURON_INDICES["bit0_1"]]),
+                "in_bit1_0_drive": float(input_drive_cpu[INPUT_NEURON_INDICES["bit1_0"]]),
+                "in_bit1_1_drive": float(input_drive_cpu[INPUT_NEURON_INDICES["bit1_1"]]),
+                "in_gate_context_drive": _gate_context_drive_value(input_drive_cpu),
+                "out_spikes_0": float(out_counts_cpu[OUTPUT_NEURON_INDICES["class_0"]]),
+                "out_spikes_1": float(out_counts_cpu[OUTPUT_NEURON_INDICES["class_1"]]),
                 "hidden_mean_spikes": hidden_mean_spikes,
                 "dopamine_pulse": dopamine_pulse,
                 "trial_acc_rolling": trial_acc_rolling,
@@ -654,12 +746,13 @@ def run_logic_gate_engine(
                 "target": target_bit,
                 "pred": chosen_action,
                 "correct": correct,
+                **debug_stats,
             }
             trial_sink.write_row(trial_row)
             if last_trials is not None:
                 last_trials.append(dict(trial_row))
 
-            eval_acc = float(eval_accuracy(predictions, targets_flat))
+            eval_acc = float(eval_accuracy(predictions, targets_flat_cpu))
             tracker.update(eval_acc)
             if tracker.passed and first_pass_trial is None:
                 first_pass_trial = trial_idx
@@ -667,7 +760,7 @@ def run_logic_gate_engine(
             if (trial_idx % config.export_every) == 0 or trial_idx == config.steps:
                 sample_acc = sampled_correct / float(trial_idx)
                 eval_acc_full, confusion = eval_accuracy(
-                    predictions, targets_flat, report_confusion=True
+                    predictions, targets_flat_cpu, report_confusion=True
                 )
                 eval_sink.write_row(
                     {
@@ -715,7 +808,7 @@ def run_logic_gate_engine(
             last_sink.close()
 
     elapsed_s = perf_counter() - t0
-    final_eval_acc = float(eval_accuracy(predictions, targets_flat))
+    final_eval_acc = float(eval_accuracy(predictions, targets_flat_cpu))
     sample_accuracy = sampled_correct / float(config.steps)
 
     return {
@@ -761,7 +854,8 @@ def _run_trial_steps(
     torch = require_torch()
     engine_build.current_input_drive["tensor"] = input_drive
     mod_state = engine_build.modulator_state
-    input_active = bool(float(input_drive.abs().sum().item()) > 0.0)
+    # Use .any() — single torch op, no explicit .item() sync.
+    input_active = bool(input_drive.any())
     if mod_state:
         mod_state["input_active"] = input_active
         mod_state["ach_pulse_emitted"] = False
@@ -772,10 +866,12 @@ def _run_trial_steps(
     ]
     if not hidden_spikes_by_pop:
         raise RuntimeError("Engine topology does not define any hidden population.")
-    output_counts = torch.zeros_like(out_spikes, dtype=input_drive.dtype)
+    # Pre-allocate accumulators once with the target dtype so the per-step
+    # loop can use in-place add_ without a .to(dtype=...) temporary each step.
+    acc_dtype = input_drive.dtype
+    output_counts = torch.zeros(out_spikes.shape, device=out_spikes.device, dtype=acc_dtype)
     hidden_counts_by_pop = [
-        torch.zeros_like(hidden_spikes, dtype=input_drive.dtype)
-        for hidden_spikes in hidden_spikes_by_pop
+        torch.zeros(hs.shape, device=hs.device, dtype=acc_dtype) for hs in hidden_spikes_by_pop
     ]
     global_step = int(step_offset)
     force_steps = max(0, int(action_force_steps))
@@ -793,15 +889,13 @@ def _run_trial_steps(
                 monitor_writers=monitor_writers,
                 step=global_step,
             )
+            # In-place add of bool spikes — PyTorch auto-promotes
+            # bool→float32 inside add_(), no per-step .to() allocation.
             output_counts.add_(
-                engine_build.engine._pop_states[engine_build.output_population].spikes.to(
-                    dtype=input_drive.dtype
-                )
+                engine_build.engine._pop_states[engine_build.output_population].spikes
             )
             for pop_idx, pop_name in enumerate(engine_build.hidden_populations):
-                hidden_counts_by_pop[pop_idx].add_(
-                    engine_build.engine._pop_states[pop_name].spikes.to(dtype=input_drive.dtype)
-                )
+                hidden_counts_by_pop[pop_idx].add_(engine_build.engine._pop_states[pop_name].spikes)
     finally:
         if force_steps > 0:
             _clear_action_force_drive(engine_build=engine_build)
@@ -880,6 +974,7 @@ def _set_action_force_drive(
     chosen_action: int,
     amplitude: float,
     compartment: str,
+    suppression_factor: float = -0.25,
 ) -> bool:
     torch = require_torch()
     if float(amplitude) <= 0.0:
@@ -902,7 +997,7 @@ def _set_action_force_drive(
     # Amplify chosen output
     drive[action_idx] = float(amplitude)
     # Suppress other outputs to create output separation
-    suppression_strength = -0.25 * float(amplitude)  # Slightly negative to suppress alternatives
+    suppression_strength = float(suppression_factor) * float(amplitude)
     for i in range(n_out):
         if i != action_idx:
             drive[i] = suppression_strength
@@ -1000,6 +1095,206 @@ def _compartment_from_name(value: str) -> Compartment:
     return Compartment.SOMA
 
 
+def _per_output_learning_debug(
+    *,
+    engine: TorchNetworkEngine,
+    learning_proj_names: tuple[str, ...],
+    n_outputs: int,
+) -> dict[str, float]:
+    """Return per-output-neuron weight and dopamine diagnostics.
+
+    Keys produced (for each output class ``c``):
+      - ``w_out{c}_mean``, ``w_out{c}_min``, ``w_out{c}_max``
+      - ``elig_out{c}_mean`` — mean |eligibility| for edges to output *c*
+      - ``dopa_out{c}_mean`` — mean dopamine level at output *c* position
+      - ``dw_accum_abs_sum`` — accumulated |dw| over the reward window
+      - ``dw_accum_count`` — number of elements in the accumulator
+
+    All GPU scalar reductions are batched into a single CPU transfer to avoid
+    per-metric CUDA synchronisation stalls.
+    """
+    torch_local = require_torch()
+    stats: dict[str, float] = {}
+
+    # Aggregate d_weights accumulator for visibility
+    total_accum_sum = 0.0
+    total_accum_count = 0
+    for proj_name in learning_proj_names:
+        acc_sum, acc_count = engine.get_d_weights_accum(proj_name)
+        total_accum_sum += acc_sum
+        total_accum_count += acc_count
+    stats["dw_accum_abs_sum"] = total_accum_sum
+    stats["dw_accum_count"] = float(total_accum_count)
+
+    # Collect all GPU scalar results in order, then do one CPU transfer.
+    gpu_values: list[Any] = []  # GPU scalar tensors
+    gpu_keys: list[str] = []  # corresponding stat keys
+
+    capped = min(n_outputs, 2)
+
+    for proj_name in learning_proj_names:
+        proj_spec = next((s for s in engine._proj_specs if s.name == proj_name), None)
+        proj_state = engine._proj_states.get(proj_name)
+        if proj_spec is None or proj_state is None:
+            continue
+
+        # Per-output weights
+        weights = getattr(proj_state.state, "weights", None)
+        if weights is None:
+            weights = proj_spec.topology.weights
+        if weights is None:
+            continue
+        post_idx = proj_spec.topology.post_idx
+        for out_idx in range(capped):
+            mask = post_idx == out_idx
+            if not mask.any():
+                continue
+            w_out = weights[mask]
+            gpu_values.extend([w_out.mean(), w_out.min(), w_out.max(), w_out.sum()])
+            gpu_keys.extend(
+                [
+                    f"w_out{out_idx}_mean",
+                    f"w_out{out_idx}_min",
+                    f"w_out{out_idx}_max",
+                    f"w_out{out_idx}_sum",
+                ]
+            )
+
+        # Per-output eligibility
+        if proj_spec.learning is not None and proj_state.learning_state is not None:
+            tensors = proj_spec.learning.state_tensors(proj_state.learning_state)
+            elig = tensors.get("eligibility")
+            if elig is not None and int(elig.numel()) > 0:
+                for out_idx in range(capped):
+                    mask = post_idx == out_idx
+                    if not mask.any():
+                        continue
+                    elig_out = elig[mask]
+                    gpu_values.append(elig_out.abs().mean())
+                    gpu_keys.append(f"elig_out{out_idx}_mean")
+
+        # Per-output dopamine (from modulator subsystem)
+        if hasattr(engine, "_compiled_edge_mods_by_proj"):
+            edge_mods_cache = engine._compiled_edge_mods_by_proj.get(proj_name)
+            if edge_mods_cache:
+                from biosnn.contracts.modulators import ModulatorKind as MK
+
+                dopa_tensor = edge_mods_cache.get(MK.DOPAMINE)
+                if (
+                    dopa_tensor is not None
+                    and hasattr(dopa_tensor, "numel")
+                    and int(dopa_tensor.numel()) > 0
+                ):
+                    for out_idx in range(capped):
+                        mask = post_idx == out_idx
+                        if not mask.any():
+                            continue
+                        dopa_out = dopa_tensor[mask]
+                        gpu_values.append(dopa_out.mean())
+                        gpu_keys.append(f"dopa_out{out_idx}_mean")
+
+    # --- Single GPU→CPU transfer for all collected scalars ----------------
+    if gpu_values:
+        stacked = torch_local.stack(gpu_values)
+        cpu = stacked.cpu()
+        for idx, key in enumerate(gpu_keys):
+            stats[key] = float(cpu[idx])
+
+    # Fill defaults for missing keys
+    for out_idx in range(capped):
+        for key in [
+            f"w_out{out_idx}_mean",
+            f"w_out{out_idx}_min",
+            f"w_out{out_idx}_max",
+            f"w_out{out_idx}_sum",
+            f"elig_out{out_idx}_mean",
+            f"dopa_out{out_idx}_mean",
+        ]:
+            stats.setdefault(key, 0.0)
+
+    return stats
+
+
+def _compute_initial_scaling_targets(
+    engine: TorchNetworkEngine,
+    learning_proj_names: tuple[str, ...],
+) -> dict[str, dict[int, float]]:
+    """Snapshot per-post-neuron weight sums for each learning projection.
+
+    Returns ``{proj_name: {post_neuron_id: target_sum}}``.  The target sum
+    is the mean total across post-neurons so every neuron aims for the same
+    total — preventing early asymmetry that leads to winner-take-all.
+    """
+    targets: dict[str, dict[int, float]] = {}
+    for proj_name in learning_proj_names:
+        proj = next((p for p in engine._proj_specs if p.name == proj_name), None)
+        if proj is None:
+            continue
+        proj_state = engine._proj_states.get(proj_name)
+        if proj_state is None:
+            continue
+        weights = getattr(proj_state.state, "weights", None)
+        if weights is None or int(weights.numel()) == 0:
+            continue
+        post_idx = proj.topology.post_idx
+        if post_idx is None:
+            continue
+
+        unique_posts = post_idx.unique()
+        sums: list[float] = []
+        for pid in unique_posts:
+            mask = post_idx == pid
+            sums.append(float(weights[mask].sum().item()))
+        mean_sum = sum(sums) / float(len(sums)) if sums else 0.0
+        if mean_sum <= 0.0:
+            continue
+        per_post: dict[int, float] = {}
+        for pid in unique_posts:
+            per_post[int(pid.item())] = mean_sum
+        targets[proj_name] = per_post
+    return targets
+
+
+def _apply_synaptic_scaling(
+    engine: TorchNetworkEngine,
+    scaling_targets: dict[str, dict[int, float]],
+) -> None:
+    """Multiplicative synaptic scaling — renormalise per-post-neuron.
+
+    For every learning projection listed in *scaling_targets*, the weights
+    feeding into each post-synaptic neuron are multiplicatively rescaled so
+    their total equals the target sum.  This prevents any single post
+    neuron from accumulating too much (or too little) drive and avoids the
+    winner-take-all saturation that otherwise stalls RSTDP learning.
+    """
+    if not scaling_targets:
+        return
+    for proj_name, per_post in scaling_targets.items():
+        proj = next((p for p in engine._proj_specs if p.name == proj_name), None)
+        if proj is None:
+            continue
+        proj_state = engine._proj_states.get(proj_name)
+        if proj_state is None:
+            continue
+        weights = getattr(proj_state.state, "weights", None)
+        if weights is None or int(weights.numel()) == 0:
+            continue
+        post_idx = proj.topology.post_idx
+        if post_idx is None:
+            continue
+
+        for pid_int, target in per_post.items():
+            mask = post_idx == pid_int
+            if not mask.any():
+                continue
+            w = weights[mask]
+            current = float(w.clamp(min=0.0).sum().item())
+            if current < 1e-12:
+                continue
+            scale = target / current
+            weights[mask] = (w * scale).clamp(min=0.0)
+
+
 def _learning_stats(
     *,
     engine: TorchNetworkEngine,
@@ -1009,9 +1304,9 @@ def _learning_stats(
         return 0.0, 0.0, float("nan"), float("nan"), float("nan")
 
     # Aggregate across all learning projections
-    all_eligibilities = []
-    all_d_weights = []
-    all_weights = []
+    all_eligibilities: list[Any] = []
+    all_d_weights: list[Any] = []
+    all_weights: list[Any] = []
 
     for proj_name in learning_proj_names:
         proj_state = engine._proj_states.get(proj_name)
@@ -1024,9 +1319,15 @@ def _learning_stats(
                 if eligibility is not None and int(eligibility.numel()) > 0:
                     all_eligibilities.append(eligibility.abs())
 
-        d_weights = engine.last_d_weights.get(proj_name)
-        if d_weights is not None and int(d_weights.numel()) > 0:
-            all_d_weights.append(d_weights.abs())
+        # Prefer the accumulated stats across the full reward window.
+        accum_sum, accum_count = engine.get_d_weights_accum(proj_name)
+        if accum_count > 0:
+            mean_from_accum = accum_sum / float(accum_count)
+            all_d_weights.append(mean_from_accum)
+        else:
+            d_weights = engine.last_d_weights.get(proj_name)
+            if d_weights is not None and int(d_weights.numel()) > 0:
+                all_d_weights.append(d_weights.abs())
 
         weights = None
         if proj_state is not None:
@@ -1036,29 +1337,46 @@ def _learning_stats(
         if weights is not None and int(weights.numel()) > 0:
             all_weights.append(weights)
 
-    mean_eligibility_abs = 0.0
-    if all_eligibilities:
-        torch_local = require_torch()
-        stacked = torch_local.cat(all_eligibilities, dim=0)
-        mean_eligibility_abs = float(stacked.mean().item())
+    # Build a single GPU tensor with all scalar results and transfer once.
+    torch_local = require_torch()
+    # Slots: [0]=mean_elig, [1]=mean_dw, [2]=w_min, [3]=w_max, [4]=w_mean
+    device = engine._device
+    buf = torch_local.zeros(5, device=device)
 
-    mean_abs_dw = 0.0
+    if all_eligibilities:
+        stacked = torch_local.cat(all_eligibilities, dim=0)
+        buf[0] = stacked.mean()
+
     if all_d_weights:
-        torch_local = require_torch()
-        stacked = torch_local.cat(all_d_weights, dim=0)
-        mean_abs_dw = float(stacked.mean().item())
+        # all_d_weights may contain a mix of float scalars (from accum)
+        # and tensors (from last_d_weights fallback).  Unify to tensor.
+        parts = []
+        for dw in all_d_weights:
+            if isinstance(dw, float):
+                parts.append(torch_local.tensor([dw], device=device))
+            else:
+                parts.append(dw)
+        stacked = torch_local.cat(parts, dim=0)
+        buf[1] = stacked.mean()
 
     if not all_weights:
-        return mean_eligibility_abs, mean_abs_dw, float("nan"), float("nan"), float("nan")
+        # Single transfer for eligibility + dw values
+        cpu = buf[:2].cpu()
+        return float(cpu[0]), float(cpu[1]), float("nan"), float("nan"), float("nan")
 
-    torch_local = require_torch()
     all_weights_flat = torch_local.cat([w.flatten() for w in all_weights], dim=0)
+    buf[2] = all_weights_flat.min()
+    buf[3] = all_weights_flat.max()
+    buf[4] = all_weights_flat.mean()
+
+    # Single GPU→CPU transfer for all 5 scalars
+    cpu = buf.cpu()
     return (
-        mean_eligibility_abs,
-        mean_abs_dw,
-        float(all_weights_flat.min().item()),
-        float(all_weights_flat.max().item()),
-        float(all_weights_flat.mean().item()),
+        float(cpu[0]),
+        float(cpu[1]),
+        float(cpu[2]),
+        float(cpu[3]),
+        float(cpu[4]),
     )
 
 
@@ -1074,11 +1392,16 @@ def _create_monitor_writers(
     run_spec: Mapping[str, Any],
     run_dir: Path,
     flush_every: int,
+    async_io: bool = False,
 ) -> _MonitorWriters | None:
     if not _resolve_monitors_enabled(run_spec):
         return None
-    spikes_sink = CsvSink(run_dir / "spikes.csv", flush_every=max(1, flush_every))
-    weights_sink = CsvSink(run_dir / "weights.csv", flush_every=max(1, flush_every))
+    spikes_sink = _make_sink(
+        run_dir / "spikes.csv", flush_every=max(1, flush_every), async_io=async_io
+    )
+    weights_sink = _make_sink(
+        run_dir / "weights.csv", flush_every=max(1, flush_every), async_io=async_io
+    )
     spike_populations = (
         engine_build.input_population,
         *engine_build.hidden_populations,
@@ -1409,13 +1732,18 @@ def run_logic_gate_curriculum_engine(
 
     inputs, _ = make_truth_table(LogicGate.AND, device=device, dtype="float32")
     encoded_inputs = _build_encoded_input_table(inputs=inputs, dt=config.dt)
+    inputs_cpu: list[list[float]] = inputs.tolist()
     targets_by_gate: dict[LogicGate, Any] = {}
+    target_bits_by_gate: dict[LogicGate, list[int]] = {}
+    targets_by_gate_cpu: dict[LogicGate, Any] = {}
     for gate in gate_sequence:
         _, targets = make_truth_table(gate, device=device, dtype=inputs.dtype)
         targets_by_gate[gate] = targets.reshape(4)
+        target_bits_by_gate[gate] = [int(v >= 0.5) for v in targets_by_gate[gate].tolist()]
+        targets_by_gate_cpu[gate] = targets_by_gate[gate].detach().to(device="cpu")
 
     predictions_by_gate: dict[LogicGate, Any] = {
-        gate: torch.zeros((4,), device=inputs.device, dtype=inputs.dtype) for gate in gate_sequence
+        gate: torch.zeros((4,), device="cpu", dtype=inputs.dtype) for gate in gate_sequence
     }
     exploration_cfg = _resolve_exploration_cfg(engine_run_spec, default_cfg=config.exploration)
     decision_rng = random.Random(int(exploration_cfg.seed))
@@ -1444,11 +1772,14 @@ def run_logic_gate_curriculum_engine(
     )
 
     monitors_enabled = _resolve_monitors_enabled(engine_run_spec)
+    sink_async_io = device == "cuda" and monitors_enabled
     trial_flush_every = 1 if monitors_enabled else max(1, config.export_every)
-    trial_sink = CsvSink(run_dir / "trials.csv", flush_every=trial_flush_every)
-    eval_sink = CsvSink(run_dir / "eval.csv", flush_every=1)
-    confusion_sink = CsvSink(run_dir / "confusion.csv", flush_every=1)
-    phase_sink = CsvSink(run_dir / "phase_summary.csv", flush_every=1)
+    trial_sink = _make_sink(
+        run_dir / "trials.csv", flush_every=trial_flush_every, async_io=sink_async_io
+    )
+    eval_sink = _make_sink(run_dir / "eval.csv", flush_every=1, async_io=sink_async_io)
+    confusion_sink = _make_sink(run_dir / "confusion.csv", flush_every=1, async_io=sink_async_io)
+    phase_sink = _make_sink(run_dir / "phase_summary.csv", flush_every=1, async_io=sink_async_io)
     last_trials: deque[dict[str, Any]] | None = (
         deque(maxlen=config.dump_last_trials_n) if config.dump_last_trials_csv else None
     )
@@ -1458,6 +1789,7 @@ def run_logic_gate_curriculum_engine(
         run_spec=engine_run_spec,
         run_dir=run_dir,
         flush_every=max(1, config.export_every),
+        async_io=sink_async_io,
     )
 
     debug_every = max(1, int(config.debug_every))
@@ -1472,7 +1804,7 @@ def run_logic_gate_curriculum_engine(
 
     try:
         for phase_idx, gate in enumerate(gate_sequence, start=1):
-            targets_flat = targets_by_gate[gate]
+            targets_flat = targets_by_gate_cpu[gate]
             train_gate_idx = _build_curriculum_gate_indices(
                 phase_index=phase_idx - 1,
                 phase_trials=phase_trials,
@@ -1496,8 +1828,6 @@ def run_logic_gate_curriculum_engine(
             for local_trial, case_idx in enumerate(case_sequence, start=1):
                 global_trial += 1
                 active_gate = gate_sequence[int(train_gate_idx[local_trial - 1].item())]
-                train_targets = targets_by_gate[active_gate]
-                target_value = train_targets[case_idx]
                 _activate_curriculum_gate_context(
                     engine_build=engine_build,
                     gate_context_cache=gate_context_cache,
@@ -1522,10 +1852,14 @@ def run_logic_gate_curriculum_engine(
                     rng=decision_rng,
                 )
                 chosen_action = int(pred_bit)
-                engine_build.modulator_state["dopamine_focus_action"] = chosen_action
+                af_mode_c = str(action_force_cfg.get("mode", "explore_or_silent")).strip().lower()
 
-                target_bit = int((target_value >= 0.5).item())
+                target_bit = target_bits_by_gate[active_gate][case_idx]
                 correct = int(chosen_action == target_bit)
+                if af_mode_c == "supervised":
+                    engine_build.modulator_state["dopamine_focus_action"] = int(target_bit)
+                else:
+                    engine_build.modulator_state["dopamine_focus_action"] = chosen_action
                 phase_correct += correct
                 if active_gate == gate:
                     phase_gate_correct += correct
@@ -1543,9 +1877,12 @@ def run_logic_gate_curriculum_engine(
                     pending_releases=engine_build.pending_releases,
                     modulator_kinds=engine_build.modulator_kinds,
                     modulator_amount=engine_build.modulator_amount,
-                    correct=bool(correct),
+                    correct=True if af_mode_c == "supervised" else bool(correct),
                 )
                 if reward_delivery_steps > 0:
+                    # Reset the d_weights accumulator so we aggregate over the
+                    # reward delivery window only (not the stimulus phase).
+                    engine.reset_d_weights_accum()
                     should_force_action = (
                         bool(action_force_cfg["enabled"])
                         and _should_commit_action_force(
@@ -1560,14 +1897,20 @@ def run_logic_gate_curriculum_engine(
                     )
                     reward_input = _reward_window_input_drive(
                         input_drive=input_drive,
-                        clamp_input=reward_delivery_clamp_input and not should_force_action,
+                        clamp_input=bool(reward_delivery_clamp_input),
                     )
                     if should_force_action:
+                        af_target_c = (
+                            int(target_bit) if af_mode_c == "supervised" else chosen_action
+                        )
                         forced = _set_action_force_drive(
                             engine_build=engine_build,
-                            chosen_action=chosen_action,
+                            chosen_action=af_target_c,
                             amplitude=float(action_force_cfg["amplitude"]),
                             compartment=str(action_force_cfg["compartment"]),
+                            suppression_factor=float(
+                                action_force_cfg.get("suppression_factor", -0.25)
+                            ),
                         )
                         if forced:
                             action_forced = 1
@@ -1589,6 +1932,12 @@ def run_logic_gate_curriculum_engine(
                         out_spike_counts.add_(reward_out_counts)
                 else:
                     _discard_pending_releases(pending_releases=engine_build.pending_releases)
+                # --- synaptic scaling after reward delivery -------------------
+                if engine_build.synaptic_scaling_enabled:
+                    _apply_synaptic_scaling(
+                        engine=engine,
+                        scaling_targets=engine_build.synaptic_scaling_target_sums,
+                    )
                 (
                     mean_eligibility_abs,
                     mean_abs_dw,
@@ -1599,13 +1948,21 @@ def run_logic_gate_curriculum_engine(
                     engine=engine,
                     learning_proj_names=engine_build.learning_proj_names,
                 )
+                debug_stats = _per_output_learning_debug(
+                    engine=engine,
+                    learning_proj_names=engine_build.learning_proj_names,
+                    n_outputs=2,
+                )
                 hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(
                     config.sim_steps_per_trial
                 )
-                out0 = float(out_spike_counts[OUTPUT_NEURON_INDICES["class_0"]].item())
-                out1 = float(out_spike_counts[OUTPUT_NEURON_INDICES["class_1"]].item())
+                # Single CPU transfer for small output/input vectors used in CSV row.
+                out_counts_cpu = out_spike_counts.detach().to(device="cpu")
+                out0 = float(out_counts_cpu[OUTPUT_NEURON_INDICES["class_0"]])
+                out1 = float(out_counts_cpu[OUTPUT_NEURON_INDICES["class_1"]])
                 tie_behavior = int(bool(action_info.get("tie", False)))
                 no_spikes = int((out0 + out1) <= 0.0)
+                input_drive_cpu = input_drive.detach().to(device="cpu")
 
                 trial_row = {
                     "phase": phase_idx,
@@ -1615,13 +1972,13 @@ def run_logic_gate_curriculum_engine(
                     "trial": global_trial,
                     "sim_step_end": sim_step,
                     "case_idx": case_idx,
-                    "x0": float(inputs[case_idx, 0].item()),
-                    "x1": float(inputs[case_idx, 1].item()),
-                    "in_bit0_0_drive": float(input_drive[INPUT_NEURON_INDICES["bit0_0"]].item()),
-                    "in_bit0_1_drive": float(input_drive[INPUT_NEURON_INDICES["bit0_1"]].item()),
-                    "in_bit1_0_drive": float(input_drive[INPUT_NEURON_INDICES["bit1_0"]].item()),
-                    "in_bit1_1_drive": float(input_drive[INPUT_NEURON_INDICES["bit1_1"]].item()),
-                    "in_gate_context_drive": _gate_context_drive_value(input_drive),
+                    "x0": inputs_cpu[case_idx][0],
+                    "x1": inputs_cpu[case_idx][1],
+                    "in_bit0_0_drive": float(input_drive_cpu[INPUT_NEURON_INDICES["bit0_0"]]),
+                    "in_bit0_1_drive": float(input_drive_cpu[INPUT_NEURON_INDICES["bit0_1"]]),
+                    "in_bit1_0_drive": float(input_drive_cpu[INPUT_NEURON_INDICES["bit1_0"]]),
+                    "in_bit1_1_drive": float(input_drive_cpu[INPUT_NEURON_INDICES["bit1_1"]]),
+                    "in_gate_context_drive": _gate_context_drive_value(input_drive_cpu),
                     "out_spikes_0": out0,
                     "out_spikes_1": out1,
                     "hidden_mean_spikes": hidden_mean_spikes,
@@ -1648,6 +2005,7 @@ def run_logic_gate_curriculum_engine(
                     "target": target_bit,
                     "pred": chosen_action,
                     "correct": correct,
+                    **debug_stats,
                 }
                 trial_sink.write_row(trial_row)
                 if last_trials is not None:
@@ -1671,7 +2029,7 @@ def run_logic_gate_curriculum_engine(
                     for eval_gate in gate_sequence:
                         global_eval_by_gate[eval_gate.value] = float(
                             eval_accuracy(
-                                predictions_by_gate[eval_gate], targets_by_gate[eval_gate]
+                                predictions_by_gate[eval_gate], targets_by_gate_cpu[eval_gate]
                             )
                         )
                     global_eval_accuracy = sum(global_eval_by_gate.values()) / float(
@@ -1784,7 +2142,7 @@ def run_logic_gate_curriculum_engine(
     final_eval_by_gate: dict[str, float] = {}
     for gate in gate_sequence:
         final_eval_by_gate[gate.value] = float(
-            eval_accuracy(predictions_by_gate[gate], targets_by_gate[gate])
+            eval_accuracy(predictions_by_gate[gate], targets_by_gate_cpu[gate])
         )
     final_gate = gate_sequence[-1]
     preds = predictions_by_gate[final_gate]
@@ -1910,7 +2268,7 @@ def _build_engine(
     modulator_kinds: tuple[ModulatorKind, ...] = ()
     modulator_amount = float(mods_cfg["amount"])
     modulator_state: dict[str, Any] = {}
-    releases_fn = None
+    releases_fn: Any = None
     if mods_cfg["enabled"]:
         modulator_kinds = _coerce_modulator_kinds(cast(Sequence[Any], mods_cfg["kinds"]))
         if not modulator_kinds:
@@ -1953,7 +2311,7 @@ def _build_engine(
             "dopamine_focus_action": None,
         }
 
-        def releases_fn(t: float, step: int, ctx: StepContext):  # type: ignore[no-redef]
+        def _releases_fn_impl(t: float, step: int, ctx: StepContext):
             _ = (t, step)
             torch_local = require_torch()
             dtype_local = _resolve_torch_dtype(torch_local, ctx.dtype, fallback=torch_local.float32)
@@ -1978,6 +2336,10 @@ def _build_engine(
             modulator_state["ach_pulse_emitted"] = ach_emitted
             return releases
 
+        releases_fn = _releases_fn_impl
+
+    _drive_scale = float(getattr(config, "drive_scale", 1.0))
+
     def external_drive_fn(t: float, step: int, pop_name: str, ctx: StepContext):
         _ = (t, step, ctx)
         merged_drive: dict[Compartment, Any] = {}
@@ -2001,6 +2363,8 @@ def _build_engine(
                     merged_drive[compartment] = values
                 else:
                     merged_drive[compartment] = existing + values
+        if _drive_scale != 1.0 and merged_drive:
+            merged_drive = {comp: val * _drive_scale for comp, val in merged_drive.items()}
         return merged_drive
 
     homeostasis_rule = None
@@ -2064,6 +2428,12 @@ def _build_engine(
     _validate_compiled_advanced_synapse_prerequisites(engine=engine)
     engine.set_training(learning_enabled)
 
+    # Synaptic scaling targets (snapshot initial per-post weight sums).
+    scaling_enabled = bool(learning_cfg.get("synaptic_scaling", True))
+    scaling_targets: dict[str, dict[int, float]] = {}
+    if scaling_enabled and learning_proj_names:
+        scaling_targets = _compute_initial_scaling_targets(engine, learning_proj_names)
+
     return _EngineBuild(
         engine=engine,
         input_population=handles.input_population,
@@ -2078,6 +2448,8 @@ def _build_engine(
         modulator_state=modulator_state,
         learning_proj_names=learning_proj_names,
         learning_proj_name=learning_proj_name,
+        synaptic_scaling_enabled=scaling_enabled,
+        synaptic_scaling_target_sums=scaling_targets,
     )
 
 
@@ -2136,7 +2508,7 @@ def _make_learning_rule(learning_cfg: Mapping[str, Any]) -> ILearningRule | None
         w_min_raw = learning_cfg.get("w_min")
         w_max_raw = learning_cfg.get("w_max")
         w_min = _coerce_float(w_min_raw, 0.0) if w_min_raw is not None else 0.0
-        w_max = _coerce_float(w_max_raw, 0.5) if w_max_raw is not None else 0.5
+        w_max = _coerce_float(w_max_raw, 1.0) if w_max_raw is not None else 1.0
         if w_max < w_min:
             w_min, w_max = w_max, w_min
         return RStdpEligibilityRule(
@@ -2144,13 +2516,34 @@ def _make_learning_rule(learning_cfg: Mapping[str, Any]) -> ILearningRule | None
                 lr=lr,
                 w_min=w_min,
                 w_max=w_max,
+                a_plus=_coerce_float(learning_cfg.get("a_plus"), 1.0),
+                a_minus=_coerce_float(learning_cfg.get("a_minus"), 0.6),
+                tau_e=_coerce_float(learning_cfg.get("tau_e"), 0.05),
+                weight_decay=_coerce_float(learning_cfg.get("weight_decay"), 1e-4),
+                dopamine_scale=_coerce_float(learning_cfg.get("dopamine_scale"), 1.0),
+                baseline=_coerce_float(learning_cfg.get("baseline"), 0.0),
+                tau_pre=_coerce_float(learning_cfg.get("tau_pre"), 0.0),
+                tau_post=_coerce_float(learning_cfg.get("tau_post"), 0.0),
             )
         )
     if rule_name in {"three_factor_eligibility_stdp", "three_factor_elig_stdp"}:
+        w_min_raw = learning_cfg.get("w_min")
+        w_max_raw = learning_cfg.get("w_max")
+        w_min = _coerce_float(w_min_raw, 0.0) if w_min_raw is not None else 0.0
+        w_max = _coerce_float(w_max_raw, 1.0) if w_max_raw is not None else 1.0
+        if w_max < w_min:
+            w_min, w_max = w_max, w_min
         return ThreeFactorEligibilityStdpRule(
             ThreeFactorEligibilityStdpParams(
                 lr=lr,
                 modulator_kind=modulator_kind,
+                clamp_min=w_min,
+                clamp_max=w_max,
+                a_plus=_coerce_float(learning_cfg.get("a_plus"), 1.0),
+                a_minus=_coerce_float(learning_cfg.get("a_minus"), 0.6),
+                tau_e=_coerce_float(learning_cfg.get("tau_e"), 0.05),
+                weight_decay=_coerce_float(learning_cfg.get("weight_decay"), 0.0),
+                modulator_threshold=_coerce_float(learning_cfg.get("modulator_threshold"), 0.0),
             )
         )
     if rule_name == "three_factor_hebbian":
@@ -2208,20 +2601,27 @@ def _resolve_learning_targets(
 ) -> tuple[str, ...]:
     """Resolve learning targets using exact names or glob patterns.
 
-    If targets is None, falls back to default behavior: select single primary projection.
+    If targets is None or empty, selects all non-inhibitory (excitatory /
+    mixed) projections so that hidden layers learn alongside the output
+    layer.
+
     If targets is a list, each entry can be:
-      - Exact projection name: "Hidden1Excit->Out"
-      - Glob pattern: "*Excit->Out", "Hidden*->*"
+      - Exact projection name: ``"Hidden1Excit->Out"``
+      - Glob pattern: ``"*Excit->Out"``, ``"Hidden*->*"``
     """
     by_name = {proj.name: proj for proj in projections}
 
     if not targets:
-        # Fallback to single default projection (backward compatible)
-        primary = _select_learning_projection_name(
-            projections=projections,
-            output_population=output_population,
-        )
-        return (primary,)
+        # Default: all excitatory / mixed projections (skip inhibitory).
+        excit = [name for name in by_name if "inhib" not in name.lower()]
+        if not excit:
+            # Fallback to single primary if everything is inhibitory (unlikely)
+            primary = _select_learning_projection_name(
+                projections=projections,
+                output_population=output_population,
+            )
+            return (primary,)
+        return tuple(sorted(excit))
 
     matched = set()
     for target_pattern in targets:
@@ -2392,7 +2792,17 @@ def _resolve_learning_cfg(
         "modulator_kind": modulator_kind,
         "w_min": _coerce_optional_float(learning.get("w_min")),
         "w_max": _coerce_optional_float(learning.get("w_max")),
+        "a_plus": _coerce_optional_float(learning.get("a_plus")),
+        "a_minus": _coerce_optional_float(learning.get("a_minus")),
+        "tau_e": _coerce_optional_float(learning.get("tau_e")),
+        "weight_decay": _coerce_optional_float(learning.get("weight_decay")),
+        "modulator_threshold": _coerce_optional_float(learning.get("modulator_threshold")),
         "targets": _coerce_string_list(learning.get("targets", ())),
+        "synaptic_scaling": bool(_first_non_none(learning.get("synaptic_scaling"), True)),
+        "tau_pre": _coerce_optional_float(learning.get("tau_pre")),
+        "tau_post": _coerce_optional_float(learning.get("tau_post")),
+        "dopamine_scale": _coerce_optional_float(learning.get("dopamine_scale")),
+        "baseline": _coerce_optional_float(learning.get("baseline")),
     }
 
 
@@ -2485,8 +2895,14 @@ def _resolve_wrapper_cfg(
     )
     if lr_clip_max < lr_clip_min:
         lr_clip_max = lr_clip_min
+    # Auto-enable wrapper if learning is enabled AND modulators are enabled
+    # This ensures dopamine/neuromodulators can properly modulate learning rates
+    learning_enabled = bool(learning.get("enabled", False))
+    modulators_enabled = bool(_as_mapping(run_spec.get("modulators")).get("enabled", False))
+    # When both learning and modulators are enabled, wrapper must be enabled for learning to work
+    wrapper_enabled_effective = learning_enabled and modulators_enabled
     return {
-        "enabled": bool(_first_non_none(wrapper.get("enabled"), defaults.get("enabled", False))),
+        "enabled": wrapper_enabled_effective,
         "ach_lr_gain": _coerce_float(
             _first_non_none(wrapper.get("ach_lr_gain"), defaults.get("ach_lr_gain"), 0.0), 0.0
         ),

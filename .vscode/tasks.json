@@ -118,11 +118,25 @@
       "problemMatcher": []
     },
     {
+      "label": "Checks: pyright",
+      "type": "shell",
+      "command": "pyright",
+      "args": [],
+      "options": {
+        "env": {
+          "PYTHONDONTWRITEBYTECODE": "1"
+        }
+      },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
       "label": "Build: verify all",
       "type": "shell",
       "dependsOn": [
         "Checks: ruff",
         "Checks: mypy",
+        "Checks: pyright",
         "Tests: pytest"
       ],
       "dependsOrder": "sequence",

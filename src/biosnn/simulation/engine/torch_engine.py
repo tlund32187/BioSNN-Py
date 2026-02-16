@@ -79,10 +79,12 @@ class TorchSimulationEngine(ISimulationEngine):
         self._synapse_state = self._synapse_model.init_state(edge_count, ctx=self._ctx)
 
         self._spikes = torch.zeros((self._n,), device=self._device, dtype=torch.bool)
-        _apply_initial_spikes(self._spikes, config.meta)
+        _apply_initial_spikes(cast(Tensor, self._spikes), config.meta)
 
         topology = self._topology
-        if topology.weights is None and getattr(self._synapse_state, "bind_weights_to_topology", False):
+        if topology.weights is None and getattr(
+            self._synapse_state, "bind_weights_to_topology", False
+        ):
             topology = replace(topology, weights=self._synapse_state.weights)
         _copy_topology_weights(self._synapse_state, topology.weights)
         topology = _ensure_topology_meta(topology, n_pre=self._n, n_post=self._n)
@@ -93,7 +95,7 @@ class TorchSimulationEngine(ISimulationEngine):
         reqs = None
         if hasattr(self._synapse_model, "compilation_requirements"):
             try:
-                reqs = self._synapse_model.compilation_requirements()
+                reqs = cast(Any, self._synapse_model).compilation_requirements()
             except Exception:
                 reqs = None
         if isinstance(reqs, Mapping):
@@ -135,7 +137,11 @@ class TorchSimulationEngine(ISimulationEngine):
         torch = require_torch()
         pre_spikes = self._spikes
         weights = getattr(self._synapse_state, "weights", None)
-        if weights is not None and hasattr(pre_spikes, "to") and pre_spikes.device != weights.device:
+        if (
+            weights is not None
+            and hasattr(pre_spikes, "to")
+            and pre_spikes.device != weights.device
+        ):
             pre_spikes = pre_spikes.to(device=weights.device)
 
         n_pre = self._n_pre
@@ -351,7 +357,7 @@ def _synapse_needs_post_membrane(synapse: ISynapseModel) -> bool:
     reqs = None
     if hasattr(synapse, "compilation_requirements"):
         try:
-            reqs = synapse.compilation_requirements()
+            reqs = cast(Any, synapse).compilation_requirements()
         except Exception:
             reqs = None
     if isinstance(reqs, Mapping) and "needs_post_membrane" in reqs:

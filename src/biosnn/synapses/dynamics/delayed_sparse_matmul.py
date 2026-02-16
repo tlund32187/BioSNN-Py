@@ -350,10 +350,7 @@ class DelayedSparseMatmulSynapse(ISynapseModel, ISynapseModelInplace):
         kinds: tuple[ReceptorKind, ...],
         scale_map: Mapping[ReceptorKind, float],
     ) -> Tensor:
-        values = tuple(
-            resolve_profile_value(scale_map, kind, default=1.0)
-            for kind in kinds
-        )
+        values = tuple(resolve_profile_value(scale_map, kind, default=1.0) for kind in kinds)
         key = (like.device, like.dtype, kinds, values)
         cached = self._scale_cache.get(key)
         if cached is not None:
@@ -1339,20 +1336,16 @@ def _ensure_receptor_profile_state(
         or state.receptor_mix.device != device
         or state.receptor_sign.device != device
     )
-    conductance_cache_invalid = (
-        _use_conductance_mode(model.params)
-        and (
-            state.receptor_e_rev is None
-            or state.receptor_nmda_mask is None
-            or state.receptor_e_rev.device != device
-            or state.receptor_nmda_mask.device != device
-            or state.receptor_e_rev.dtype != receptor_dtype
-        )
+    conductance_cache_invalid = _use_conductance_mode(model.params) and (
+        state.receptor_e_rev is None
+        or state.receptor_nmda_mask is None
+        or state.receptor_e_rev.device != device
+        or state.receptor_nmda_mask.device != device
+        or state.receptor_e_rev.dtype != receptor_dtype
     )
     if cache_invalid or conductance_cache_invalid:
         tau_vals = [
-            max(resolve_profile_value(profile.tau, kind, default=1.0), 1e-9)
-            for kind in kinds
+            max(resolve_profile_value(profile.tau, kind, default=1.0), 1e-9) for kind in kinds
         ]
         mix_vals = [resolve_profile_value(profile.mix, kind, default=1.0) for kind in kinds]
         sign_vals = [resolve_profile_value(profile.sign, kind, default=1.0) for kind in kinds]
@@ -1485,7 +1478,9 @@ def _resolve_post_voltage(
     if post_v.device != device:
         raise ValueError(f"post membrane tensor must be on device {device}, got {post_v.device}")
     if post_v.dim() != 1 or int(post_v.shape[0]) != n_post:
-        raise ValueError(f"post membrane tensor must have shape [{n_post}], got {tuple(post_v.shape)}")
+        raise ValueError(
+            f"post membrane tensor must have shape [{n_post}], got {tuple(post_v.shape)}"
+        )
     if post_v.dtype == dtype:
         return post_v
     buf = _ensure_receptor_post_v_buf(
@@ -1637,9 +1632,10 @@ def _resolve_receptor_profile_dtype(
 ) -> Any:
     torch = require_torch()
     if receptor_state_dtype is None:
-        # Large-network safety default: keep receptor state in fp16 on CUDA.
-        if device is not None and getattr(device, "type", None) == "cuda":
-            return torch.float16
+        # Use weights dtype by default to avoid float16 flush-to-zero on CUDA
+        # which silently zeros subnormal values (below ~6e-5).  Biophysical
+        # weight scales routinely produce synaptic currents in the 1e-7..1e-10
+        # range that are lost when receptor state is kept in fp16.
         return weights_dtype
     return _resolve_dtype(torch, receptor_state_dtype)
 
@@ -1884,7 +1880,11 @@ def _fused_sparse_by_comp(
                 "fused routing metadata missing; "
                 "compile_topology(..., build_sparse_delay_mats=True) to precompute fused routing indices."
             )
-        if hasattr(immediate_idx, "device") and device is not None and immediate_idx.device != device:
+        if (
+            hasattr(immediate_idx, "device")
+            and device is not None
+            and immediate_idx.device != device
+        ):
             raise RuntimeError(
                 "fused_immediate_blocks_idx_by_comp is on a different device; "
                 "compile_topology(..., build_sparse_delay_mats=True) with the synapse device."
@@ -1927,9 +1927,7 @@ def _validate_sparse_mats_by_comp(
     return out
 
 
-def _validate_sparse_mats(
-    mats: list[Any], device: Any, label: str
-) -> list[Tensor | None]:
+def _validate_sparse_mats(mats: list[Any], device: Any, label: str) -> list[Tensor | None]:
     if mats:
         first = mats[0]
         if hasattr(first, "device") and device is not None and first.device != device:
@@ -2099,9 +2097,7 @@ def _validate_backend_config(params: DelayedSparseMatmulParams) -> None:
         if params.ring_strategy not in {"dense", "event_bucketed"}:
             raise RuntimeError(f"Unsupported ring_strategy={params.ring_strategy}.")
     elif params.ring_strategy != "dense":
-        raise RuntimeError(
-            f"ring_strategy={params.ring_strategy} requires backend='event_driven'."
-        )
+        raise RuntimeError(f"ring_strategy={params.ring_strategy} requires backend='event_driven'.")
     if params.conductance_mode and params.receptor_profile is None:
         raise RuntimeError("conductance_mode requires receptor_profile.")
     if params.nmda_voltage_block and not params.conductance_mode:
@@ -2161,7 +2157,9 @@ def _infer_n_pre(topology: SynapseTopology) -> int | None:
 def _infer_n_post(topology: SynapseTopology) -> int:
     if topology.meta and "n_post" in topology.meta:
         return int(topology.meta["n_post"])
-    raise ValueError("Topology meta missing n_post; compile_topology must be called before stepping.")
+    raise ValueError(
+        "Topology meta missing n_post; compile_topology must be called before stepping."
+    )
 
 
 def _max_delay_steps(topology: SynapseTopology) -> int:
@@ -2360,7 +2358,9 @@ def _require_sparse_update_meta(
             if mat is not None
         }
     return (
-        cast(Mapping[Compartment, list[Tensor | None]] | None, values_by_comp) if has_values else None,
+        cast(Mapping[Compartment, list[Tensor | None]] | None, values_by_comp)
+        if has_values
+        else None,
         cast(Tensor, edge_bucket_comp),
         cast(Tensor, edge_bucket_delay),
         cast(Tensor, edge_bucket_pos),

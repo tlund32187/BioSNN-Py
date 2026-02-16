@@ -35,11 +35,17 @@ class GlobalScalarField(IModulatorField):
         self.kinds = kinds
         self._kind_to_idx = {kind: idx for idx, kind in enumerate(self.kinds)}
         self.params = params or GlobalScalarParams()
+        # Cached decay scalar — lazily initialised on first step() call so
+        # device/dtype match the actual state tensor.  Invalidated when dt
+        # changes (rare).
+        self._cached_decay: Tensor | None = None
+        self._cached_decay_dt: float | None = None
 
     def init_state(self, *, ctx: Any) -> GlobalScalarState:
         torch = require_torch()
         device, dtype = resolve_device_dtype(ctx)
         levels = torch.zeros((len(self.kinds),), device=device, dtype=dtype)
+        self._cached_decay = None  # reset cache on new state
         return GlobalScalarState(levels=levels)
 
     def step(
@@ -53,7 +59,15 @@ class GlobalScalarField(IModulatorField):
     ) -> GlobalScalarState:
         torch = require_torch()
         if self.params.decay_tau > 0:
-            decay = torch.exp(torch.tensor(-dt / self.params.decay_tau, device=state.levels.device))
+            # Re-use a cached scalar to avoid creating a new CUDA tensor
+            # every step.  The cache is invalidated when dt changes.
+            decay = self._cached_decay
+            if decay is None or self._cached_decay_dt != dt:
+                decay = torch.exp(
+                    torch.tensor(-dt / self.params.decay_tau, device=state.levels.device)
+                )
+                self._cached_decay = decay
+                self._cached_decay_dt = dt
             state.levels.mul_(decay)
 
         for release in releases:
@@ -64,7 +78,9 @@ class GlobalScalarField(IModulatorField):
             if hasattr(amount, "sum"):
                 delta = amount.sum().to(device=state.levels.device, dtype=state.levels.dtype)
             else:
-                delta = torch.tensor(float(amount), device=state.levels.device, dtype=state.levels.dtype)
+                delta = torch.tensor(
+                    float(amount), device=state.levels.device, dtype=state.levels.dtype
+                )
             state.levels[idx] = state.levels[idx] + delta
 
         return state
@@ -80,7 +96,9 @@ class GlobalScalarField(IModulatorField):
         torch = require_torch()
         idx = self._kind_to_idx.get(kind)
         if idx is None:
-            zeros = torch.zeros((positions.shape[0],), device=positions.device, dtype=positions.dtype)
+            zeros = torch.zeros(
+                (positions.shape[0],), device=positions.device, dtype=positions.dtype
+            )
             return cast(Tensor, zeros)
         level = state.levels[idx].to(device=positions.device, dtype=positions.dtype)
         expanded = level.expand(positions.shape[0])

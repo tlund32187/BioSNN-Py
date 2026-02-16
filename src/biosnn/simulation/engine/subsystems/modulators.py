@@ -23,7 +23,9 @@ class ModulatorSubsystem:
     EDGE_POSITIONS_KEY = _EDGE_POSITIONS_KEY
     EDGE_MONITOR_SAMPLE_IDX_KEY = _EDGE_MONITOR_SAMPLE_IDX_KEY
 
-    def collect_modulator_kinds(self, mod_specs: Sequence[ModulatorSpec]) -> tuple[ModulatorKind, ...]:
+    def collect_modulator_kinds(
+        self, mod_specs: Sequence[ModulatorSpec]
+    ) -> tuple[ModulatorKind, ...]:
         kinds: list[ModulatorKind] = []
         for spec in mod_specs:
             for kind in spec.kinds:
@@ -72,11 +74,7 @@ class ModulatorSubsystem:
     ) -> Mapping[ModulatorKind, Tensor] | None:
         if cache is None:
             return None
-        mods = {
-            kind: value
-            for kind, value in cache.items()
-            if isinstance(kind, ModulatorKind)
-        }
+        mods = {kind: value for kind, value in cache.items() if isinstance(kind, ModulatorKind)}
         return mods or None
 
     def get_population_levels(
@@ -141,8 +139,10 @@ class ModulatorSubsystem:
                     if kind not in spec.kinds:
                         continue
                     state = mod_states[spec.name]
-                    sampled = spec.field.sample_at(state, positions=pop.positions, kind=kind, ctx=ctx)
-                    total = total + sampled
+                    sampled = spec.field.sample_at(
+                        state, positions=pop.positions, kind=kind, ctx=ctx
+                    )
+                    total.add_(sampled)
                 mod_by_pop.setdefault(pop.name, {})[kind] = total
 
         for proj in proj_specs:
@@ -199,19 +199,28 @@ class ModulatorSubsystem:
             if pop_dict is None:
                 pop_dict = {}
                 mod_by_pop[pop.name] = pop_dict
-            else:
-                pop_dict.clear()
             if pop.positions is None:
+                pop_dict.clear()
                 continue
             for kind in kinds:
-                total = torch.zeros((pop.n,), device=device, dtype=dtype)
+                existing = pop_dict.get(kind)
+                if existing is not None and existing.shape[0] == pop.n:
+                    total = existing
+                    total.zero_()
+                else:
+                    total = torch.zeros((pop.n,), device=device, dtype=dtype)
+                    pop_dict[kind] = total
                 for spec in mod_specs:
                     if kind not in spec.kinds:
                         continue
                     state = mod_states[spec.name]
-                    sampled = spec.field.sample_at(state, positions=pop.positions, kind=kind, ctx=ctx)
-                    total = total + sampled
-                pop_dict[kind] = total
+                    sampled = spec.field.sample_at(
+                        state, positions=pop.positions, kind=kind, ctx=ctx
+                    )
+                    total.add_(sampled)
+            # Remove stale kinds no longer in the active set.
+            for stale in [k for k in pop_dict if k not in kinds]:
+                del pop_dict[stale]
 
         for proj in proj_specs:
             proj_dict = edge_mods_by_proj.get(proj.name)
@@ -227,12 +236,19 @@ class ModulatorSubsystem:
                     dtype=dtype,
                 )
                 proj_dict[self.EDGE_POSITIONS_KEY] = edge_positions
+            assert edge_positions is not None
             for key in tuple(proj_dict.keys()):
                 if isinstance(key, ModulatorKind) and key not in kinds:
                     proj_dict.pop(key, None)
             edge_len = int(edge_positions.shape[0])
             for kind in kinds:
-                total = torch.zeros((edge_len,), device=device, dtype=dtype)
+                existing = proj_dict.get(kind)
+                if existing is not None and existing.shape[0] == edge_len:
+                    total = existing
+                    total.zero_()
+                else:
+                    total = torch.zeros((edge_len,), device=device, dtype=dtype)
+                    proj_dict[kind] = total
                 for spec in mod_specs:
                     if kind not in spec.kinds:
                         continue
@@ -243,12 +259,13 @@ class ModulatorSubsystem:
                         kind=kind,
                         ctx=ctx,
                     )
-                    total = total + sampled
-                proj_dict[kind] = total
+                    total.add_(sampled)
 
         return mod_by_pop, edge_mods_by_proj
 
-    def _build_monitor_edge_sample(self, *, edge_count: int, sample_size: int, device: Any) -> Tensor:
+    def _build_monitor_edge_sample(
+        self, *, edge_count: int, sample_size: int, device: Any
+    ) -> Tensor:
         torch = require_torch()
         if edge_count <= sample_size:
             return cast(Tensor, torch.arange(edge_count, device=device, dtype=torch.long))
@@ -281,7 +298,9 @@ class ModulatorSubsystem:
         if edge_positions is None:
             post_positions = pop_map[proj.post].positions
             if post_positions is None:
-                edge_positions = cast(Tensor, torch.zeros((edge_len, 3), device=device, dtype=dtype))
+                edge_positions = cast(
+                    Tensor, torch.zeros((edge_len, 3), device=device, dtype=dtype)
+                )
             else:
                 edge_positions = cast(Tensor, post_positions.index_select(0, post_idx))
 

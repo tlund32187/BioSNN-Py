@@ -131,7 +131,9 @@ class ExcitabilityModulationRunConfig:
     clamp_abs: float = 1.0
 
     def __post_init__(self) -> None:
-        self.targets = tuple(str(target).strip().lower() for target in self.targets if str(target).strip())
+        self.targets = tuple(
+            str(target).strip().lower() for target in self.targets if str(target).strip()
+        )
         if not self.targets:
             self.targets = ("hidden", "out")
         comp = str(self.compartment).strip().lower()
@@ -199,11 +201,18 @@ class LogicGateRunConfig:
     advanced_synapse: AdvancedSynapseConfig = field(default_factory=AdvancedSynapseConfig)
     modulators: LogicModulatorConfig = field(default_factory=LogicModulatorConfig)
     wrapper: LearningWrapperConfig = field(default_factory=LearningWrapperConfig)
-    excitability_modulation: ExcitabilityModulationRunConfig = field(default_factory=ExcitabilityModulationRunConfig)
+    excitability_modulation: ExcitabilityModulationRunConfig = field(
+        default_factory=ExcitabilityModulationRunConfig
+    )
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
-    curriculum_gate_context: CurriculumGateContextConfig = field(default_factory=CurriculumGateContextConfig)
-    reward_delivery_steps: int = 2
-    reward_delivery_clamp_input: bool = False
+    curriculum_gate_context: CurriculumGateContextConfig = field(
+        default_factory=CurriculumGateContextConfig
+    )
+    inter_trial_reset: bool = False
+    reset_traces_between_trials: bool = False
+    drive_scale: float = 1.0
+    reward_delivery_steps: int = 5
+    reward_delivery_clamp_input: bool = True
     learning_lr_default: float = 1e-3
     dopamine_amount_default: float = 0.10
     dopamine_decay_tau_default: float = 0.05
@@ -222,7 +231,12 @@ class LogicGateRunConfig:
             self.advanced_synapse = AdvancedSynapseConfig(
                 enabled=bool(adv.get("enabled", False)),
                 conductance_mode=bool(adv.get("conductance_mode", False)),
-                reversal_potential_v=dict(cast(dict[str, float], adv.get("reversal_potential_v", _default_reversal_potential_v()))),
+                reversal_potential_v=dict(
+                    cast(
+                        dict[str, float],
+                        adv.get("reversal_potential_v", _default_reversal_potential_v()),
+                    )
+                ),
                 bio_synapse=bool(adv.get("bio_synapse", False)),
                 bio_nmda_block=bool(adv.get("bio_nmda_block", False)),
                 bio_stp=bool(adv.get("bio_stp", False)),
@@ -246,8 +260,12 @@ class LogicGateRunConfig:
             mods = self.modulators
             self.modulators = LogicModulatorConfig(
                 enabled=bool(mods.get("enabled", False)),
-                field_type=cast(ModulatorFieldType, str(mods.get("field_type", "global_scalar")).strip().lower()),
-                kinds=tuple(str(kind) for kind in _coerce_kind_sequence(mods.get("kinds", ("dopamine",)))),
+                field_type=cast(
+                    ModulatorFieldType, str(mods.get("field_type", "global_scalar")).strip().lower()
+                ),
+                kinds=tuple(
+                    str(kind) for kind in _coerce_kind_sequence(mods.get("kinds", ("dopamine",)))
+                ),
                 pulse_step=int(mods.get("pulse_step", 50)),
                 amount=float(mods.get("amount", 1.0)),
                 grid_size=_coerce_int_pair(mods.get("grid_size"), default=(16, 16)),
@@ -272,8 +290,13 @@ class LogicGateRunConfig:
                 ach_baseline=float(wrapper.get("ach_baseline", 0.0)),
                 ne_baseline=float(wrapper.get("ne_baseline", 0.0)),
                 ht_baseline=float(wrapper.get("ht_baseline", 0.0)),
-                combine_mode=cast(WrapperCombineMode, str(wrapper.get("combine_mode", "exp")).strip().lower()),
-                missing_modulators_policy=cast(Literal["zero"], str(wrapper.get("missing_modulators_policy", "zero")).strip().lower()),
+                combine_mode=cast(
+                    WrapperCombineMode, str(wrapper.get("combine_mode", "exp")).strip().lower()
+                ),
+                missing_modulators_policy=cast(
+                    Literal["zero"],
+                    str(wrapper.get("missing_modulators_policy", "zero")).strip().lower(),
+                ),
             )
         elif not isinstance(self.wrapper, LearningWrapperConfig):
             self.wrapper = LearningWrapperConfig()
@@ -281,7 +304,10 @@ class LogicGateRunConfig:
             exc = self.excitability_modulation
             self.excitability_modulation = ExcitabilityModulationRunConfig(
                 enabled=bool(exc.get("enabled", False)),
-                targets=tuple(str(token) for token in _coerce_kind_sequence(exc.get("targets", ("hidden", "out")))),
+                targets=tuple(
+                    str(token)
+                    for token in _coerce_kind_sequence(exc.get("targets", ("hidden", "out")))
+                ),
                 compartment=str(exc.get("compartment", "soma")),
                 ach_gain=float(exc.get("ach_gain", 0.0)),
                 ne_gain=float(exc.get("ne_gain", 0.0)),
@@ -316,7 +342,8 @@ class LogicGateRunConfig:
                     str(context.get("compartment", "dendrite")).strip().lower(),
                 ),
                 targets=tuple(
-                    str(token) for token in _coerce_kind_sequence(context.get("targets", ("hidden",)))
+                    str(token)
+                    for token in _coerce_kind_sequence(context.get("targets", ("hidden",)))
                 ),
             )
         elif not isinstance(self.curriculum_gate_context, CurriculumGateContextConfig):
@@ -360,7 +387,9 @@ def cast_sampling_method(value: str) -> SamplingMethod:
 def cast_learning_rule_choice(value: str) -> LearningRuleChoice:
     rule = str(value).lower().strip()
     if rule not in {"three_factor_elig_stdp", "rstdp_elig", "none"}:
-        raise ValueError("engine_learning_rule must be one of: three_factor_elig_stdp, rstdp_elig, none")
+        raise ValueError(
+            "engine_learning_rule must be one of: three_factor_elig_stdp, rstdp_elig, none"
+        )
     return cast(LearningRuleChoice, rule)
 
 

@@ -13,6 +13,7 @@
   },
   "ruff.enable": true,
   "ruff.organizeImports": true,
+  "mypy-type-checker.importStrategy": "fromEnvironment",
   "python.analysis.typeCheckingMode": "basic",
   "files.exclude": {
     "**/.pytest_cache": true,

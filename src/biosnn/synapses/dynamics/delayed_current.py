@@ -19,7 +19,9 @@ from biosnn.core.torch_utils import _resolve_dtype, require_torch, resolve_devic
 from biosnn.synapses.buffers import BucketedEventRing, EventListRing
 
 _COMPARTMENT_ORDER = tuple(Compartment)
-_COMPARTMENT_TO_ID = {comp: idx for idx, comp in enumerate(_COMPARTMENT_ORDER)}
+_COMPARTMENT_TO_ID: dict[Compartment, int] = {
+    comp: idx for idx, comp in enumerate(_COMPARTMENT_ORDER)
+}
 _EventRing = EventListRing | BucketedEventRing
 
 
@@ -131,9 +133,8 @@ class DelayedCurrentSynapse(ISynapseModel):
         torch = require_torch()
         use_no_grad = _use_no_grad(ctx)
         with torch.no_grad() if use_no_grad else nullcontext():
-            if (
-                self.params.ring_strategy in {"event_list_proto", "event_bucketed"}
-                and not (self.params.event_driven or self.params.adaptive_event_driven)
+            if self.params.ring_strategy in {"event_list_proto", "event_bucketed"} and not (
+                self.params.event_driven or self.params.adaptive_event_driven
             ):
                 raise RuntimeError(
                     f"ring_strategy={self.params.ring_strategy} requires "
@@ -462,9 +463,7 @@ def _step_edge_buffer(
     torch = require_torch()
     edge_spikes = pre_spikes.index_select(0, pre_idx)
     edge_active_f = (
-        edge_spikes
-        if edge_spikes.dtype == weights.dtype
-        else edge_spikes.to(dtype=weights.dtype)
+        edge_spikes if edge_spikes.dtype == weights.dtype else edge_spikes.to(dtype=weights.dtype)
     )
 
     delay_steps_opt = topology.delay_steps
@@ -478,7 +477,9 @@ def _step_edge_buffer(
     if max_delay > 0 and delay_steps is not None:
         depth = max_delay + 1
         if state.delay_buffer is None or state.delay_buffer.shape != (depth, pre_idx.numel()):
-            state.delay_buffer = torch.zeros((depth, pre_idx.numel()), device=device, dtype=weights.dtype)
+            state.delay_buffer = torch.zeros(
+                (depth, pre_idx.numel()), device=device, dtype=weights.dtype
+            )
             state.cursor = 0
         if (
             state.delay_tmp is None
@@ -487,6 +488,8 @@ def _step_edge_buffer(
             or state.delay_tmp.dtype != weights.dtype
         ):
             state.delay_tmp = torch.empty((pre_idx.numel(),), device=device, dtype=weights.dtype)
+        assert state.delay_buffer is not None
+        assert state.delay_tmp is not None
         cursor = state.cursor % depth
         edge_idx = torch.arange(pre_idx.numel(), device=device)
         delayed = state.delay_tmp
@@ -496,12 +499,10 @@ def _step_edge_buffer(
         delayed = delayed + edge_active_f * immediate_mask.to(edge_active_f.dtype)
         delayed_idx = (~immediate_mask).nonzero(as_tuple=False).flatten()
         if delayed_idx.numel() > 0:
-            target_rows = torch.remainder(
-                delay_steps.index_select(0, delayed_idx) + cursor, depth
+            target_rows = torch.remainder(delay_steps.index_select(0, delayed_idx) + cursor, depth)
+            state.delay_buffer[target_rows, edge_idx.index_select(0, delayed_idx)] = (
+                edge_active_f.index_select(0, delayed_idx)
             )
-            state.delay_buffer[
-                target_rows, edge_idx.index_select(0, delayed_idx)
-            ] = edge_active_f.index_select(0, delayed_idx)
         state.cursor = (cursor + 1) % depth
     else:
         delayed = edge_active_f
@@ -1328,7 +1329,9 @@ def _infer_n_pre(topology: SynapseTopology) -> int | None:
 def _infer_n_post(topology: SynapseTopology) -> int:
     if topology.meta and "n_post" in topology.meta:
         return int(topology.meta["n_post"])
-    raise ValueError("Topology meta missing n_post; compile_topology must be called before stepping.")
+    raise ValueError(
+        "Topology meta missing n_post; compile_topology must be called before stepping."
+    )
 
 
 def _max_delay_steps(topology: SynapseTopology) -> int:

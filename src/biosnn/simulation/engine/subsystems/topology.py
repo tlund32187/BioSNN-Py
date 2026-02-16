@@ -131,7 +131,7 @@ class TopologySubsystem:
         reqs = None
         if hasattr(proj.synapse, "compilation_requirements"):
             try:
-                reqs = proj.synapse.compilation_requirements()
+                reqs = cast(Any, proj.synapse).compilation_requirements()
             except Exception:
                 reqs = None
         if isinstance(reqs, Mapping):
@@ -234,7 +234,7 @@ class TopologySubsystem:
         reqs = None
         if hasattr(proj.synapse, "compilation_requirements"):
             try:
-                reqs = proj.synapse.compilation_requirements()
+                reqs = cast(Any, proj.synapse).compilation_requirements()
             except Exception:
                 reqs = None
         if isinstance(reqs, Mapping):
@@ -280,7 +280,9 @@ class TopologySubsystem:
 
         return merged
 
-    def ensure_learning_bucket_mapping(self, proj: ProjectionSpec, topology: SynapseTopology) -> None:
+    def ensure_learning_bucket_mapping(
+        self, proj: ProjectionSpec, topology: SynapseTopology
+    ) -> None:
         if proj.learning is None:
             return
         meta = topology.meta or {}
@@ -315,7 +317,9 @@ class TopologySubsystem:
         global _TORCH_THREAD_LIMIT_ACTIVE, _TORCH_THREAD_LIMIT_STATE
         with _TORCH_THREAD_LIMIT_LOCK:
             if _TORCH_THREAD_LIMIT_ACTIVE == 0:
-                prev_threads = torch.get_num_threads() if hasattr(torch, "get_num_threads") else None
+                prev_threads = (
+                    torch.get_num_threads() if hasattr(torch, "get_num_threads") else None
+                )
                 prev_interop = (
                     torch.get_num_interop_threads()
                     if hasattr(torch, "get_num_interop_threads")

@@ -90,7 +90,9 @@ def main() -> None:
             {
                 "run_id": run_dir.name,
                 "state": "running",
-                "started_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "started_at": datetime.now(UTC)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z"),
             },
         )
 
@@ -153,7 +155,11 @@ def main() -> None:
                     monitors = []
                 run_demo_from_spec(model_spec, runtime_cfg, monitors)
         if run_spec is not None and logic_result is not None:
-            backend = str(logic_result.get("logic_backend", run_spec.get("logic_backend", "harness"))).strip().lower()
+            backend = (
+                str(logic_result.get("logic_backend", run_spec.get("logic_backend", "harness")))
+                .strip()
+                .lower()
+            )
             if backend in {"harness", "engine"}:
                 run_spec["logic_backend"] = backend
             write_run_config(run_dir, run_spec)
@@ -166,7 +172,9 @@ def main() -> None:
                     "run_id": run_dir.name,
                     "state": "error",
                     "last_error": str(exc),
-                    "finished_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                    "finished_at": datetime.now(UTC)
+                    .isoformat(timespec="seconds")
+                    .replace("+00:00", "Z"),
                 },
             )
         raise
@@ -178,7 +186,9 @@ def main() -> None:
                     "run_id": run_dir.name,
                     "state": "done",
                     "last_error": None,
-                    "finished_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                    "finished_at": datetime.now(UTC)
+                    .isoformat(timespec="seconds")
+                    .replace("+00:00", "Z"),
                 },
             )
 
@@ -247,13 +257,25 @@ def _run_logic_gate_demo_from_cli(
 ) -> dict[str, Any]:
     spec = cast(Mapping[str, Any], run_spec) if isinstance(run_spec, Mapping) else {}
     demo_gate = LOGIC_DEMO_TO_GATE.get(str(args.demo).strip().lower(), "and")
-    gate = str(spec.get("logic_gate", getattr(args, "logic_gate", demo_gate) or demo_gate)).strip().lower()
+    gate = (
+        str(spec.get("logic_gate", getattr(args, "logic_gate", demo_gate) or demo_gate))
+        .strip()
+        .lower()
+    )
     if gate not in {"and", "or", "xor", "nand", "nor", "xnor"}:
         gate = demo_gate
-    learning_mode = str(spec.get("logic_learning_mode", getattr(args, "logic_learning_mode", "rstdp"))).strip().lower()
+    learning_mode = (
+        str(spec.get("logic_learning_mode", getattr(args, "logic_learning_mode", "rstdp")))
+        .strip()
+        .lower()
+    )
     if learning_mode not in {"rstdp", "surrogate", "none"}:
         learning_mode = "rstdp"
-    sampling_method = str(spec.get("logic_sampling_method", getattr(args, "logic_sampling_method", "sequential"))).strip().lower()
+    sampling_method = (
+        str(spec.get("logic_sampling_method", getattr(args, "logic_sampling_method", "sequential")))
+        .strip()
+        .lower()
+    )
     if sampling_method not in {"sequential", "random_balanced"}:
         sampling_method = "sequential"
     logic_backend = str(spec.get("logic_backend", "harness")).strip().lower()
@@ -263,7 +285,9 @@ def _run_logic_gate_demo_from_cli(
         1,
         int(spec.get("logic_sim_steps_per_trial", getattr(args, "logic_sim_steps_per_trial", 10))),
     )
-    neuron_model = str(spec.get("logic_neuron_model", _resolve_logic_neuron_model_arg(args))).strip().lower()
+    neuron_model = (
+        str(spec.get("logic_neuron_model", _resolve_logic_neuron_model_arg(args))).strip().lower()
+    )
     if neuron_model not in {"adex_3c", "lif_3c"}:
         neuron_model = "adex_3c"
     logic_cfg = LogicGateRunConfig(
@@ -278,7 +302,9 @@ def _run_logic_gate_demo_from_cli(
         learning_modulator_kind=cast(Any, _resolve_logic_learning_modulator_kind(spec)),
         neuron_model=cast(LogicGateNeuronModel, neuron_model),
         debug=bool(spec.get("logic_debug", getattr(args, "logic_debug", False))),
-        debug_every=max(1, int(spec.get("logic_debug_every", getattr(args, "logic_debug_every", 25)))),
+        debug_every=max(
+            1, int(spec.get("logic_debug_every", getattr(args, "logic_debug_every", 25)))
+        ),
         export_every=25,
         sampling_method=cast(Any, sampling_method),
         out_dir=run_dir,
@@ -314,12 +340,21 @@ def _run_logic_curriculum_demo_from_cli(
     run_spec: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     spec = cast(Mapping[str, Any], run_spec) if isinstance(run_spec, Mapping) else {}
-    gates_raw = str(spec.get("logic_curriculum_gates", getattr(args, "logic_curriculum_gates", "or,and,nor,nand,xor,xnor")))
+    gates_raw = str(
+        spec.get(
+            "logic_curriculum_gates",
+            getattr(args, "logic_curriculum_gates", "or,and,nor,nand,xor,xnor"),
+        )
+    )
     gate_list = [token.strip().lower() for token in gates_raw.split(",") if token.strip()]
     if not gate_list:
         gate_list = ["or", "and", "nor", "nand", "xor", "xnor"]
 
-    learning_mode = str(spec.get("logic_learning_mode", getattr(args, "logic_learning_mode", "rstdp"))).strip().lower()
+    learning_mode = (
+        str(spec.get("logic_learning_mode", getattr(args, "logic_learning_mode", "rstdp")))
+        .strip()
+        .lower()
+    )
     logic_backend = str(spec.get("logic_backend", "harness")).strip().lower()
     if logic_backend not in {"harness", "engine"}:
         logic_backend = "harness"
@@ -330,10 +365,18 @@ def _run_logic_curriculum_demo_from_cli(
         )
         logic_backend = "engine"
 
-    sampling_method = str(spec.get("logic_sampling_method", getattr(args, "logic_sampling_method", "sequential"))).strip().lower()
+    sampling_method = (
+        str(spec.get("logic_sampling_method", getattr(args, "logic_sampling_method", "sequential")))
+        .strip()
+        .lower()
+    )
     if sampling_method not in {"sequential", "random_balanced"}:
         sampling_method = "sequential"
-    replay_ratio = float(spec.get("logic_curriculum_replay_ratio", getattr(args, "logic_curriculum_replay_ratio", 0.35)))
+    replay_ratio = float(
+        spec.get(
+            "logic_curriculum_replay_ratio", getattr(args, "logic_curriculum_replay_ratio", 0.35)
+        )
+    )
     if replay_ratio < 0.0:
         replay_ratio = 0.0
     if replay_ratio > 1.0:
@@ -343,7 +386,9 @@ def _run_logic_curriculum_demo_from_cli(
         1,
         int(spec.get("logic_sim_steps_per_trial", getattr(args, "logic_sim_steps_per_trial", 10))),
     )
-    neuron_model = str(spec.get("logic_neuron_model", _resolve_logic_neuron_model_arg(args))).strip().lower()
+    neuron_model = (
+        str(spec.get("logic_neuron_model", _resolve_logic_neuron_model_arg(args))).strip().lower()
+    )
     if neuron_model not in {"adex_3c", "lif_3c"}:
         neuron_model = "adex_3c"
     logic_cfg = LogicGateRunConfig(
@@ -358,7 +403,9 @@ def _run_logic_curriculum_demo_from_cli(
         learning_modulator_kind=cast(Any, _resolve_logic_learning_modulator_kind(spec)),
         neuron_model=cast(LogicGateNeuronModel, neuron_model),
         debug=bool(spec.get("logic_debug", getattr(args, "logic_debug", False))),
-        debug_every=max(1, int(spec.get("logic_debug_every", getattr(args, "logic_debug_every", 25)))),
+        debug_every=max(
+            1, int(spec.get("logic_debug_every", getattr(args, "logic_debug_every", 25)))
+        ),
         export_every=25,
         sampling_method=cast(Any, sampling_method),
         out_dir=run_dir,
@@ -692,7 +739,9 @@ def _build_feature_demo_from_cli(
         dt=dt,
         device=device,
     )
-    builder = cast(Callable[[FeatureDemoConfig], DemoBuildResult], FEATURE_DEMO_BUILDERS[typed_demo_name])
+    builder = cast(
+        Callable[[FeatureDemoConfig], DemoBuildResult], FEATURE_DEMO_BUILDERS[typed_demo_name]
+    )
     return builder(cfg)
 
 
@@ -728,6 +777,7 @@ def _build_feature_config_from_args(
         ring_dtype=cast(str | None, args.ring_dtype),
         ring_strategy=cast(Literal["dense", "event_bucketed"], args.ring_strategy),
         store_sparse_by_delay=cast(bool | None, args.store_sparse_by_delay),
+        force_compiled_mode=bool(getattr(args, "compiled", False)),
     )
 
 
@@ -838,6 +888,7 @@ def _build_network_config_from_args(
         vision_max_elements=max(1, int(args.vision_max_elements)),
         modgrid_max_side=max(1, int(args.modgrid_max_side)),
         modgrid_max_elements=max(1, int(args.modgrid_max_elements)),
+        force_compiled_mode=bool(getattr(args, "compiled", False)),
     )
 
 
@@ -887,6 +938,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="enable runtime monitors/artifact exporters (default: enabled)",
+    )
+    parser.add_argument(
+        "--compiled",
+        action="store_true",
+        default=False,
+        help="Force compiled buffers even in dashboard mode",
     )
     parser.add_argument(
         "--max-ring-mib",
@@ -1242,8 +1299,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hidden-pops-per-layer", type=int, default=1)
     parser.add_argument("--output-pops", type=int, default=1)
     parser.add_argument("--input-cross", action="store_true")
-    parser.add_argument("--p-in-hidden", type=float, default=None, help="legacy: use --relay-to-hidden-p")
-    parser.add_argument("--p-hidden-out", type=float, default=None, help="legacy: use --hidden-to-output-p")
+    parser.add_argument(
+        "--p-in-hidden", type=float, default=None, help="legacy: use --relay-to-hidden-p"
+    )
+    parser.add_argument(
+        "--p-hidden-out", type=float, default=None, help="legacy: use --hidden-to-output-p"
+    )
     parser.add_argument("--input-to-relay-p", type=float, default=0.35)
     parser.add_argument("--input-to-relay-weight-scale", type=float, default=1.5)
     parser.add_argument("--relay-to-hidden-p", type=float, default=0.20)
@@ -1531,6 +1592,7 @@ def _apply_threading_torch(torch: Any, threads: int | None, interop: int | None)
 
 def _build_dashboard_url(port: int, run_dir: Path, repo_root: Path, refresh_ms: int) -> str:
     base = f"http://localhost:{port}/docs/dashboard/"
+
     def param_or_none(filename: str) -> str:
         path = run_dir / filename
         if not path.exists():

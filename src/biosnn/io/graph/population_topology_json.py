@@ -309,8 +309,9 @@ def _pop_frame(pop: Any) -> Any | None:
         meta = pop.get("meta")
         if isinstance(meta, Mapping):
             return meta.get("frame")
-    if hasattr(pop, "meta") and pop.meta and isinstance(pop.meta, Mapping):
-        return pop.meta.get("frame")
+    _meta = getattr(pop, "meta", None)
+    if _meta and isinstance(_meta, Mapping):
+        return _meta.get("frame")
     return None
 
 
@@ -480,7 +481,9 @@ def _mean_std(values: Sequence[float]) -> tuple[float, float]:
     return float(mean), float(variance**0.5)
 
 
-def _corr_sample(values_a: Sequence[float], values_b: Sequence[float], *, max_samples: int) -> float | None:
+def _corr_sample(
+    values_a: Sequence[float], values_b: Sequence[float], *, max_samples: int
+) -> float | None:
     n = min(len(values_a), len(values_b))
     if n == 0:
         return None

@@ -9,7 +9,7 @@ from typing import Any
 from biosnn.contracts.monitors import IMonitor, MonitorRequirements, StepEvent
 from biosnn.contracts.tensor import Tensor
 from biosnn.core.torch_utils import require_torch
-from biosnn.io.sinks.csv_sink import CsvSink
+from biosnn.io.sinks import AsyncCsvSink, CsvSink
 from biosnn.monitors.metrics.scalar_utils import scalar_to_float
 
 
@@ -36,8 +36,10 @@ class ProjectionWeightsCSVMonitor(IMonitor):
         safe_max_edges_sample: int | None = None,
         append: bool = False,
         flush_every: int = 1,
+        async_io: bool = False,
     ) -> None:
-        self._sink = CsvSink(
+        sink_cls = AsyncCsvSink if async_io else CsvSink
+        self._sink = sink_cls(
             path,
             fieldnames=["step", "t", "proj", "pre", "post", "w"],
             append=append,

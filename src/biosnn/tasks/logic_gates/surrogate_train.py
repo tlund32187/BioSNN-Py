@@ -67,7 +67,9 @@ def train_logic_gate_surrogate(
     if resolved_device == "cuda" and torch.cuda.is_available():
         torch.cuda.manual_seed_all(int(seed))
 
-    truth_inputs, truth_targets = make_truth_table(gate_enum, device=resolved_device, dtype="float32")
+    truth_inputs, truth_targets = make_truth_table(
+        gate_enum, device=resolved_device, dtype="float32"
+    )
     if inputs is None:
         inputs = truth_inputs
     if targets is None:
@@ -79,13 +81,17 @@ def train_logic_gate_surrogate(
     else:
         encoded_inputs = encoded_inputs.to(device=device_obj, dtype=truth_inputs.dtype)
 
+    assert targets is not None
+    assert encoded_inputs is not None
     labels = (targets >= 0.5).to(dtype=torch.long)
     in_features = int(encoded_inputs.shape[1])
 
     w_in = torch.empty((in_features, hidden_size), device=device_obj, dtype=encoded_inputs.dtype)
     torch.nn.init.xavier_uniform_(w_in)
     w_in.requires_grad_(True)
-    b_in = torch.zeros((hidden_size,), device=device_obj, dtype=encoded_inputs.dtype, requires_grad=True)
+    b_in = torch.zeros(
+        (hidden_size,), device=device_obj, dtype=encoded_inputs.dtype, requires_grad=True
+    )
     w_out = torch.empty((hidden_size, 2), device=device_obj, dtype=encoded_inputs.dtype)
     torch.nn.init.xavier_uniform_(w_out)
     w_out.requires_grad_(True)
@@ -218,7 +224,9 @@ def _decode_predictions(*, logits: Any, output_spikes: Any) -> Any:
 
 def _build_encoded_input_table(inputs: Any, *, dt: float) -> Any:
     torch = require_torch()
-    encoded = torch.zeros((int(inputs.shape[0]), len(INPUT_NEURON_INDICES)), device=inputs.device, dtype=inputs.dtype)
+    encoded = torch.zeros(
+        (int(inputs.shape[0]), len(INPUT_NEURON_INDICES)), device=inputs.device, dtype=inputs.dtype
+    )
     for idx in range(int(inputs.shape[0])):
         drive = encode_inputs(
             inputs[idx],

@@ -179,8 +179,8 @@ _BASE_RUN_SPEC_DEFAULTS: dict[str, Any] = {
     },
     "logic": {
         "learn_every": 1,
-        "reward_delivery_steps": 2,
-        "reward_delivery_clamp_input": False,
+        "reward_delivery_steps": 5,
+        "reward_delivery_clamp_input": True,
         "action_force": {
             "enabled": False,
             "window": "reward_window",
@@ -299,13 +299,23 @@ _DEMO_DEFAULT_OVERRIDES: dict[DemoId, dict[str, Any]] = {
         "logic_debug_every": 25,
     },
     "logic_curriculum": {
-        "steps": 2500,
-        "learning": {"enabled": True, "rule": "rstdp", "lr": 1e-3},
+        "steps": 3000,  # Distributed across gates: 500 per gate with 6 gates (OR, AND, NOR, NAND, XOR, XNOR)
+        "learning": {
+            "enabled": True,
+            "rule": "rstdp",
+            "lr": 0.01,
+        },  # Increased 10x from 0.001 to lock in rare successful 0,0 predictions
         "modulators": {
             "enabled": False,
             "kinds": [],
             "amount": 0.10,
             "decay_tau": 0.05,
+        },
+        "wrapper": {
+            "enabled": True,
+            "ach_lr_gain": 0.4,
+            "ne_lr_gain": 0.25,
+            "ht_extra_weight_decay": 0.02,
         },
         "logic_backend": "harness",
         "logic_gate": "xor",
@@ -799,6 +809,24 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
             "ring_dtype": ring_dtype,
             "store_sparse_by_delay": store_sparse_by_delay,
             "receptor_mode": receptor_mode,
+            "hidden_excit_to_out_weight_scale": _coerce_float(
+                synapse_map.get("hidden_excit_to_out_weight_scale"),
+                0.03,
+            ),
+            "hidden_inhib_to_out_weight_scale": _coerce_float(
+                synapse_map.get("hidden_inhib_to_out_weight_scale"),
+                0.04,
+            ),
+            "receptors": {
+                "gabaa_mix": _coerce_float(
+                    synapse_map.get("gabaa_mix"),
+                    1.0,
+                ),
+                "gabab_mix": _coerce_float(
+                    synapse_map.get("gabab_mix"),
+                    0.25,
+                ),
+            },
         },
         "advanced_synapse": {
             "enabled": bool(
@@ -1291,6 +1319,10 @@ def resolve_run_spec(raw: Mapping[str, Any] | None) -> dict[str, Any]:
                 resolved["modulators"]["amount"] = 0.10
             if "decay_tau" not in payload_modulators:
                 resolved["modulators"]["decay_tau"] = 0.05
+
+    # Pass through force_compiled_mode so feature_flags_for_run_spec can see it.
+    resolved["force_compiled_mode"] = bool(merged.get("force_compiled_mode", False))
+
     return resolved
 
 
@@ -1316,6 +1348,7 @@ def run_spec_from_cli_args(
         "delay_steps": getattr(args, "delay_steps", 3),
         "monitor_mode": getattr(args, "mode", "dashboard"),
         "monitors_enabled": bool(getattr(args, "monitors", True)),
+        "force_compiled_mode": bool(getattr(args, "compiled", False)),
         "learning": {
             "enabled": False,
             "rule": "three_factor_hebbian",
@@ -2114,6 +2147,7 @@ def feature_flags_for_run_spec(
         "logic_curriculum_replay_ratio": spec.get("logic_curriculum_replay_ratio")
         if demo_id == "logic_curriculum"
         else None,
+        "compiled_mode": bool(spec.get("force_compiled_mode", False)) or monitor_mode == "fast",
     }
 
 

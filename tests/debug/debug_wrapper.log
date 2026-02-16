@@ -1,0 +1,70 @@
+DEBUG _resolve_wrapper_cfg: learning_enabled=False, modulators_enabled=False, wrapper_enabled_effective=False
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=False
+DEBUG _build_engine: Before wrapping, learning_rule=None
+DEBUG _build_engine: After wrapping, learning_rule=None, learning_rule.name=N/A
+DEBUG _resolve_wrapper_cfg: learning_enabled=False, modulators_enabled=False, wrapper_enabled_effective=False
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=False
+DEBUG _build_engine: Before wrapping, learning_rule=None
+DEBUG _build_engine: After wrapping, learning_rule=None, learning_rule.name=N/A
+DEBUG _resolve_wrapper_cfg: learning_enabled=False, modulators_enabled=False, wrapper_enabled_effective=False
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=False
+DEBUG _build_engine: Before wrapping, learning_rule=None
+DEBUG _build_engine: After wrapping, learning_rule=None, learning_rule.name=N/A
+DEBUG _resolve_wrapper_cfg: learning_enabled=True, modulators_enabled=True, wrapper_enabled_effective=True
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=True
+DEBUG _build_engine: Before wrapping, learning_rule=<biosnn.learning.rules.three_factor_eligibility_stdp.ThreeFactorEligibilityStdpRule object at 0x00000189C0B0DE50>
+DEBUG _maybe_wrap_learning_rule: wrapper_cfg.enabled=True, wrapper_cfg keys=['enabled', 'ach_lr_gain', 'ne_lr_gain', 'ht_lr_gain', 'ht_extra_weight_decay', 'lr_clip_min', 'lr_clip_max', 'dopamine_baseline', 'ach_baseline', 'ne_baseline', 'ht_baseline', 'combine_mode', 'missing_modulators_policy']
+DEBUG _maybe_wrap_learning_rule: Wrapper ENABLED, creating ModulatedRuleWrapper
+DEBUG _build_engine: After wrapping, learning_rule=<biosnn.learning.rules.modulated_wrapper.ModulatedRuleWrapper object at 0x00000189EC78F4D0>, learning_rule.name=three_factor_eligibility_stdp_modulated
+DEBUG _resolve_wrapper_cfg: learning_enabled=True, modulators_enabled=True, wrapper_enabled_effective=True
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=True
+DEBUG _build_engine: Before wrapping, learning_rule=<biosnn.learning.rules.rstdp_eligibility.RStdpEligibilityRule object at 0x00000189ED928510>
+DEBUG _maybe_wrap_learning_rule: wrapper_cfg.enabled=True, wrapper_cfg keys=['enabled', 'ach_lr_gain', 'ne_lr_gain', 'ht_lr_gain', 'ht_extra_weight_decay', 'lr_clip_min', 'lr_clip_max', 'dopamine_baseline', 'ach_baseline', 'ne_baseline', 'ht_baseline', 'combine_mode', 'missing_modulators_policy']
+DEBUG _maybe_wrap_learning_rule: Wrapper ENABLED, creating ModulatedRuleWrapper
+DEBUG _build_engine: After wrapping, learning_rule=<biosnn.learning.rules.modulated_wrapper.ModulatedRuleWrapper object at 0x00000189C0B0DF90>, learning_rule.name=rstdp_eligibility_modulated
+DEBUG _resolve_wrapper_cfg: learning_enabled=True, modulators_enabled=True, wrapper_enabled_effective=True
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=True
+DEBUG _build_engine: Before wrapping, learning_rule=<biosnn.learning.rules.three_factor_eligibility_stdp.ThreeFactorEligibilityStdpRule object at 0x00000189C0B0DF90>
+DEBUG _maybe_wrap_learning_rule: wrapper_cfg.enabled=True, wrapper_cfg keys=['enabled', 'ach_lr_gain', 'ne_lr_gain', 'ht_lr_gain', 'ht_extra_weight_decay', 'lr_clip_min', 'lr_clip_max', 'dopamine_baseline', 'ach_baseline', 'ne_baseline', 'ht_baseline', 'combine_mode', 'missing_modulators_policy']
+DEBUG _maybe_wrap_learning_rule: Wrapper ENABLED, creating ModulatedRuleWrapper
+DEBUG _build_engine: After wrapping, learning_rule=<biosnn.learning.rules.modulated_wrapper.ModulatedRuleWrapper object at 0x00000189ED989090>, learning_rule.name=three_factor_eligibility_stdp_modulated
+DEBUG _resolve_wrapper_cfg: learning_enabled=False, modulators_enabled=False, wrapper_enabled_effective=False
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=False
+DEBUG _build_engine: Before wrapping, learning_rule=None
+DEBUG _build_engine: After wrapping, learning_rule=None, learning_rule.name=N/A
+DEBUG _resolve_wrapper_cfg: learning_enabled=False, modulators_enabled=False, wrapper_enabled_effective=False
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=False
+DEBUG _build_engine: Before wrapping, learning_rule=None
+DEBUG _build_engine: After wrapping, learning_rule=None, learning_rule.name=N/A
+DEBUG _resolve_wrapper_cfg: learning_enabled=True, modulators_enabled=False, wrapper_enabled_effective=False
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=False
+DEBUG _build_engine: Before wrapping, learning_rule=<biosnn.learning.rules.three_factor_eligibility_stdp.ThreeFactorEligibilityStdpRule object at 0x00000189ED928510>
+DEBUG _maybe_wrap_learning_rule: wrapper_cfg.enabled=False, wrapper_cfg keys=['enabled', 'ach_lr_gain', 'ne_lr_gain', 'ht_lr_gain', 'ht_extra_weight_decay', 'lr_clip_min', 'lr_clip_max', 'dopamine_baseline', 'ach_baseline', 'ne_baseline', 'ht_baseline', 'combine_mode', 'missing_modulators_policy']
+DEBUG _maybe_wrap_learning_rule: Wrapper DISABLED, returning unwrapped rule
+DEBUG _build_engine: After wrapping, learning_rule=<biosnn.learning.rules.three_factor_eligibility_stdp.ThreeFactorEligibilityStdpRule object at 0x00000189ED928510>, learning_rule.name=three_factor_eligibility_stdp
+DEBUG _resolve_wrapper_cfg: learning_enabled=True, modulators_enabled=True, wrapper_enabled_effective=True
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=True
+DEBUG _build_engine: Before wrapping, learning_rule=<biosnn.learning.rules.three_factor_eligibility_stdp.ThreeFactorEligibilityStdpRule object at 0x00000189ED928510>
+DEBUG _maybe_wrap_learning_rule: wrapper_cfg.enabled=True, wrapper_cfg keys=['enabled', 'ach_lr_gain', 'ne_lr_gain', 'ht_lr_gain', 'ht_extra_weight_decay', 'lr_clip_min', 'lr_clip_max', 'dopamine_baseline', 'ach_baseline', 'ne_baseline', 'ht_baseline', 'combine_mode', 'missing_modulators_policy']
+DEBUG _maybe_wrap_learning_rule: Wrapper ENABLED, creating ModulatedRuleWrapper
+DEBUG _build_engine: After wrapping, learning_rule=<biosnn.learning.rules.modulated_wrapper.ModulatedRuleWrapper object at 0x00000189ED928E90>, learning_rule.name=three_factor_eligibility_stdp_modulated
+DEBUG _resolve_wrapper_cfg: learning_enabled=True, modulators_enabled=True, wrapper_enabled_effective=True
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=True
+DEBUG _build_engine: Before wrapping, learning_rule=<biosnn.learning.rules.three_factor_eligibility_stdp.ThreeFactorEligibilityStdpRule object at 0x00000189ED943650>
+DEBUG _maybe_wrap_learning_rule: wrapper_cfg.enabled=True, wrapper_cfg keys=['enabled', 'ach_lr_gain', 'ne_lr_gain', 'ht_lr_gain', 'ht_extra_weight_decay', 'lr_clip_min', 'lr_clip_max', 'dopamine_baseline', 'ach_baseline', 'ne_baseline', 'ht_baseline', 'combine_mode', 'missing_modulators_policy']
+DEBUG _maybe_wrap_learning_rule: Wrapper ENABLED, creating ModulatedRuleWrapper
+DEBUG _build_engine: After wrapping, learning_rule=<biosnn.learning.rules.modulated_wrapper.ModulatedRuleWrapper object at 0x00000189ED928E90>, learning_rule.name=three_factor_eligibility_stdp_modulated
+DEBUG _resolve_wrapper_cfg: learning_enabled=True, modulators_enabled=True, wrapper_enabled_effective=True
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=True
+DEBUG _build_engine: Before wrapping, learning_rule=<biosnn.learning.rules.three_factor_eligibility_stdp.ThreeFactorEligibilityStdpRule object at 0x00000189EC922E00>
+DEBUG _maybe_wrap_learning_rule: wrapper_cfg.enabled=True, wrapper_cfg keys=['enabled', 'ach_lr_gain', 'ne_lr_gain', 'ht_lr_gain', 'ht_extra_weight_decay', 'lr_clip_min', 'lr_clip_max', 'dopamine_baseline', 'ach_baseline', 'ne_baseline', 'ht_baseline', 'combine_mode', 'missing_modulators_policy']
+DEBUG _maybe_wrap_learning_rule: Wrapper ENABLED, creating ModulatedRuleWrapper
+DEBUG _build_engine: After wrapping, learning_rule=<biosnn.learning.rules.modulated_wrapper.ModulatedRuleWrapper object at 0x00000189ED942450>, learning_rule.name=three_factor_eligibility_stdp_modulated
+DEBUG _resolve_wrapper_cfg: learning_enabled=False, modulators_enabled=True, wrapper_enabled_effective=False
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=False
+DEBUG _build_engine: Before wrapping, learning_rule=None
+DEBUG _build_engine: After wrapping, learning_rule=None, learning_rule.name=N/A
+DEBUG _resolve_wrapper_cfg: learning_enabled=False, modulators_enabled=True, wrapper_enabled_effective=False
+DEBUG _build_engine: After _resolve_wrapper_cfg wrapper.enabled=False
+DEBUG _build_engine: Before wrapping, learning_rule=None
+DEBUG _build_engine: After wrapping, learning_rule=None, learning_rule.name=N/A

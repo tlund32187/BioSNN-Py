@@ -174,7 +174,7 @@ class VisionFrameJsonMonitor(IMonitor):
             else:
                 output = _to_uint8(sample)
         output = _downsample_to_max_elements(
-            output,
+            cast(Tensor, output),
             max_elements=self._max_elements,
         )
         if hasattr(output, "to") and getattr(output.device, "type", None) != "cpu":
@@ -228,12 +228,16 @@ def _downsample_to_max_elements(value: Tensor, *, max_elements: int) -> Tensor:
                 break
             target_h = max(1, h // 2)
             target_w = max(1, w // 2)
-            output = torch.nn.functional.interpolate(
-                output.unsqueeze(0).unsqueeze(0).to(dtype=torch.float32),
-                size=(target_h, target_w),
-                mode="bilinear",
-                align_corners=False,
-            ).squeeze(0).squeeze(0)
+            output = (
+                torch.nn.functional.interpolate(
+                    output.unsqueeze(0).unsqueeze(0).to(dtype=torch.float32),
+                    size=(target_h, target_w),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                .squeeze(0)
+                .squeeze(0)
+            )
             if value.dtype == torch.uint8:
                 output = torch.clamp(output, 0.0, 255.0).round().to(dtype=torch.uint8)
             else:

@@ -108,8 +108,9 @@ def _scalar(event: StepEvent, key: str, *, async_gpu: bool) -> Any:
         return ""
     value = event.scalars[key]
     if async_gpu:
-        if hasattr(value, "detach"):
-            return value.detach()
+        _detach = getattr(value, "detach", None)
+        if callable(_detach):
+            return _detach()
         return value
     return scalar_to_float(value)
 

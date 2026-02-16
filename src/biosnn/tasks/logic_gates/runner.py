@@ -347,7 +347,9 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
             trial_acc_rolling = sum(rolling_correct) / float(len(rolling_correct))
 
             if rstdp_runtime is not None:
-                reward_signal = _reward_signal(correct=bool(correct), pred_bit=pred_bit, last_pred=last_pred)
+                reward_signal = _reward_signal(
+                    correct=bool(correct), pred_bit=pred_bit, last_pred=last_pred
+                )
                 mean_abs_dw_dopa, dopamine_pulse = _apply_rstdp_dopamine(
                     runtime=rstdp_runtime,
                     reward_signal=reward_signal,
@@ -363,7 +365,9 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
                     scores_out=case_scores,
                 )
                 last_mean_eligibility = float(rstdp_runtime.state.eligibility.abs().mean().item())
-                last_weight_min, last_weight_max, last_weight_mean = _tensor_stats(rstdp_runtime.weights)
+                last_weight_min, last_weight_max, last_weight_mean = _tensor_stats(
+                    rstdp_runtime.weights
+                )
             else:
                 predictions.copy_((case_scores >= 0.5).to(dtype=predictions.dtype))
                 dopamine_pulse = _dopamine_pulse(mode=cfg.learning_mode, correct=bool(correct))
@@ -373,7 +377,9 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
                 last_weight_max = float("nan")
                 last_weight_mean = float("nan")
 
-            hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(cfg.sim_steps_per_trial)
+            hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(
+                cfg.sim_steps_per_trial
+            )
             tie_behavior = int(output_spike_counts[0].item() == output_spike_counts[1].item())
             no_spikes = int(float(output_spike_counts.sum().item()) <= 0.0)
 
@@ -408,7 +414,9 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
             if last_trials is not None:
                 last_trials.append(dict(trial_row))
 
-            if cfg.debug and (trial_idx == 1 or trial_idx == cfg.steps or trial_idx % debug_every == 0):
+            if cfg.debug and (
+                trial_idx == 1 or trial_idx == cfg.steps or trial_idx % debug_every == 0
+            ):
                 hidden_top_k = _top_k_active_neurons(hidden_spike_counts, k=cfg.debug_top_k)
                 hidden_top_k_str = _format_top_k(hidden_top_k)
                 print(
@@ -427,7 +435,9 @@ def run_logic_gate(cfg: LogicGateRunConfig) -> dict[str, Any]:
 
             if (trial_idx % cfg.export_every) == 0 or trial_idx == cfg.steps:
                 sample_acc = sampled_correct / float(trial_idx)
-                eval_acc_full, confusion = eval_accuracy(predictions, targets_flat, report_confusion=True)
+                eval_acc_full, confusion = eval_accuracy(
+                    predictions, targets_flat, report_confusion=True
+                )
                 eval_sink.write_row(
                     {
                         "trial": trial_idx,
@@ -534,7 +544,16 @@ def run_logic_gate_curriculum(
 
     device = _resolve_device(torch, cfg.device)
     run_dir = _resolve_curriculum_run_dir(cfg, gates=gate_sequence)
-    phase_trials = int(cfg.steps if phase_steps is None else phase_steps)
+
+    # For curriculum mode, distribute total budget evenly across gates
+    # to ensure each gate gets sufficient training trials
+    if phase_steps is None:
+        num_gates = len(gate_sequence)
+        # Ensure at least 50 trials per gate for reliable learning
+        phase_trials = max(50, int(cfg.steps // num_gates))
+    else:
+        phase_trials = int(phase_steps)
+
     if phase_trials <= 0:
         raise ValueError("phase_steps must be > 0.")
 
@@ -584,9 +603,15 @@ def run_logic_gate_curriculum(
         deque(maxlen=cfg.dump_last_trials_n) if cfg.dump_last_trials_csv else None
     )
 
-    output_spike_counts = torch.zeros((int(runtime.output_dim),), device=inputs.device, dtype=inputs.dtype)
-    input_drive_buf = torch.zeros((int(encoded_inputs.shape[1]),), device=inputs.device, dtype=inputs.dtype)
-    hidden_step_spikes = torch.zeros((int(runtime.hidden_size),), device=inputs.device, dtype=inputs.dtype)
+    output_spike_counts = torch.zeros(
+        (int(runtime.output_dim),), device=inputs.device, dtype=inputs.dtype
+    )
+    input_drive_buf = torch.zeros(
+        (int(encoded_inputs.shape[1]),), device=inputs.device, dtype=inputs.dtype
+    )
+    hidden_step_spikes = torch.zeros(
+        (int(runtime.hidden_size),), device=inputs.device, dtype=inputs.dtype
+    )
     hidden_spike_counts = torch.zeros_like(hidden_step_spikes)
     debug_every = max(1, int(cfg.debug_every))
     last_trials_csv: Path | None = None
@@ -670,7 +695,9 @@ def run_logic_gate_curriculum(
                 rolling_correct.append(correct)
                 trial_acc_rolling = sum(rolling_correct) / float(len(rolling_correct))
 
-                reward_signal = _reward_signal(correct=bool(correct), pred_bit=pred_bit, last_pred=last_pred)
+                reward_signal = _reward_signal(
+                    correct=bool(correct), pred_bit=pred_bit, last_pred=last_pred
+                )
                 mean_abs_dw_dopa, dopamine_pulse = _apply_rstdp_dopamine(
                     runtime=runtime,
                     reward_signal=reward_signal,
@@ -690,7 +717,9 @@ def run_logic_gate_curriculum(
 
                 mean_eligibility = float(runtime.state.eligibility.abs().mean().item())
                 weights_min, weights_max, weights_mean = _tensor_stats(runtime.weights)
-                hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(cfg.sim_steps_per_trial)
+                hidden_mean_spikes = float(hidden_spike_counts.mean().item()) / float(
+                    cfg.sim_steps_per_trial
+                )
                 active_out_0 = float(output_spike_counts[int(active_pair[0])].item())
                 active_out_1 = float(output_spike_counts[int(active_pair[1])].item())
                 tie_behavior = int(active_out_0 == active_out_1)
@@ -706,10 +735,18 @@ def run_logic_gate_curriculum(
                     "case_idx": case_idx,
                     "x0": float(inputs[case_idx, 0].item()),
                     "x1": float(inputs[case_idx, 1].item()),
-                    "in_bit0_0_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit0_0"]].item()),
-                    "in_bit0_1_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit0_1"]].item()),
-                    "in_bit1_0_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit1_0"]].item()),
-                    "in_bit1_1_drive": float(input_drive_buf[INPUT_NEURON_INDICES["bit1_1"]].item()),
+                    "in_bit0_0_drive": float(
+                        input_drive_buf[INPUT_NEURON_INDICES["bit0_0"]].item()
+                    ),
+                    "in_bit0_1_drive": float(
+                        input_drive_buf[INPUT_NEURON_INDICES["bit0_1"]].item()
+                    ),
+                    "in_bit1_0_drive": float(
+                        input_drive_buf[INPUT_NEURON_INDICES["bit1_0"]].item()
+                    ),
+                    "in_bit1_1_drive": float(
+                        input_drive_buf[INPUT_NEURON_INDICES["bit1_1"]].item()
+                    ),
                     "in_gate_context_drive": _gate_context_drive_value(input_drive_buf),
                     "out_spikes_0": active_out_0,
                     "out_spikes_1": active_out_1,
@@ -732,7 +769,9 @@ def run_logic_gate_curriculum(
                     last_trials.append(dict(trial_row))
 
                 if cfg.debug and (
-                    local_trial == 1 or local_trial == phase_trials or local_trial % debug_every == 0
+                    local_trial == 1
+                    or local_trial == phase_trials
+                    or local_trial % debug_every == 0
                 ):
                     hidden_top_k = _top_k_active_neurons(hidden_spike_counts, k=cfg.debug_top_k)
                     hidden_top_k_str = _format_top_k(hidden_top_k)
@@ -779,7 +818,9 @@ def run_logic_gate_curriculum(
                         scores_out=case_scores,
                         output_pair=gate_to_output_pair[gate],
                     )
-                    global_eval_accuracy = sum(global_eval_by_gate.values()) / float(len(global_eval_by_gate))
+                    global_eval_accuracy = sum(global_eval_by_gate.values()) / float(
+                        len(global_eval_by_gate)
+                    )
                     eval_acc_full, confusion = eval_accuracy(
                         predictions, targets_flat, report_confusion=True
                     )
@@ -807,7 +848,9 @@ def run_logic_gate_curriculum(
                             "perfect_streak": tracker.perfect_streak,
                             "high_streak": tracker.high_streak,
                             "passed": int(tracker.passed),
-                            **{f"eval_{name}": value for name, value in global_eval_by_gate.items()},
+                            **{
+                                f"eval_{name}": value for name, value in global_eval_by_gate.items()
+                            },
                         }
                     )
                     confusion_sink.write_row(
@@ -1012,7 +1055,9 @@ def _run_logic_gate_surrogate(
                 last_trials.append(dict(trial_row))
 
             if cfg.debug and (
-                trial_idx == 1 or trial_idx == train_result.train_steps or trial_idx % debug_every == 0
+                trial_idx == 1
+                or trial_idx == train_result.train_steps
+                or trial_idx % debug_every == 0
             ):
                 print(
                     f"[logic-gate][surrogate][debug] step={trial_idx}/{train_result.train_steps} "
@@ -1124,7 +1169,9 @@ def _run_rstdp_trial_forward(
             context_features=context_features,
         )
     else:
-        runtime.pre_spikes[: input_drive.numel()].copy_((input_drive >= 0.5).to(dtype=input_drive.dtype))
+        runtime.pre_spikes[: input_drive.numel()].copy_(
+            (input_drive >= 0.5).to(dtype=input_drive.dtype)
+        )
         runtime.pre_spikes[-1] = 1.0
         take = min(int(hidden_step_spikes.numel()), int(input_drive.numel()))
         if take > 0:
@@ -1156,7 +1203,9 @@ def _run_rstdp_trial_forward(
             weights=runtime.weights,
             extras=runtime.batch_extras,
         )
-        runtime.state, result = runtime.rule.step(runtime.state, batch, dt=dt, t=0.0, ctx=runtime.ctx)
+        runtime.state, result = runtime.rule.step(
+            runtime.state, batch, dt=dt, t=0.0, ctx=runtime.ctx
+        )
         runtime.weights.add_(result.d_weights)
 
         abs_dw_sum += float(result.d_weights.abs().mean().item())
@@ -1204,7 +1253,9 @@ def _apply_rstdp_dopamine(
             modulators=runtime.dopamine_modulators,
             extras=runtime.batch_extras,
         )
-        runtime.state, result = runtime.rule.step(runtime.state, batch, dt=dt, t=0.0, ctx=runtime.ctx)
+        runtime.state, result = runtime.rule.step(
+            runtime.state, batch, dt=dt, t=0.0, ctx=runtime.ctx
+        )
         runtime.weights.add_(result.d_weights)
         abs_dw_sum += float(result.d_weights.abs().mean().item())
         abs_dw_count += 1
@@ -1260,11 +1311,15 @@ def _predict_all_cases_rstdp(
         xor_pred_input.clamp_(0.0, 1.0)
 
         xor_h0_edge_pre = _require_tensor(runtime.xor_pred_h0_edge_pre, name="xor_pred_h0_edge_pre")
-        xor_h0_edge_current = _require_tensor(runtime.xor_pred_h0_edge_current, name="xor_pred_h0_edge_current")
+        xor_h0_edge_current = _require_tensor(
+            runtime.xor_pred_h0_edge_current, name="xor_pred_h0_edge_current"
+        )
         xor_h0_drive = _require_tensor(runtime.xor_pred_h0_drive, name="xor_pred_h0_drive")
         xor_h0_spikes = _require_tensor(runtime.xor_pred_h0_spikes, name="xor_pred_h0_spikes")
         h0_pre_idx = _require_tensor(runtime.h0_pre_idx, name="h0_pre_idx")
-        h0_post_idx_2d = _require_tensor(runtime.xor_pred_h0_post_idx_2d, name="xor_pred_h0_post_idx_2d")
+        h0_post_idx_2d = _require_tensor(
+            runtime.xor_pred_h0_post_idx_2d, name="xor_pred_h0_post_idx_2d"
+        )
         h0_weights = _require_tensor(runtime.h0_weights, name="h0_weights")
         h0_bias = _require_tensor(runtime.h0_bias, name="h0_bias")
 
@@ -1277,11 +1332,15 @@ def _predict_all_cases_rstdp(
         xor_h0_spikes.copy_(xor_h0_drive >= 0.0)
 
         xor_h1_edge_pre = _require_tensor(runtime.xor_pred_h1_edge_pre, name="xor_pred_h1_edge_pre")
-        xor_h1_edge_current = _require_tensor(runtime.xor_pred_h1_edge_current, name="xor_pred_h1_edge_current")
+        xor_h1_edge_current = _require_tensor(
+            runtime.xor_pred_h1_edge_current, name="xor_pred_h1_edge_current"
+        )
         xor_h1_drive = _require_tensor(runtime.xor_pred_h1_drive, name="xor_pred_h1_drive")
         xor_h1_spikes = _require_tensor(runtime.xor_pred_h1_spikes, name="xor_pred_h1_spikes")
         h1_pre_idx = _require_tensor(runtime.h1_pre_idx, name="h1_pre_idx")
-        h1_post_idx_2d = _require_tensor(runtime.xor_pred_h1_post_idx_2d, name="xor_pred_h1_post_idx_2d")
+        h1_post_idx_2d = _require_tensor(
+            runtime.xor_pred_h1_post_idx_2d, name="xor_pred_h1_post_idx_2d"
+        )
         h1_weights = _require_tensor(runtime.h1_weights, name="h1_weights")
         h1_bias = _require_tensor(runtime.h1_bias, name="h1_bias")
 
@@ -1349,7 +1408,9 @@ def _init_rstdp_runtime(
     # Output layer: dense bipartite map with an extra always-on bias input.
     total_pre = int(hidden_size) + 1
     pre_idx = torch.arange(total_pre, device=device_obj, dtype=torch.long).repeat(output_dim)
-    post_idx = torch.arange(output_dim, device=device_obj, dtype=torch.long).repeat_interleave(total_pre)
+    post_idx = torch.arange(output_dim, device=device_obj, dtype=torch.long).repeat_interleave(
+        total_pre
+    )
     edge_count = int(pre_idx.numel())
 
     weights = torch.empty((edge_count,), device=device_obj, dtype=dtype)
@@ -1519,34 +1580,58 @@ def _init_rstdp_runtime(
     )
 
 
-def _build_xor_feature_layers(*, torch: Any, device: Any, dtype: Any) -> tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
+def _build_xor_feature_layers(
+    *, torch: Any, device: Any, dtype: Any
+) -> tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
     # Layer0: deterministic truth-case detectors + per-bit copies.
     h0_pre_idx = torch.tensor(
         [
-            0, 2,  # case 00 detector
-            0, 3,  # case 01 detector
-            1, 2,  # case 10 detector
-            1, 3,  # case 11 detector
-            0, 1, 2, 3,  # per-bit copies
-            0, 3,  # duplicate case 01
-            1, 2,  # duplicate case 10
-            0, 2,  # duplicate case 00
-            1, 3,  # duplicate case 11
+            0,
+            2,  # case 00 detector
+            0,
+            3,  # case 01 detector
+            1,
+            2,  # case 10 detector
+            1,
+            3,  # case 11 detector
+            0,
+            1,
+            2,
+            3,  # per-bit copies
+            0,
+            3,  # duplicate case 01
+            1,
+            2,  # duplicate case 10
+            0,
+            2,  # duplicate case 00
+            1,
+            3,  # duplicate case 11
         ],
         device=device,
         dtype=torch.long,
     )
     h0_post_idx = torch.tensor(
         [
-            0, 0,
-            1, 1,
-            2, 2,
-            3, 3,
-            4, 5, 6, 7,
-            8, 8,
-            9, 9,
-            10, 10,
-            11, 11,
+            0,
+            0,
+            1,
+            1,
+            2,
+            2,
+            3,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            8,
+            9,
+            9,
+            10,
+            10,
+            11,
+            11,
         ],
         device=device,
         dtype=torch.long,
@@ -1560,18 +1645,44 @@ def _build_xor_feature_layers(*, torch: Any, device: Any, dtype: Any) -> tuple[A
     # Layer1: copy key detectors and build pooled XOR-positive/negative features.
     h1_pre_idx = torch.tensor(
         [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,  # identity-like features
-            1, 2,  # XOR-positive pool
-            0, 3,  # XOR-negative pool
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,  # identity-like features
+            1,
+            2,  # XOR-positive pool
+            0,
+            3,  # XOR-negative pool
         ],
         device=device,
         dtype=torch.long,
     )
     h1_post_idx = torch.tensor(
         [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
-            12, 12,
-            13, 13,
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            12,
+            13,
+            13,
         ],
         device=device,
         dtype=torch.long,
@@ -1693,7 +1804,9 @@ def _apply_gate_context_drive(input_drive: Any, *, gate: LogicGate | str) -> Non
     idx = int(gate_idx)
     if idx < 0 or idx >= int(input_drive.numel()):
         return
-    input_drive[idx] = float(gate_context_level_for_gate(gate.value if isinstance(gate, LogicGate) else gate))
+    input_drive[idx] = float(
+        gate_context_level_for_gate(gate.value if isinstance(gate, LogicGate) else gate)
+    )
 
 
 def _gate_context_drive_value(input_drive: Any) -> float:
@@ -1830,8 +1943,12 @@ def _build_curriculum_gate_indices(
         return gate_idx
 
     stride = max(1, phase_trials // replay_count)
-    replay_positions = torch.arange(0, phase_trials, stride, device=device, dtype=torch.long)[:replay_count]
-    replay_gates = torch.arange(replay_count, device=device, dtype=torch.long).remainder(phase_index)
+    replay_positions = torch.arange(0, phase_trials, stride, device=device, dtype=torch.long)[
+        :replay_count
+    ]
+    replay_gates = torch.arange(replay_count, device=device, dtype=torch.long).remainder(
+        phase_index
+    )
     gate_idx.scatter_(0, replay_positions, replay_gates)
     return gate_idx
 

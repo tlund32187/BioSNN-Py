@@ -214,7 +214,9 @@ def test_sparse_matmul_fused_matches_per_delay(device):
             else:
                 expected_ring[comp][delay].add_(contrib)
 
-    torch.testing.assert_close(result.post_drive[Compartment.SOMA], expected_drive[Compartment.SOMA])
+    torch.testing.assert_close(
+        result.post_drive[Compartment.SOMA], expected_drive[Compartment.SOMA]
+    )
     assert state.post_ring is not None
     torch.testing.assert_close(state.post_ring[Compartment.SOMA], expected_ring[Compartment.SOMA])
 
@@ -254,7 +256,9 @@ def test_sparse_matmul_receptor_profile_dtype_defaults_cpu_to_weights() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_sparse_matmul_receptor_profile_dtype_defaults_cuda_to_fp16() -> None:
+def test_sparse_matmul_receptor_profile_dtype_defaults_cuda_to_weights_dtype() -> None:
+    """Receptor profile dtype now defaults to weights dtype (float32) even on
+    CUDA to avoid float16 flush-to-zero silently zeroing subnormal values."""
     ctx = StepContext(device="cuda", dtype="float32")
     topology = SynapseTopology(
         pre_idx=torch.tensor([0], dtype=torch.long, device="cuda"),
@@ -285,4 +289,4 @@ def test_sparse_matmul_receptor_profile_dtype_defaults_cuda_to_fp16() -> None:
         ctx=ctx,
     )
 
-    assert state.receptor_profile_dtype == torch.float16
+    assert state.receptor_profile_dtype == torch.float32

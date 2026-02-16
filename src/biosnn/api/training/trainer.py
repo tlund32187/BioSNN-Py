@@ -105,7 +105,9 @@ class Trainer:
         )
         return engine
 
-    def run(self, *, steps: int, log_every: int = 100, progress: bool = True, dt: float = 1e-3) -> TrainReport:
+    def run(
+        self, *, steps: int, log_every: int = 100, progress: bool = True, dt: float = 1e-3
+    ) -> TrainReport:
         engine = self._engine or self.compile(dt=dt)
         start = perf_counter()
         last_event: StepEvent | None = None
@@ -147,7 +149,7 @@ class Trainer:
             "t": getattr(engine, "_t", None),
         }
         if hasattr(engine, "state_dict"):
-            payload["engine_state"] = engine.state_dict()
+            payload["engine_state"] = cast(Any, engine).state_dict()
         torch.save(payload, path)
 
     def load_checkpoint(self, path: str) -> dict[str, Any]:
@@ -157,7 +159,7 @@ class Trainer:
         payload = cast(dict[str, Any], torch.load(path, map_location="cpu"))
         engine = self._engine
         if "engine_state" in payload and hasattr(engine, "load_state_dict"):
-            engine.load_state_dict(payload["engine_state"])
+            cast(Any, engine).load_state_dict(payload["engine_state"])
         if payload.get("step") is not None and hasattr(engine, "_step"):
             engine._step = payload["step"]
         if payload.get("t") is not None and hasattr(engine, "_t"):
@@ -165,7 +167,9 @@ class Trainer:
         return payload
 
 
-def _infer_device_dtype(network: Any, device: str | None, dtype: str | None) -> tuple[str | None, str | None]:
+def _infer_device_dtype(
+    network: Any, device: str | None, dtype: str | None
+) -> tuple[str | None, str | None]:
     device_out = device
     dtype_out = dtype
     for proj in getattr(network, "projections", []):

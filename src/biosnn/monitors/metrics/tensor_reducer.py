@@ -46,9 +46,7 @@ def reduce_stat(values: Any, stat: str, *, as_tensor: bool = False) -> Any:
         if stat == "mean":
             dtype = getattr(flat, "dtype", None)
             dtype_str = str(dtype).lower() if dtype is not None else ""
-            if "bool" in dtype_str or (
-                "float" not in dtype_str and "complex" not in dtype_str
-            ):
+            if "bool" in dtype_str or ("float" not in dtype_str and "complex" not in dtype_str):
                 if hasattr(flat, "float"):
                     flat = flat.float()
                 elif hasattr(flat, "astype"):
@@ -57,8 +55,11 @@ def reduce_stat(values: Any, stat: str, *, as_tensor: bool = False) -> Any:
         if callable(reducer):
             try:
                 result = reducer()
-                if as_tensor and hasattr(result, "detach"):
-                    return result.detach()
+                if as_tensor:
+                    _det = getattr(result, "detach", None)
+                    if callable(_det):
+                        return _det()
+                    return result
                 return _to_scalar(result)
             except Exception:
                 pass
@@ -76,8 +77,11 @@ def reduce_stat(values: Any, stat: str, *, as_tensor: bool = False) -> Any:
         if stat == "max":
             return float(max(flat_list))
 
-    if as_tensor and hasattr(candidate, "detach"):
-        return candidate.detach()
+    if as_tensor:
+        _det2 = getattr(candidate, "detach", None)
+        if callable(_det2):
+            return _det2()
+        return candidate
     return _to_scalar(candidate)
 
 
@@ -104,7 +108,7 @@ def sample_tensor(
             else:
                 sampled_list = [sampled]
             return [
-                (int(idx), val.detach() if hasattr(val, "detach") else val)
+                (int(idx), getattr(val, "detach", lambda _v=val: _v)())
                 for idx, val in zip(index_list, sampled_list, strict=False)
             ]
         return [
@@ -119,7 +123,7 @@ def sample_tensor(
 
 def _index_values(values: Any, indices: Sequence[int] | Tensor) -> Any:
     if hasattr(indices, "device") or hasattr(indices, "dtype"):
-        idx_tensor = indices
+        idx_tensor = cast(Tensor, indices)
         if (
             hasattr(values, "device")
             and hasattr(idx_tensor, "device")
@@ -139,13 +143,14 @@ def _index_values(values: Any, indices: Sequence[int] | Tensor) -> Any:
 
 
 def _indices_to_list(indices: Sequence[int] | Tensor) -> list[int]:
-    if hasattr(indices, "device") and getattr(indices.device, "type", None) == "cuda":
-        if hasattr(indices, "detach"):
-            indices = indices.detach()
-        if hasattr(indices, "cpu"):
-            indices = indices.cpu()
-    if hasattr(indices, "tolist"):
-        raw = indices.tolist()
+    _idx: Any = indices
+    if hasattr(_idx, "device") and getattr(_idx.device, "type", None) == "cuda":
+        if hasattr(_idx, "detach"):
+            _idx = _idx.detach()
+        if hasattr(_idx, "cpu"):
+            _idx = _idx.cpu()
+    if hasattr(_idx, "tolist"):
+        raw = _idx.tolist()
         return [int(value) for value in raw]
     return [int(value) for value in indices]
 

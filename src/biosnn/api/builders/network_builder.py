@@ -37,8 +37,7 @@ class TopologySpec(Protocol):
         device: str | None = None,
         dtype: str | None = None,
         seed: int | None = None,
-    ) -> SynapseTopology:
-        ...
+    ) -> SynapseTopology: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +79,9 @@ class InitSpec:
         dtype_obj = _resolve_dtype(torch, dtype)
         generator = None
         if seed is not None:
-            generator = torch.Generator(device=device_obj) if device_obj is not None else torch.Generator()
+            generator = (
+                torch.Generator(device=device_obj) if device_obj is not None else torch.Generator()
+            )
             generator.manual_seed(seed)
 
         if self.kind == "normal":
@@ -88,7 +89,8 @@ class InitSpec:
             std = float(self.params.get("std", 1.0))
             return cast(
                 Tensor,
-                torch.randn((e,), device=device_obj, dtype=dtype_obj, generator=generator) * std + mean,
+                torch.randn((e,), device=device_obj, dtype=dtype_obj, generator=generator) * std
+                + mean,
             )
         if self.kind == "uniform":
             low = float(self.params.get("low", -0.1))
@@ -243,7 +245,9 @@ class NetworkBuilder:
         return self
 
     def learning(self, projection: str | tuple[str, str], *, rule: ILearningRule) -> NetworkBuilder:
-        proj_name = projection if isinstance(projection, str) else f"{projection[0]}->{projection[1]}"
+        proj_name = (
+            projection if isinstance(projection, str) else f"{projection[0]}->{projection[1]}"
+        )
         self._learning[proj_name] = rule
         return self
 
@@ -372,7 +376,9 @@ class NetworkBuilder:
             return topology
         values: Tensor
         if isinstance(weights, InitSpec):
-            values = weights.build(e, device=self._device, dtype=self._dtype, seed=self._next_seed())
+            values = weights.build(
+                e, device=self._device, dtype=self._dtype, seed=self._next_seed()
+            )
         elif hasattr(weights, "to") and hasattr(weights, "shape"):
             values = cast(Tensor, weights)
         elif callable(weights):
@@ -399,7 +405,9 @@ class NetworkBuilder:
         return _replace_topology(topology, weights=values)
 
     def _apply_compartments(
-        self, topology: SynapseTopology, compartments: Compartment | str | Tensor | Sequence[Compartment | str] | None
+        self,
+        topology: SynapseTopology,
+        compartments: Compartment | str | Tensor | Sequence[Compartment | str] | None,
     ) -> SynapseTopology:
         if compartments is None:
             return topology
@@ -410,9 +418,10 @@ class NetworkBuilder:
         if isinstance(compartments, str):
             return _replace_topology(topology, target_compartment=_coerce_compartment(compartments))
         if hasattr(compartments, "to"):
-            if hasattr(compartments, "numel") and compartments.numel() != e:
+            _comp = cast(Tensor, compartments)
+            if hasattr(_comp, "numel") and _comp.numel() != e:
                 raise ValueError("compartments tensor length must match number of edges")
-            comp_tensor = compartments.to(
+            comp_tensor = _comp.to(
                 device=torch.device(self._device) if self._device else None, dtype=torch.long
             )
             return _replace_topology(topology, target_compartments=comp_tensor)
@@ -435,9 +444,10 @@ class NetworkBuilder:
         torch = require_torch()
         e = topology.pre_idx.numel()
         if hasattr(receptor_map, "to"):
-            if hasattr(receptor_map, "numel") and receptor_map.numel() != e:
+            _rm = cast(Tensor, receptor_map)
+            if hasattr(_rm, "numel") and _rm.numel() != e:
                 raise ValueError("receptor_map tensor length must match number of edges")
-            receptor = receptor_map.to(
+            receptor = _rm.to(
                 device=torch.device(self._device) if self._device else None, dtype=torch.long
             )
             return _replace_topology(topology, receptor=receptor)

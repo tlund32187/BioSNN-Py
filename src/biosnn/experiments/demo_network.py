@@ -138,7 +138,9 @@ class DemoNetworkConfig:
     hidden_lateral_dist_p_mode: Literal["off", "gaussian"] = "gaussian"
     hidden_lateral_dist_p_sigma: float = 0.20
     hidden_lateral_weight_scale: float = 0.1
-    hidden_lateral_dist_weight_mode: Literal["off", "near_stronger", "near_weaker"] = "near_stronger"
+    hidden_lateral_dist_weight_mode: Literal["off", "near_stronger", "near_weaker"] = (
+        "near_stronger"
+    )
     hidden_lateral_dist_weight_alpha: float = 1.0
     hidden_lateral_dist_weight_floor: float = 0.25
     hidden_lateral_dist_weight_cap: float = 2.0
@@ -177,6 +179,7 @@ class DemoNetworkConfig:
     modgrid_max_elements: int = 16_384
     modgrid_export_every: int = 10
     receptor_export_every: int = 10
+    force_compiled_mode: bool = False
 
 
 def build_network_demo(
@@ -197,6 +200,7 @@ def build_network_demo(
         allow_cuda_sync = run_mode == "dashboard"
     allow_cuda_sync = bool(allow_cuda_sync)
     monitor_async_gpu = cuda_device and not allow_cuda_sync
+    monitor_async_io = bool(cuda_device and not allow_cuda_sync)
 
     dtype = "float32"
     out_dir = Path(cfg.out_dir)
@@ -209,7 +213,9 @@ def build_network_demo(
     output_pops = max(1, int(cfg.output_pops))
 
     input_sizes = _split_counts(cfg.n_in, input_pops)
-    hidden_sizes = _split_counts(cfg.n_hidden, hidden_layers * hidden_pops_per_layer) if hidden_layers else []
+    hidden_sizes = (
+        _split_counts(cfg.n_hidden, hidden_layers * hidden_pops_per_layer) if hidden_layers else []
+    )
     output_sizes = _split_counts(cfg.n_out, output_pops)
 
     populations: list[PopulationSpec] = []
@@ -324,6 +330,7 @@ def build_network_demo(
 
         def make_synapse() -> ISynapseModel:
             return DelayedCurrentSynapse(syn_params_current)
+
     projections: list[ProjectionSpec] = []
     topologies: list[Any] = []
 
@@ -535,7 +542,9 @@ def build_network_demo(
             for pop_idx, pop in enumerate(layer_pops):
                 positions = pop.positions
                 if positions is None:
-                    raise RuntimeError(f"Population {pop.name} is missing positions for hidden_lateral")
+                    raise RuntimeError(
+                        f"Population {pop.name} is missing positions for hidden_lateral"
+                    )
                 topo = build_bipartite_distance_topology(
                     pre_positions=positions,
                     post_positions=positions,
@@ -636,6 +645,7 @@ def build_network_demo(
                 append=False,
                 flush_every=25,
                 async_gpu=monitor_async_gpu,
+                async_io=monitor_async_io,
             ),
         ]
         if cfg.enable_homeostasis:
@@ -646,6 +656,7 @@ def build_network_demo(
                     append=False,
                     flush_every=25,
                     async_gpu=monitor_async_gpu,
+                    async_io=monitor_async_io,
                 )
             )
         if cfg.enable_pruning:
@@ -674,6 +685,7 @@ def build_network_demo(
                 safe_sample=safe_neuron_sample,
                 flush_every=25,
                 async_gpu=monitor_async_gpu,
+                async_io=monitor_async_io,
             ),
         ]
         if not cuda_device or allow_cuda_sync:
@@ -696,6 +708,7 @@ def build_network_demo(
                     allow_cuda_sync=allow_cuda_sync,
                     append=False,
                     flush_every=25,
+                    async_io=monitor_async_io,
                 )
             )
         monitors.append(
@@ -705,6 +718,7 @@ def build_network_demo(
                 append=False,
                 flush_every=25,
                 async_gpu=monitor_async_gpu,
+                async_io=monitor_async_io,
             )
         )
         if cfg.enable_homeostasis:
@@ -715,6 +729,7 @@ def build_network_demo(
                     append=False,
                     flush_every=25,
                     async_gpu=monitor_async_gpu,
+                    async_io=monitor_async_io,
                 )
             )
         if not cuda_device or allow_cuda_sync:
@@ -727,6 +742,7 @@ def build_network_demo(
                     safe_max_edges_sample=safe_edge_sample,
                     append=False,
                     flush_every=25,
+                    async_io=monitor_async_io,
                 )
             )
         if cfg.enable_pruning:
@@ -965,7 +981,9 @@ class _PruningEdgeCountCSVMonitor(IMonitor):
             "step": int(scalar_to_float(step_val)) if step_val is not None else "",
             "t": event.t,
             "edges_total": scalar_to_float(edge_total),
-            "edges_pruned_interval": scalar_to_float(edges_pruned) if edges_pruned is not None else 0.0,
+            "edges_pruned_interval": scalar_to_float(edges_pruned)
+            if edges_pruned is not None
+            else 0.0,
             "projections_pruned_interval": scalar_to_float(projections_pruned)
             if projections_pruned is not None
             else 0.0,
@@ -1017,12 +1035,8 @@ class _NeurogenesisCSVMonitor(IMonitor):
             "added_edges_interval": scalar_to_float(
                 event.scalars.get("neurogenesis/added_edges_interval", 0.0)
             ),
-            "events_total": scalar_to_float(
-                event.scalars.get("neurogenesis/events_total", 0.0)
-            ),
-            "trigger_score": scalar_to_float(
-                event.scalars.get("neurogenesis/trigger_score", 0.0)
-            ),
+            "events_total": scalar_to_float(event.scalars.get("neurogenesis/events_total", 0.0)),
+            "trigger_score": scalar_to_float(event.scalars.get("neurogenesis/trigger_score", 0.0)),
             "target_activity_ema": scalar_to_float(
                 event.scalars.get("neurogenesis/target_activity_ema", 0.0)
             ),
@@ -1178,19 +1192,27 @@ def _apply_lateral_weights(
     dtype: str,
 ) -> Any:
     torch = require_torch()
-    e = int(topology.pre_idx.numel()) if hasattr(topology.pre_idx, "numel") else len(topology.pre_idx)
+    e = (
+        int(topology.pre_idx.numel())
+        if hasattr(topology.pre_idx, "numel")
+        else len(topology.pre_idx)
+    )
     if e <= 0:
         return topology
     device_obj = torch.device(device) if device else None
     dtype_obj = getattr(torch, dtype) if isinstance(dtype, str) else dtype
-    weights = torch.full((e,), float(weight_init) * float(weight_scale), device=device_obj, dtype=dtype_obj)
+    weights = torch.full(
+        (e,), float(weight_init) * float(weight_scale), device=device_obj, dtype=dtype_obj
+    )
     mode = ei_mode.lower()
     frac = 0.5 if mode == "balanced" else float(inhib_frac)
     frac = max(0.0, min(1.0, frac))
     if frac > 0.0:
         generator = None
         if seed is not None:
-            generator = torch.Generator(device=device_obj) if device_obj is not None else torch.Generator()
+            generator = (
+                torch.Generator(device=device_obj) if device_obj is not None else torch.Generator()
+            )
             generator.manual_seed(seed)
         mask = torch.rand((e,), device=device_obj, generator=generator) < frac
         selected = mask.nonzero(as_tuple=False).flatten()
@@ -1292,9 +1314,13 @@ def _sample_myelin(
     else:
         generator = None
         if seed is not None:
-            generator = torch.Generator(device=device_obj) if device_obj is not None else torch.Generator()
+            generator = (
+                torch.Generator(device=device_obj) if device_obj is not None else torch.Generator()
+            )
             generator.manual_seed(seed)
-        values = torch.randn((e,), device=device_obj, dtype=dtype_obj, generator=generator) * float(std)
+        values = torch.randn((e,), device=device_obj, dtype=dtype_obj, generator=generator) * float(
+            std
+        )
         values = values + float(mean)
     return torch.clamp(values, 0.0, 1.0)
 

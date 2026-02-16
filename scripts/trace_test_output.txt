@@ -1,0 +1,47 @@
+﻿After pre fire: pre_trace = [1.0, 1.0, 0.0, 0.0]
+  post_trace = [0.0, 0.0, 0.0, 0.0]
+  eligibility = [0.0, 0.0, 0.0, 0.0]
+After decay: pre_trace = ['0.9048', '0.9048', '0.0000', '0.0000']
+  eligibility = ['0.0000', '0.0000', '0.0000', '0.0000']
+After post fire (causal pairing):
+  pre_trace = ['0.8607', '0.8607', '0.0000', '0.0000']
+  eligibility = ['0.860708', '0.860708', '0.000000', '0.000000']
+  causal edge elig = 0.860708 (should be > 0)
+  non-causal edge elig = 0.000000 (should be ~0)
+
+With DA=1.0:
+  dw causal = 0.084367 (should be > 0)
+  dw non-causal = 0.000000 (should be ~0)
+
+=== TRACE STDP VERIFICATION PASSED ===
+
+============================================================
+
+Edge 0 (pre@2, post@5):
+  Instantaneous elig: -0.521615
+  Trace-based elig:   0.794534
+  Ratio: -1.5232188650621865
+.\.venv\Scripts\python.exe : Traceback (most recent call last):
+At line:1 char:33
++ ... BYTECODE=1; .\.venv\Scripts\python.exe scripts\test_trace_stdp.py 2>& ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last) 
+   ::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\tlund\OneDrive - Storion\Documents\Personal\AI 
+Project\ChatGPT Code\BioSnn - Py\BioSNN-Py\scripts\test_trace_stdp.py", line 
+174, in <module>
+    test_trace_vs_instantaneous()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\tlund\OneDrive - Storion\Documents\Personal\AI 
+Project\ChatGPT Code\BioSnn - Py\BioSNN-Py\scripts\test_trace_stdp.py", line 
+166, in test_trace_vs_instantaneous
+    print("  \u2192 Trace STDP has stronger signal")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tlund\AppData\Local\Programs\Python\Python313\Lib\encodings\cp
+1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2192' in 
+position 2: character maps to <undefined>

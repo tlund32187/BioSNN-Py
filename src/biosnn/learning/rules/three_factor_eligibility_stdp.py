@@ -22,6 +22,7 @@ class ThreeFactorEligibilityStdpParams:
     clamp_min: float | None = None
     clamp_max: float | None = None
     modulator_kind: ModulatorKind = ModulatorKind.DOPAMINE
+    modulator_threshold: float = 0.0
     lazy_decay_enabled: bool = True
     lazy_decay_step_dtype: str = "int32"
     lazy_decay_dense: bool = False
@@ -45,7 +46,7 @@ class ThreeFactorEligibilityStdpRule(ILearningRule):
     """
 
     name = "three_factor_eligibility_stdp"
-    supports_sparse = True
+    supports_sparse = False
 
     def __init__(self, params: ThreeFactorEligibilityStdpParams | None = None) -> None:
         self.params = params or ThreeFactorEligibilityStdpParams()
@@ -93,7 +94,9 @@ class ThreeFactorEligibilityStdpRule(ILearningRule):
         if sparse_mode:
             assert active_edges is not None
             if state.eligibility.numel() == 0 and active_edges.numel() > 0:
-                raise ValueError("Eligibility state is empty while sparse active edges are present.")
+                raise ValueError(
+                    "Eligibility state is empty while sparse active edges are present."
+                )
             if active_edges.numel() != weights.numel():
                 raise ValueError(
                     "Sparse learning requires active_edges shape to match batch weights shape: "
@@ -135,6 +138,8 @@ class ThreeFactorEligibilityStdpRule(ILearningRule):
                 state.last_update_step.fill_(int(state.step))
 
         gate = _resolve_gate(batch=batch, like=weights, kind=self.params.modulator_kind)
+        if self.params.modulator_threshold > 0.0:
+            gate = gate * (gate.abs() >= self.params.modulator_threshold).to(dtype=gate.dtype)
         dw = e_local * gate
         dw.mul_(float(self.params.lr))
         if self.params.weight_decay:
@@ -194,7 +199,11 @@ def _resolve_gate(*, batch: LearningBatch, like: Tensor, kind: ModulatorKind) ->
         return gate
     if gate.numel() == 1:
         return cast(Tensor, gate.reshape(()).expand_as(like))
-    if batch.extras and "post_idx" in batch.extras and batch.extras["post_idx"].numel() == like.numel():
+    if (
+        batch.extras
+        and "post_idx" in batch.extras
+        and batch.extras["post_idx"].numel() == like.numel()
+    ):
         post_idx = batch.extras["post_idx"].to(device=like.device, dtype=torch.long)
         try:
             return cast(Tensor, gate.index_select(0, post_idx))

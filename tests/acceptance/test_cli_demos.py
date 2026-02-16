@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,9 @@ pytestmark = pytest.mark.acceptance
         ("dopamine_plasticity", ["--da_amount", "1.2", "--da_step", "8"]),
     ],
 )
-def test_cli_feature_demos_smoke(monkeypatch, tmp_path: Path, demo_name: str, extra_args: list[str]) -> None:
+def test_cli_feature_demos_smoke(
+    monkeypatch, tmp_path: Path, demo_name: str, extra_args: list[str]
+) -> None:
     pytest.importorskip("torch")
     run_dir = tmp_path / demo_name
     args = cli._parse_args(
@@ -216,3 +219,42 @@ def test_cli_feature_demo_can_disable_monitors(monkeypatch, tmp_path: Path) -> N
     )
     for name in monitor_outputs:
         assert not (run_dir / name).exists(), f"Monitor artifact should be disabled: {name}"
+
+
+def test_cli_compiled_dashboard_mode(monkeypatch, tmp_path: Path) -> None:
+    """--compiled flag forces compiled_mode in dashboard mode and records it in run_features.json."""
+    pytest.importorskip("torch")
+    run_dir = tmp_path / "compiled_dashboard"
+    args = cli._parse_args(
+        [
+            "--demo",
+            "propagation_impulse",
+            "--mode",
+            "dashboard",
+            "--compiled",
+            "--device",
+            "cpu",
+            "--steps",
+            "20",
+            "--no-open",
+        ]
+    )
+
+    monkeypatch.setattr(cli, "_parse_args", lambda *_: args)
+    monkeypatch.setattr(cli, "_make_run_dir", lambda *_: run_dir)
+    monkeypatch.setattr(cli, "_should_launch_dashboard", lambda *_: False)
+
+    cli.main()
+
+    features_path = run_dir / "run_features.json"
+    assert features_path.exists(), "run_features.json should be written"
+    features = json.loads(features_path.read_text(encoding="utf-8"))
+    assert features.get("compiled_mode") is True, (
+        "compiled_mode should be True in run_features.json"
+    )
+
+    # Artifacts should still be written (dashboard mode).
+    for name in ("topology.json", "neuron.csv", "metrics.csv"):
+        path = run_dir / name
+        assert path.exists(), f"Missing artifact {name}"
+        assert path.stat().st_size > 0, f"Empty artifact {name}"

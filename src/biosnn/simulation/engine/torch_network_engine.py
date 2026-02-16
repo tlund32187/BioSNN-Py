@@ -191,6 +191,8 @@ class TorchNetworkEngine(ISimulationEngine):
 
         self.last_projection_drive: dict[str, Mapping[Compartment, Tensor]] = {}
         self.last_d_weights: dict[str, Tensor] = {}
+        self._d_weights_accum_sum: dict[str, Tensor] = {}
+        self._d_weights_accum_count: dict[str, Tensor] = {}
         self._learning_scratch: dict[str, _LearningScratch] = {}
         self._proj_runtime_list: list[_ProjectionRuntime] = []
         self._proj_plan_list: list[_CompiledProjectionPlan] = []
@@ -217,6 +219,138 @@ class TorchNetworkEngine(ISimulationEngine):
         self._modulator_kinds = self._modulator_subsystem.collect_modulator_kinds(self._mod_specs)
 
         self._topology_subsystem.validate_specs(self._pop_specs, self._proj_specs)
+
+    # ------------------------------------------------------------------
+    # d_weights accumulator – tracks total |dw| across multiple steps
+    # ------------------------------------------------------------------
+
+    def reset_d_weights_accum(self) -> None:
+        """Clear the accumulated d_weights counters.
+
+        Call this before a multi-step window (e.g. reward delivery) so that
+        ``get_d_weights_accum`` returns the aggregate over that window.
+        """
+        for t in self._d_weights_accum_sum.values():
+            t.zero_()
+        for t in self._d_weights_accum_count.values():
+            t.zero_()
+
+    def get_d_weights_accum(self, proj_name: str) -> tuple[float, int]:
+        """Return ``(abs_sum, element_count)`` accumulated since the last reset.
+
+        If no updates were recorded for *proj_name* the element count is 0 and
+        the caller should treat the mean as 0.0.  This is the *only* place
+        the GPU accumulator values are transferred to the CPU.
+        """
+        s = self._d_weights_accum_sum.get(proj_name)
+        c = self._d_weights_accum_count.get(proj_name)
+        if s is None or c is None:
+            return 0.0, 0
+        return float(s.item()), int(c.item())
+
+    # ------------------------------------------------------------------
+    # Learning trace reset – zero eligibility / pre / post traces
+    # ------------------------------------------------------------------
+
+    def reset_learning_traces(self) -> None:
+        """Zero eligibility traces and STDP pre/post traces for all projections.
+
+        Call this between trials when you want each trial's reward signal
+        to modulate only the current trial's eligibility – preventing
+        stale eligibility from a previous trial from being reinforced by an
+        unrelated dopamine signal.
+
+        Learned weights are **not** affected.
+        """
+        for ps in self._proj_states.values():
+            ls = ps.learning_state
+            if ls is None:
+                continue
+            # Zero any tensor attributes whose names contain "eligibility"
+            # or "trace" – covers RStdpEligibilityState, ThreeFactorState, etc.
+            for attr in ("eligibility", "pre_trace", "post_trace", "e_trace", "elig"):
+                t = getattr(ls, attr, None)
+                if t is not None and hasattr(t, "zero_"):
+                    t.zero_()
+
+    # ------------------------------------------------------------------
+    # Inter-trial state reset – clears transient neuron & synapse state
+    # while preserving learned weights and eligibility traces.
+    # ------------------------------------------------------------------
+
+    def reset_inter_trial_state(self, *, populations: Sequence[str] | None = None) -> None:
+        """Reset transient dynamic state between trials.
+
+        This zeros neuron membrane voltages (→ resting), adaptation currents,
+        refractory counters, receptor filter conductances, and ring-buffer
+        delayed-spike state — everything that can "carry over" from the
+        previous trial.  Synaptic weights and learning eligibility traces
+        are **not** affected.
+
+        Parameters
+        ----------
+        populations
+            If given, only reset populations (and projections *targeting*
+            those populations) whose names appear in this sequence.
+            If ``None``, reset **all** populations and projections.
+        """
+        target_set: set[str] | None = set(populations) if populations is not None else None
+
+        # --- neuron states ------------------------------------------------
+        for spec in self._pop_specs:
+            if target_set is not None and spec.name not in target_set:
+                continue
+            pop_state = self._pop_states.get(spec.name)
+            if pop_state is None:
+                continue
+            if hasattr(spec.model, "reset_state"):
+                spec.model.reset_state(pop_state.state, ctx=self._ctx)
+            pop_state.spikes.zero_()
+
+        # --- synapse transient state (receptor g, ring buffers) -----------
+        for proj in self._proj_specs:
+            if target_set is not None and proj.post not in target_set:
+                continue
+            proj_state = self._proj_states.get(proj.name)
+            if proj_state is None:
+                continue
+            syn_state = proj_state.state
+            # Zero receptor conductances (NMDA / AMPA / GABA_A carry-over)
+            if hasattr(syn_state, "receptor_g") and syn_state.receptor_g is not None:
+                for g in syn_state.receptor_g.values():
+                    g.zero_()
+            # Zero ring buffer (delayed spikes in transit)
+            if hasattr(syn_state, "post_ring") and syn_state.post_ring is not None:
+                for ring in syn_state.post_ring.values():
+                    ring.zero_()
+            if hasattr(syn_state, "post_out") and syn_state.post_out is not None:
+                for out in syn_state.post_out.values():
+                    out.zero_()
+            if hasattr(syn_state, "post_event_ring") and syn_state.post_event_ring is not None:
+                for event_ring in syn_state.post_event_ring.values():
+                    if hasattr(event_ring, "clear"):
+                        event_ring.clear()
+            # Zero ancillary receptor buffers
+            for buf_name in (
+                "receptor_input_buf",
+                "receptor_post_v_buf",
+                "receptor_current_buf",
+                "receptor_nmda_block_buf",
+            ):
+                buf_dict = getattr(syn_state, buf_name, None)
+                if buf_dict is not None:
+                    for buf in buf_dict.values():
+                        buf.zero_()
+            # Zero pre-activity trace buffer
+            if hasattr(syn_state, "pre_activity_buf") and syn_state.pre_activity_buf is not None:
+                syn_state.pre_activity_buf.zero_()
+
+        # --- drive buffers ------------------------------------------------
+        for name, buf_dict in self._drive_buffers.items():
+            if target_set is not None and name not in target_set:
+                continue
+            for buf in buf_dict.values():
+                buf.zero_()
 
     def reset(self, *, config: SimulationConfig) -> None:
         torch = require_torch()
@@ -325,9 +459,7 @@ class TorchNetworkEngine(ISimulationEngine):
             fast_mode=self._fast_mode,
         )
         pop_map = {spec.name: spec for spec in self._pop_specs}
-        compile_jobs: list[
-            tuple[int, ProjectionSpec, SynapseTopology, dict[str, Any], bool]
-        ] = []
+        compile_jobs: list[tuple[int, ProjectionSpec, SynapseTopology, dict[str, Any], bool]] = []
 
         for idx, proj in enumerate(self._proj_specs):
             edge_count = self._topology_subsystem.edge_count(proj.topology)
@@ -335,7 +467,9 @@ class TorchNetworkEngine(ISimulationEngine):
             learn_state = None
             if proj.learning is not None:
                 learn_state = proj.learning.init_state(edge_count, ctx=self._ctx)
-            self._proj_states[proj.name] = _ProjectionState(state=syn_state, learning_state=learn_state)
+            self._proj_states[proj.name] = _ProjectionState(
+                state=syn_state, learning_state=learn_state
+            )
 
             topology = proj.topology
             if topology.weights is None and getattr(syn_state, "bind_weights_to_topology", False):
@@ -361,10 +495,14 @@ class TorchNetworkEngine(ISimulationEngine):
                 requirements=projection_requirements,
                 device=self._device,
             )
-            requires_ring = compile_flags.build_edges_by_delay or compile_flags.build_sparse_delay_mats
+            requires_ring = (
+                compile_flags.build_edges_by_delay or compile_flags.build_sparse_delay_mats
+            )
             if compile_flags.build_sparse_delay_mats and hasattr(proj.synapse, "params"):
                 params = getattr(proj.synapse, "params", None)
-                receptor_scale = getattr(params, "receptor_scale", None) if params is not None else None
+                receptor_scale = (
+                    getattr(params, "receptor_scale", None) if params is not None else None
+                )
                 if receptor_scale is not None:
                     meta = dict(topology.meta) if topology.meta else {}
                     meta.setdefault("receptor_scale", receptor_scale)
@@ -479,7 +617,9 @@ class TorchNetworkEngine(ISimulationEngine):
             proj = spec_by_name[plan.name]
             proj_state = self._proj_states[plan.name]
             learning = proj.learning
-            supports_sparse = bool(getattr(learning, "supports_sparse", False)) if learning is not None else False
+            supports_sparse = (
+                bool(getattr(learning, "supports_sparse", False)) if learning is not None else False
+            )
             use_sparse = bool(proj.sparse_learning and supports_sparse)
             runtimes.append(
                 _ProjectionRuntime(
@@ -504,7 +644,9 @@ class TorchNetworkEngine(ISimulationEngine):
             self._monitor_subsystem.validate_fast_mode_monitors(monitor_list)
         self._monitors = monitor_list
         self._monitor_requirements = self._monitor_subsystem.collect_requirements(monitor_list)
-        compile_requirements = self._monitor_subsystem.collect_compilation_requirements(monitor_list)
+        compile_requirements = self._monitor_subsystem.collect_compilation_requirements(
+            monitor_list
+        )
         self._network_requirements = self._monitor_subsystem.build_network_requirements(
             monitor_list,
             monitor_requirements=self._monitor_requirements,
@@ -519,9 +661,7 @@ class TorchNetworkEngine(ISimulationEngine):
                 self._pop_specs,
                 self._proj_specs,
             )
-            prior_spikes = {
-                name: self._pop_states[name].spikes.clone() for name in self._pop_order
-            }
+            prior_spikes = {name: self._pop_states[name].spikes.clone() for name in self._pop_order}
             self._init_compiled_buffers(pop_compartments)
             for name, previous in prior_spikes.items():
                 current = self._pop_states[name].spikes
@@ -573,7 +713,9 @@ class TorchNetworkEngine(ISimulationEngine):
 
         post_membrane_by_pop: dict[str, Mapping[Compartment, Tensor]] = {}
         required_post_pops = {
-            runtime.plan.post_name for runtime in self._proj_runtime_list if runtime.needs_post_membrane
+            runtime.plan.post_name
+            for runtime in self._proj_runtime_list
+            if runtime.needs_post_membrane
         }
         if required_post_pops:
             post_membrane_by_pop = _collect_post_membrane_by_pop(
@@ -716,7 +858,9 @@ class TorchNetworkEngine(ISimulationEngine):
                 ),
                 device=self._device,
                 use_sparse=runtime.use_sparse_learning,
-                scratch=self._get_learning_scratch(proj.name) if self._learning_use_scratch else None,
+                scratch=self._get_learning_scratch(proj.name)
+                if self._learning_use_scratch
+                else None,
             )
             learning_dt = self._dt * float(max(1, runtime.learn_every))
             new_state, res = runtime.learning.step(
@@ -742,6 +886,16 @@ class TorchNetworkEngine(ISimulationEngine):
             )
             self._learning_subsystem.apply_weight_clamp(weights, proj)
             self.last_d_weights[proj.name] = res.d_weights
+            if int(res.d_weights.numel()) > 0:
+                acc_s = self._d_weights_accum_sum.get(proj.name)
+                if acc_s is None:
+                    acc_s = res.d_weights.new_zeros(())
+                    self._d_weights_accum_sum[proj.name] = acc_s
+                    self._d_weights_accum_count[proj.name] = res.d_weights.new_zeros(
+                        (), dtype=torch.long
+                    )
+                acc_s.add_(res.d_weights.abs().sum())
+                self._d_weights_accum_count[proj.name].add_(res.d_weights.numel())
             active_edges_by_proj[proj.name] = active_edges
 
         self._update_structural_plasticity(active_edges_by_proj=active_edges_by_proj)
@@ -803,17 +957,23 @@ class TorchNetworkEngine(ISimulationEngine):
                     )
                 )
         if needs_synapse_state:
-            event_tensors.update(self._event_subsystem.projection_tensors(self._proj_specs, self._proj_states))
+            event_tensors.update(
+                self._event_subsystem.projection_tensors(self._proj_specs, self._proj_states)
+            )
         elif needs_projection_weights:
             event_tensors.update(
                 self._event_subsystem.projection_weight_tensors(self._proj_specs, self._proj_states)
             )
         if needs_learning_state:
-            event_tensors.update(self._event_subsystem.learning_tensors(self._proj_specs, self._proj_states))
+            event_tensors.update(
+                self._event_subsystem.learning_tensors(self._proj_specs, self._proj_states)
+            )
         if needs_homeostasis_state:
             event_tensors.update(self._event_subsystem.homeostasis_tensors(self._homeostasis))
         if needs_modulator_state:
-            event_tensors.update(self._event_subsystem.modulator_tensors(self._mod_specs, self._mod_states))
+            event_tensors.update(
+                self._event_subsystem.modulator_tensors(self._mod_specs, self._mod_states)
+            )
 
         scalars: dict[str, Scalar] = {
             "step": float(self._step),
@@ -894,7 +1054,9 @@ class TorchNetworkEngine(ISimulationEngine):
 
         post_membrane_by_pop: dict[str, Mapping[Compartment, Tensor]] = {}
         required_post_pops = {
-            runtime.plan.post_name for runtime in self._proj_runtime_list if runtime.needs_post_membrane
+            runtime.plan.post_name
+            for runtime in self._proj_runtime_list
+            if runtime.needs_post_membrane
         }
         if required_post_pops:
             post_membrane_by_pop = _collect_post_membrane_by_pop(
@@ -1034,7 +1196,9 @@ class TorchNetworkEngine(ISimulationEngine):
                 ),
                 device=self._device,
                 use_sparse=runtime.use_sparse_learning,
-                scratch=self._get_learning_scratch(proj.name) if self._learning_use_scratch else None,
+                scratch=self._get_learning_scratch(proj.name)
+                if self._learning_use_scratch
+                else None,
             )
             learning_dt = self._dt * float(max(1, runtime.learn_every))
             new_state, res = runtime.learning.step(
@@ -1060,6 +1224,16 @@ class TorchNetworkEngine(ISimulationEngine):
             )
             self._learning_subsystem.apply_weight_clamp(weights, proj)
             self.last_d_weights[proj.name] = res.d_weights
+            if int(res.d_weights.numel()) > 0:
+                acc_s = self._d_weights_accum_sum.get(proj.name)
+                if acc_s is None:
+                    acc_s = res.d_weights.new_zeros(())
+                    self._d_weights_accum_sum[proj.name] = acc_s
+                    self._d_weights_accum_count[proj.name] = res.d_weights.new_zeros(
+                        (), dtype=torch.long
+                    )
+                acc_s.add_(res.d_weights.abs().sum())
+                self._d_weights_accum_count[proj.name].add_(res.d_weights.numel())
             active_edges_by_proj[proj.name] = active_edges
 
         self._update_structural_plasticity(active_edges_by_proj=active_edges_by_proj)
@@ -1081,7 +1255,9 @@ class TorchNetworkEngine(ISimulationEngine):
         spikes_global = self._spikes_global
         spike_count = spikes_global.sum() if spikes_global.numel() else spikes_global.new_zeros(())
         spike_fraction = (
-            spike_count / float(spikes_global.numel()) if spikes_global.numel() else spikes_global.new_zeros(())
+            spike_count / float(spikes_global.numel())
+            if spikes_global.numel()
+            else spikes_global.new_zeros(())
         )
 
         scalars = self._compiled_scalars or {}
@@ -1364,9 +1540,7 @@ class TorchNetworkEngine(ISimulationEngine):
                 self._pop_specs,
                 self._proj_specs,
             )
-            prior_spikes = {
-                name: self._pop_states[name].spikes.clone() for name in self._pop_order
-            }
+            prior_spikes = {name: self._pop_states[name].spikes.clone() for name in self._pop_order}
             self._init_compiled_buffers(pop_compartments)
             for name, previous in prior_spikes.items():
                 current = self._pop_states[name].spikes
@@ -1507,9 +1681,10 @@ class TorchNetworkEngine(ISimulationEngine):
             self._pop_slice_tuples[spec.name] = (start, end)
             total = end
 
-        self._spikes_global = torch.zeros((total,), device=self._device, dtype=torch.bool)
+        spikes_global = torch.zeros((total,), device=self._device, dtype=torch.bool)
+        self._spikes_global = spikes_global
         self._pop_spike_views = {
-            name: self._spikes_global[self._pop_slices[name]] for name in self._pop_order
+            name: spikes_global[self._pop_slices[name]] for name in self._pop_order
         }
         for name in self._pop_order:
             pop_state = self._pop_states[name]
@@ -1520,7 +1695,8 @@ class TorchNetworkEngine(ISimulationEngine):
         for spec in self._pop_specs:
             comp_union.update(pop_compartments.get(spec.name, spec.model.compartments))
         self._drive_global = {
-            comp: torch.zeros((total,), device=self._device, dtype=self._dtype) for comp in comp_union
+            comp: torch.zeros((total,), device=self._device, dtype=self._dtype)
+            for comp in comp_union
         }
         self._drive_global_buffers = list(self._drive_global.values())
         self._drive_buffers = {
@@ -1596,7 +1772,9 @@ class TorchNetworkEngine(ISimulationEngine):
                     if missing:
                         dtype = torch.promote_types(dtype, torch.float32)
                     if getattr(dtype, "is_floating_point", False):
-                        buffer = torch.full((total,), float("nan"), device=self._device, dtype=dtype)
+                        buffer = torch.full(
+                            (total,), float("nan"), device=self._device, dtype=dtype
+                        )
                     else:
                         buffer = torch.zeros((total,), device=self._device, dtype=dtype)
                     compiled_event_tensors[key] = buffer
@@ -1621,7 +1799,9 @@ class TorchNetworkEngine(ISimulationEngine):
                 self._event_subsystem.learning_tensors(self._proj_specs, self._proj_states)
             )
         if needs_homeostasis_state:
-            compiled_event_tensors.update(self._event_subsystem.homeostasis_tensors(self._homeostasis))
+            compiled_event_tensors.update(
+                self._event_subsystem.homeostasis_tensors(self._homeostasis)
+            )
         if needs_modulator_state:
             compiled_event_tensors.update(
                 self._event_subsystem.modulator_tensors(self._mod_specs, self._mod_states)
@@ -1666,7 +1846,9 @@ class TorchNetworkEngine(ISimulationEngine):
         )
 
 
-def _validate_specs(populations: Sequence[PopulationSpec], projections: Sequence[ProjectionSpec]) -> None:
+def _validate_specs(
+    populations: Sequence[PopulationSpec], projections: Sequence[ProjectionSpec]
+) -> None:
     names = {spec.name for spec in populations}
     if len(names) != len(populations):
         raise ValueError("Population names must be unique")
@@ -1695,9 +1877,10 @@ def _collect_modulator_kinds(mod_specs: Sequence[ModulatorSpec]) -> tuple[Modula
 
 def _synapse_needs_post_membrane(synapse: ISynapseModel) -> bool:
     reqs = None
-    if hasattr(synapse, "compilation_requirements"):
+    compile_fn = getattr(synapse, "compilation_requirements", None)
+    if callable(compile_fn):
         try:
-            reqs = synapse.compilation_requirements()
+            reqs = compile_fn()
         except Exception:
             reqs = None
     if isinstance(reqs, Mapping) and "needs_post_membrane" in reqs:
@@ -1825,9 +2008,10 @@ def _compile_flags_for_projection(
     wants_fused_csr: bool | None = None
     store_sparse_by_delay_override: bool | None = None
     reqs = None
-    if hasattr(proj.synapse, "compilation_requirements"):
+    compile_fn = getattr(proj.synapse, "compilation_requirements", None)
+    if callable(compile_fn):
         try:
-            reqs = proj.synapse.compilation_requirements()
+            reqs = compile_fn()
         except Exception:
             reqs = None
     if isinstance(reqs, Mapping):
@@ -1847,7 +2031,9 @@ def _compile_flags_for_projection(
         # Backward compatibility for legacy requirement dicts.
         wants_fused_sparse = True
 
-    wants_fused_sparse = bool(wants_fused_sparse or monitor_requirements.get("wants_fused_sparse", False))
+    wants_fused_sparse = bool(
+        wants_fused_sparse or monitor_requirements.get("wants_fused_sparse", False)
+    )
     wants_by_delay_sparse = bool(
         wants_by_delay_sparse or monitor_requirements.get("wants_by_delay_sparse", False)
     )
@@ -1886,7 +2072,9 @@ def _compile_flags_for_projection(
     store_sparse_by_delay = bool(build_sparse_delay_mats and wants_by_delay_sparse)
     if store_sparse_by_delay_override is not None:
         store_sparse_by_delay = bool(store_sparse_by_delay_override)
-    fuse_delay_buckets = bool(build_sparse_delay_mats and (wants_fused_sparse or not store_sparse_by_delay))
+    fuse_delay_buckets = bool(
+        build_sparse_delay_mats and (wants_fused_sparse or not store_sparse_by_delay)
+    )
 
     return _ProjectionCompileFlags(
         build_edges_by_delay=build_edges_by_delay,
@@ -2107,9 +2295,9 @@ def _collect_drive_compartments(
                 except (TypeError, ValueError):
                     continue
                 if 0 <= idx < len(comp_order):
-                    comps.add(comp_order[idx])
+                    comps.add(cast(Compartment, comp_order[idx]))
             continue
-        comps.update(comp_order)
+        comps.update(cast(tuple[Compartment, ...], comp_order))
     return {name: tuple(comps) for name, comps in comps_by_pop.items()}
 
 
@@ -2258,8 +2446,8 @@ def _apply_weight_clamp(weights: Tensor, proj: ProjectionSpec) -> None:
     if proj.meta:
         clamp_min = proj.meta.get("clamp_min")
         clamp_max = proj.meta.get("clamp_max")
-    if hasattr(proj.synapse, "params"):
-        params = proj.synapse.params
+    params = getattr(proj.synapse, "params", None)
+    if params is not None:
         clamp_min = getattr(params, "clamp_min", clamp_min)
         clamp_max = getattr(params, "clamp_max", clamp_max)
     if clamp_min is None and clamp_max is None:
@@ -2286,7 +2474,9 @@ def _merge_population_tensors(
         for spec in pop_specs:
             value = tensors_by_pop.get(spec.name, {}).get(key)
             if value is None:
-                parts.append(torch.full((spec.n,), float("nan"), device=device, dtype=torch.float32))
+                parts.append(
+                    torch.full((spec.n,), float("nan"), device=device, dtype=torch.float32)
+                )
             else:
                 parts.append(value)
         merged[key] = torch.cat(parts)
